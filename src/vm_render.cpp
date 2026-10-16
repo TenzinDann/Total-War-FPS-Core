@@ -635,6 +635,40 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.magSize = static_cast<int>(IniFloat(ini, L"mag_size", static_cast<float>(s.magSize)));
     s.reloadRefill = IniFloat(ini, L"reload_refill", s.reloadRefill);
     s.reloadEmptyRefill = IniFloat(ini, L"reload_empty_refill", s.reloadEmptyRefill);
+    GetPrivateProfileStringW(L"viewmodel", L"weapon_id", s.weaponId, s.weaponId, 64, ini);
+    GetPrivateProfileStringW(L"viewmodel", L"anim_sounds", s.animSounds, s.animSounds, 128, ini);
+    s.animSoundVolume = IniFloat(ini, L"anim_sound_volume", s.animSoundVolume);
+    GetPrivateProfileStringW(L"viewmodel", L"step_foot", s.stepFoot, s.stepFoot, 512, ini);
+    GetPrivateProfileStringW(L"viewmodel", L"step_cloth_run", s.stepClothRun, s.stepClothRun, 512, ini);
+    GetPrivateProfileStringW(L"viewmodel", L"step_cloth_sprint", s.stepClothSprint, s.stepClothSprint, 512, ini);
+    GetPrivateProfileStringW(L"viewmodel", L"step_rattle", s.stepRattle, s.stepRattle, 512, ini);
+    s.stepFootVolume = IniFloat(ini, L"step_foot_volume", s.stepFootVolume);
+    s.stepClothVolume = IniFloat(ini, L"step_cloth_volume", s.stepClothVolume);
+    s.stepRattleVolume = IniFloat(ini, L"step_rattle_volume", s.stepRattleVolume);
+    s.stepSprintGain = IniFloat(ini, L"step_sprint_gain", s.stepSprintGain);
+    s.stepAdsGain = IniFloat(ini, L"step_ads_gain", s.stepAdsGain);
+    auto fracList = [&](const wchar_t* key, float* out, int& n) {
+        wchar_t buf[256] = L"";
+        GetPrivateProfileStringW(L"viewmodel", key, L"", buf, 256, ini);
+        if (!buf[0]) return;
+        n = 0;
+        for (wchar_t* p = buf; *p && n < 16;) {
+            wchar_t* e = nullptr;
+            float v = static_cast<float>(wcstod(p, &e));
+            if (e == p) break;
+            if (v >= 0.f && v < 1.f) out[n++] = v;
+            p = e;
+            while (*p == L',' || *p == L' ' || *p == L';') ++p;
+        }
+    };
+    fracList(L"sprint_steps", s.sprintSteps, s.sprintStepN);
+    fracList(L"tac_sprint_steps", s.tacSprintSteps, s.tacSprintStepN);
+    s.weaponDefault = IniFloat(ini, L"weapon_default", s.weaponDefault ? 1.f : 0.f) != 0.f;
+    {
+        wchar_t pw[64] = L"";
+        GetPrivateProfileStringW(L"viewmodel", L"projectile", L"", pw, 64, ini);
+        if (pw[0] && WideCharToMultiByte(CP_UTF8, 0, pw, -1, s.projectile, sizeof s.projectile, nullptr, nullptr) <= 0) s.projectile[0] = 0;
+    }
     if (!(s.fireLfeVolume >= 0.f && s.fireLfeVolume <= 2.f)) s.fireLfeVolume = 0.7f;
     if (!(s.fireAtmoVolume >= 0.f && s.fireAtmoVolume <= 2.f)) s.fireAtmoVolume = 0.7f;
     if (!(s.fireTailVolume >= 0.f && s.fireTailVolume <= 2.f)) s.fireTailVolume = 0.7f;

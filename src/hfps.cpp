@@ -719,6 +719,7 @@ struct State {
     unsigned tpGuarded = 0, tpGuardSkipped = 0, guardLogs = 0;
     uintptr_t fpProj = 0;
     int32_t fpProjId = -1;
+    int projFor = -1;
     bool speedApplied = false;
     uintptr_t speedRec = 0;
     float speedOrig = 0, massOrig = 0;
@@ -1056,20 +1057,22 @@ void Enter(uintptr_t mgr) {
     }
     S.fpProj = 0;
     S.fpProjId = -1;
+    S.projFor = vmgame::CurrentWeapon();
     S.tracerLogs = 0;
     S.movingLogs = 0;
     S.aimShots = S.aimSoldier = S.aimGround = S.aimRange = S.aimMoving = 0;
     S.aimSpeedSum = S.aimSpeedMax = S.aimLeadSum = S.aimSelfSpeedSum = 0;
     S.tAimStat = Now();
-    if (g_shotOk && cfg.fireProjectile[0]) {
-        S.fpProj = FindProjectile(cfg.fireProjectile, &S.fpProjId);
+    const char* wantProj = vmgame::WeaponProjectile(S.projFor)[0] ? vmgame::WeaponProjectile(S.projFor) : cfg.fireProjectile;
+    if (g_shotOk && wantProj[0]) {
+        S.fpProj = FindProjectile(wantProj, &S.fpProjId);
         if (S.fpProj && S.fpProjId >= 0) {
             float sp = 0;
             int32_t ap = 0, n = 0;
             Rd(S.fpProj + 0x64, sp);
             Rd(S.fpProj + 0x74, ap);
             Rd(S.fpProj + 0x4c, n);
-            Log("fire: first-person gun projectile '%s' id=%d record %p (speed %.0f, ap %d, per shot %d)", cfg.fireProjectile,
+            Log("fire: first-person gun projectile '%s' id=%d record %p (speed %.0f, ap %d, per shot %d)", wantProj,
                 S.fpProjId, (void*)S.fpProj, sp, ap, n);
         } else {
             S.fpProj = 0;
@@ -1077,7 +1080,7 @@ void Enter(uintptr_t mgr) {
             uintptr_t vrec = FindProjectile("wh2_cst_rifle_bullet", &vid);
             Log("fire: projectile '%s' not found (is hero_fps.pack enabled in the launcher?) - using the hero's own weapon; "
                 "lookup self-test: vanilla 'wh2_cst_rifle_bullet' -> %s (id %d, record %p)",
-                cfg.fireProjectile, vrec ? "found" : "NOT FOUND", vid, (void*)vrec);
+                wantProj, vrec ? "found" : "NOT FOUND", vid, (void*)vrec);
         }
     }
     {
@@ -2816,7 +2819,7 @@ void Apply(uintptr_t mgr) {
         bool shift = fg && KeyDown(VK_SHIFT);
         bool tap = shift && !S.shiftPrev;
         S.shiftPrev = shift;
-        bool reloading = vmgame::Reloading();
+        bool reloading = vmgame::Busy();
         bool canSprint = canMove && fg && mode == 0 && wantMove && KeyDown('W') && !KeyDown('S') && !rmb && !lmb && !reloading &&
                          !S.pinned && !S.stuck;
         bool wasSprint = S.sprint, wasTac = S.tac, wasAds = S.ads;
@@ -3201,6 +3204,15 @@ void Apply(uintptr_t mgr) {
             bodies[nb][2] = raw[2] + S.entVel[1] * cfg.fireLookahead;
             ++nb;
         }
+        if (vmgame::CurrentWeapon() != S.projFor && g_shotOk) {
+            S.projFor = vmgame::CurrentWeapon();
+            const char* want = vmgame::WeaponProjectile(S.projFor)[0] ? vmgame::WeaponProjectile(S.projFor) : cfg.fireProjectile;
+            int32_t id = -1;
+            uintptr_t rec = want[0] ? FindProjectile(want, &id) : 0;
+            S.fpProj = rec && id >= 0 ? rec : 0;
+            S.fpProjId = S.fpProj ? id : -1;
+            Log("fire: weapon %d projectile '%s' -> %s (id %d)", S.projFor, want, S.fpProj ? "found" : "NOT FOUND (hero's own)", S.fpProjId);
+        }
         if (FireShot(eye, fwd, right, camUp, bodies, nb, clearance)) {
             ++S.shots;
             vmgame::Fire();
@@ -3317,6 +3329,10 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (!(l & (1L << 30))) vmgame::StartMagReload();
             return 0;
         }
+        if (S.active && w >= '1' && w <= '9') {
+            if (!(l & (1L << 30))) vmgame::SelectWeapon(static_cast<int>(w - '0'));
+            return 0;
+        }
         if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D')) return 0;
         break;
     case WM_KEYUP:
@@ -3325,7 +3341,13 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (vmgame::Enabled() && w == vmgame::TestKey()) return 0;
         if (vmgame::LayerActive() && (w == vmgame::ReloadKey() || w == vmgame::AnimKey() || w == vmgame::ModelKey()))
             return 0;
-        if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D' || w == 'R')) return 0;
+        if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D' || w == 'R' || (w >= '1' && w <= '9'))) return 0;
+        break;
+    case WM_MOUSEWHEEL:
+        if (S.active) {
+            vmgame::CycleWeapon(GET_WHEEL_DELTA_WPARAM(w) < 0 ? 1 : -1);
+            return 0;
+        }
         break;
     case WM_LBUTTONDOWN:
     case WM_LBUTTONUP:
@@ -3368,6 +3390,12 @@ LRESULT CALLBACK HfpsChildWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 ++g_childSwallowLogs;
                 Log("input: swallowed mouse button message 0x%03X on render child (first person)", m);
             }
+            return 0;
+        }
+        break;
+    case WM_MOUSEWHEEL:
+        if (S.active) {
+            vmgame::CycleWeapon(GET_WHEEL_DELTA_WPARAM(w) < 0 ? 1 : -1);
             return 0;
         }
         break;
