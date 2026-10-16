@@ -2816,7 +2816,8 @@ void Apply(uintptr_t mgr) {
         bool shift = fg && KeyDown(VK_SHIFT);
         bool tap = shift && !S.shiftPrev;
         S.shiftPrev = shift;
-        bool canSprint = canMove && fg && mode == 0 && wantMove && KeyDown('W') && !KeyDown('S') && !rmb && !lmb &&
+        bool reloading = vmgame::Reloading();
+        bool canSprint = canMove && fg && mode == 0 && wantMove && KeyDown('W') && !KeyDown('S') && !rmb && !lmb && !reloading &&
                          !S.pinned && !S.stuck;
         bool wasSprint = S.sprint, wasTac = S.tac, wasAds = S.ads;
         if (S.sprint && !canSprint) {
@@ -2828,7 +2829,7 @@ void Apply(uintptr_t mgr) {
             else
                 S.tac = true;
         }
-        S.ads = rmb && !S.sprint;
+        S.ads = rmb && !S.sprint && !reloading;
         float step = dt > 0.f ? dt / cfg.adsTime : 0.f;
         S.adsT += S.ads ? step : -step;
         if (S.adsT < 0.f) S.adsT = 0.f;
@@ -3171,7 +3172,8 @@ void Apply(uintptr_t mgr) {
         FastFireStats(false);
     }
     bool held = Foreground() && (GetAsyncKeyState(VK_LBUTTON) & 0x8000);
-    if (held && g_fireOk && cfg.fireEnabled && now >= S.nextShot && !S.sprint && now >= S.fireBlock) {
+    double fireGap = vmgame::FireInterval() > 0 ? vmgame::FireInterval() : cfg.fireInterval;
+    if (held && g_fireOk && cfg.fireEnabled && now >= S.nextShot && !S.sprint && now >= S.fireBlock && vmgame::CanFire()) {
         const float fwd[3] = {sy * cpi, sp, cy * cpi};
         const float right[3] = {cy, 0.f, -sy};
         const float camUp[3] = {-sy * sp, cpi, -cy * sp};
@@ -3207,7 +3209,7 @@ void Apply(uintptr_t mgr) {
         } else {
             ++S.shotsFailed;
         }
-        S.nextShot = now + cfg.fireInterval;
+        S.nextShot = now - S.nextShot < fireGap ? S.nextShot + fireGap : now + fireGap;
     }
     if ((now - S.tStat) * 1000.0 >= cfg.logIntervalMs) {
         Log("sec frames=%u activeWrites=%u yields=%u ent=%.2f,%.2f,%.2f eye=%.2f,%.2f,%.2f yaw=%.1f pitch=%.1f "
@@ -3311,6 +3313,10 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         }
         if (w == VK_ESCAPE && S.active) InterlockedExchange(&g_reqExit, 1);
+        if (S.active && w == 'R') {
+            if (!(l & (1L << 30))) vmgame::StartMagReload();
+            return 0;
+        }
         if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D')) return 0;
         break;
     case WM_KEYUP:
@@ -3319,7 +3325,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (vmgame::Enabled() && w == vmgame::TestKey()) return 0;
         if (vmgame::LayerActive() && (w == vmgame::ReloadKey() || w == vmgame::AnimKey() || w == vmgame::ModelKey()))
             return 0;
-        if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D')) return 0;
+        if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D' || w == 'R')) return 0;
         break;
     case WM_LBUTTONDOWN:
     case WM_LBUTTONUP:

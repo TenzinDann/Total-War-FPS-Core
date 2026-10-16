@@ -7,6 +7,7 @@
 #include "vm_audio.h"
 #include "vm_render.h"
 namespace vmgame {
+void MagApply();
 namespace {
 RenderAddrs g_ra = {};
 const unsigned char kScCreateBytes[] = {0x4C, 0x8D, 0x83, 0x50, 0x13, 0x00, 0x00};
@@ -23,6 +24,17 @@ int g_modelCount = 0;
 int g_modelIdx = 0;
 volatile bool g_testLayer = false, g_fp = false, g_failed = false;
 volatile LONG g_reload = 0, g_reqModelNext = 0, g_reqAnimNext = 0, g_reqFire = 0, g_reqDraw = 0;
+struct MagState {
+    volatile LONG size = 0;
+    volatile LONG ammo = 0;
+    volatile LONG reload = 0;
+    volatile LONG reqAnim = 0;
+    volatile LONG64 t0Us = 0;
+    volatile LONG refillUs[3] = {};
+    volatile LONG fireUs = 0;
+    LONG ammoByModel[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+    int loadedModel = -1;
+} g_mag;
 volatile LONG g_stance = 0;
 void SidecarIni(int idx, wchar_t* out) {
     wcsncpy(out, g_models[idx], MAX_PATH * 2 - 1);
@@ -362,7 +374,11 @@ void AnimStep(vm::Look& l, double now) {
     {
         LONG raw = g_fp ? g_stance : 0;
         int st = (raw & 4) ? 3 : (raw & 2) ? 2 : (raw & 1) ? 1 : 0;
-        if (st != g_an.stance) {
+        bool reloadAnim = g_mag.reload != 0 && g_an.cur >= 0 &&
+                          (g_an.cur == g_rend.FindClip("reload") || g_an.cur == g_rend.FindClip("reload_empty"));
+        if (st != g_an.stance && reloadAnim) {
+            g_an.stance = st;
+        } else if (st != g_an.stance) {
             int from = g_an.stance;
             g_an.stance = st;
             if (st == 1) {
@@ -379,6 +395,11 @@ void AnimStep(vm::Look& l, double now) {
         }
     }
     if (InterlockedExchange(&g_reqDraw, 0)) Play(g_rend.FindClip("draw") >= 0 ? g_rend.FindClip("draw") : g_an.idle, now, 0.1);
+    if (LONG ra = InterlockedExchange(&g_mag.reqAnim, 0)) {
+        int c = ra == 2 ? g_rend.FindClip("reload_empty") : -1;
+        if (c < 0) c = g_rend.FindClip("reload");
+        Play(c, now, 0.1);
+    }
     if (fired) {
         static const char* fires[3] = {"fire1", "fire2", "fire3"};
         int c = g_an.stance == 1 ? g_rend.FindClip("ads_fire") : -1;
@@ -426,6 +447,7 @@ void DrawLayer(IDXGISwapChain* sc) {
     if (InterlockedExchange(&g_reload, 0)) {
         LoadAllSettings(g_modelIdx, g_set);
         g_fxDirty = true;
+        if (g_rend.Ready()) MagApply();
         g_log("viewmodel: settings reloaded (fov %.1f offset %.3f,%.3f,%.3f rot %.1f,%.1f,%.1f scale %.3f mirror %d)",
               g_set.fovDeg, g_set.offset[0], g_set.offset[1], g_set.offset[2], g_set.rotDeg[0], g_set.rotDeg[1],
               g_set.rotDeg[2], g_set.scale, g_set.mirrorX);
@@ -453,6 +475,7 @@ void DrawLayer(IDXGISwapChain* sc) {
         g_log("viewmodel: ready on device %p: %u triangles, %u bones, %u clips, model %ls (init %.1f ms)", (void*)dev,
               g_rend.Triangles(), g_rend.Bones(), g_rend.Clips(), g_models[g_modelIdx], (Now() - t0) * 1000.0);
         AnimReset(Now());
+        MagApply();
     }
     if (g_fxDirty) {
         g_fxDirty = false;
@@ -641,7 +664,74 @@ void CycleModel() {
     if (LayerActive()) InterlockedExchange(&g_reqModelNext, 1);
 }
 void Fire() {
-    if (Enabled() && g_fp) InterlockedExchange(&g_reqFire, 1);
+    if (!Enabled() || !g_fp) return;
+    InterlockedExchange(&g_reqFire, 1);
+    if (g_mag.size > 0 && InterlockedDecrement(&g_mag.ammo) <= 0) {
+        InterlockedExchange(&g_mag.ammo, 0);
+        StartMagReload();
+    }
+}
+double FireInterval() {
+    LONG us = g_mag.fireUs;
+    return us > 0 ? us * 1e-6 : 0.0;
+}
+void MagTick() {
+    LONG r = g_mag.reload;
+    if (r != 1 && r != 2) return;
+    LONG64 t0 = g_mag.t0Us;
+    if (static_cast<LONG64>(Now() * 1e6) - t0 < g_mag.refillUs[r]) return;
+    if (InterlockedCompareExchange(&g_mag.reload, 0, r) == r) InterlockedExchange(&g_mag.ammo, g_mag.size);
+}
+bool Reloading() {
+    MagTick();
+    return g_mag.reload != 0;
+}
+bool StartMagReload() {
+    if (!Enabled() || !g_fp) return false;
+    LONG size = g_mag.size;
+    if (size <= 0 || g_mag.reload != 0 || g_mag.ammo >= size) return false;
+    LONG kind = g_mag.ammo > 0 ? 1 : 2;
+    InterlockedExchange64(&g_mag.t0Us, static_cast<LONG64>(Now() * 1e6));
+    if (InterlockedCompareExchange(&g_mag.reload, kind, 0) != 0) return false;
+    InterlockedExchange(&g_mag.reqAnim, kind);
+    return true;
+}
+bool CanFire() {
+    if (g_mag.size <= 0) return true;
+    MagTick();
+    if (g_mag.reload != 0) return false;
+    if (g_mag.ammo <= 0) {
+        StartMagReload();
+        return false;
+    }
+    return true;
+}
+void MagApply() {
+    if (g_mag.loadedModel >= 0 && g_mag.loadedModel < 8 && g_mag.size > 0)
+        g_mag.ammoByModel[g_mag.loadedModel] = g_mag.reload ? (g_mag.reload == 2 ? 0 : g_mag.ammo) : g_mag.ammo;
+    InterlockedExchange(&g_mag.reload, 0);
+    InterlockedExchange(&g_mag.reqAnim, 0);
+    float rpm = g_set.fireRpm;
+    InterlockedExchange(&g_mag.fireUs, rpm >= 10.f && rpm <= 2000.f ? static_cast<LONG>(60e6 / rpm) : 0);
+    LONG size = g_set.magSize > 0 && g_set.magSize <= 1000 ? g_set.magSize : 0;
+    auto refill = [](float sec, int clip) -> LONG {
+        if (!(sec > 0.f) && clip >= 0) sec = g_rend.ClipDuration(clip) * 0.8f;
+        if (!(sec > 0.05f)) sec = 2.f;
+        return static_cast<LONG>(sec * 1e6f);
+    };
+    int cTac = g_rend.FindClip("reload"), cEmpty = g_rend.FindClip("reload_empty");
+    InterlockedExchange(&g_mag.refillUs[1], refill(g_set.reloadRefill, cTac));
+    InterlockedExchange(&g_mag.refillUs[2], refill(g_set.reloadEmptyRefill, cEmpty >= 0 ? cEmpty : cTac));
+    bool same = g_mag.loadedModel == g_modelIdx;
+    g_mag.loadedModel = g_modelIdx;
+    LONG keep = g_modelIdx < 8 ? g_mag.ammoByModel[g_modelIdx] : -1;
+    LONG ammo = size > 0 ? (keep >= 0 && keep <= size ? keep : size) : 0;
+    if (same && size > 0 && g_mag.ammo >= 0 && g_mag.ammo <= size) ammo = g_mag.ammo;
+    InterlockedExchange(&g_mag.size, size);
+    InterlockedExchange(&g_mag.ammo, ammo);
+    g_log("viewmodel: weapon fire %s, magazine %ld (ammo %ld), reload refill %.2f / empty %.2f s",
+          g_mag.fireUs ? "custom rpm" : "[fire] interval", size, ammo, g_mag.refillUs[1] * 1e-6, g_mag.refillUs[2] * 1e-6);
+    if (g_mag.fireUs) g_log("viewmodel: fire rate %.0f rpm (%.4f s)", rpm, g_mag.fireUs * 1e-6);
 }
 void ToggleTestLayer() {
     if (!Enabled()) return;

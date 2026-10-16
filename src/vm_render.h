@@ -40,6 +40,10 @@ struct Settings {
     wchar_t fireTail[512] = L"";
     float fireTailVolume = 0.7f;
     float fireTailGap = 0.15f;
+    float fireRpm = 0.f;
+    int magSize = 0;
+    float reloadRefill = 0.f;
+    float reloadEmptyRefill = 0.f;
     wchar_t flashFx[128] = L"";
     float flashScale = 1.0f;
     float flashIntensity = 1.0f;

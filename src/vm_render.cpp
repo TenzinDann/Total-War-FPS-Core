@@ -631,6 +631,10 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     GetPrivateProfileStringW(L"viewmodel", L"fire_tail", s.fireTail, s.fireTail, 512, ini);
     s.fireTailVolume = IniFloat(ini, L"fire_tail_volume", s.fireTailVolume);
     s.fireTailGap = IniFloat(ini, L"fire_tail_gap", s.fireTailGap);
+    s.fireRpm = IniFloat(ini, L"fire_rpm", s.fireRpm);
+    s.magSize = static_cast<int>(IniFloat(ini, L"mag_size", static_cast<float>(s.magSize)));
+    s.reloadRefill = IniFloat(ini, L"reload_refill", s.reloadRefill);
+    s.reloadEmptyRefill = IniFloat(ini, L"reload_empty_refill", s.reloadEmptyRefill);
     if (!(s.fireLfeVolume >= 0.f && s.fireLfeVolume <= 2.f)) s.fireLfeVolume = 0.7f;
     if (!(s.fireAtmoVolume >= 0.f && s.fireAtmoVolume <= 2.f)) s.fireAtmoVolume = 0.7f;
     if (!(s.fireTailVolume >= 0.f && s.fireTailVolume <= 2.f)) s.fireTailVolume = 0.7f;
