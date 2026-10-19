@@ -419,6 +419,7 @@ struct Config {
     bool hideCursor = true;
     bool hidePaths = true;
     bool hideEdgeArrows = true;
+    bool hudEnabled = true;
     char hideNames[kMaxHideUi][48] = {};
     int hideCount = 0;
     float moveInterval = 0.2f;
@@ -636,6 +637,7 @@ void LoadConfig() {
     cfg.hideCursor = GetPrivateProfileIntW(L"ui", L"hide_cursor", 1, ini) != 0;
     cfg.hidePaths = GetPrivateProfileIntW(L"ui", L"hide_paths", 1, ini) != 0;
     cfg.hideEdgeArrows = GetPrivateProfileIntW(L"ui", L"hide_edge_arrows", 1, ini) != 0;
+    cfg.hudEnabled = GetPrivateProfileIntW(L"hud", L"enabled", 1, ini) != 0;
     {
         wchar_t list[512];
         GetPrivateProfileStringW(L"ui", L"hide", L"info_parent,battle_orders,winds_of_magic", list, 512, ini);
@@ -3546,7 +3548,15 @@ void Apply(uintptr_t mgr) {
     }
     float shieldW = 0.f, shieldMove = 1.f, shieldZoom = 1.f;
     vmgame::ShieldGame(&shieldW, &shieldMove, &shieldZoom);
-    float zoomNow = 1.f + (cfg.adsZoom - 1.f) * shieldZoom * S.adsT * S.adsT * (3.f - 2.f * S.adsT);
+    float zoomMax = cfg.adsZoom, zoomCurve = S.adsT * S.adsT * (3.f - 2.f * S.adsT);
+    {
+        float mf = 0.f, mfov = 0.f;
+        if (vmgame::CurveAdsState(&mf, &mfov)) {
+            zoomCurve = 0.5f - 0.5f * std::cos(kPi * mf);
+            if (mfov > 0.f && S.baseFov > 0.f) zoomMax = std::fmax(1.f, std::tan(S.baseFov * 0.5f) / (0.75f * std::tan(mfov * kPi / 360.f)));
+        }
+    }
+    float zoomNow = 1.f + (zoomMax - 1.f) * shieldZoom * zoomCurve;
     float rad = cfg.sensitivity * kPi / 180.f / zoomNow;
     S.yaw += dx * rad;
     S.pitch += (cfg.invertY ? dy : -dy) * rad;
@@ -3622,6 +3632,10 @@ void Apply(uintptr_t mgr) {
         S.adsT += S.ads ? step : -step;
         if (S.adsT < 0.f) S.adsT = 0.f;
         if (S.adsT > 1.f) S.adsT = 1.f;
+        {
+            float mf = 0.f, mfov = 0.f;
+            if (vmgame::CurveAdsState(&mf, &mfov)) S.adsT = mf;
+        }
         if ((wasSprint != S.sprint || wasTac != S.tac || wasAds != S.ads) && S.stanceLogs++ < 80)
             Log("stance: %s%s (fire block %.2f s)", S.tac ? "tactical sprint" : S.sprint ? "sprint" : S.ads ? "ads" : "hip",
                 lmb ? " [fire held]" : "", S.fireBlock > now ? S.fireBlock - now : 0.0);
@@ -4599,9 +4613,100 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     ShotStep();
 }
 #ifdef HFPS_LUA_MODULE
+namespace luaapi {
+constexpr int kTUserdata = 7;
+typedef int (*CFn)(void*);
+struct Fns {
+    void (*createtable)(void*, int, int);
+    void (*pushcclosure)(void*, CFn, int);
+    void (*setfield)(void*, int, const char*);
+    void (*pushboolean)(void*, int);
+    void (*pushnumber)(void*, float);
+    void (*pushstring)(void*, const char*);
+    void (*pushnil)(void*);
+    void* (*touserdata)(void*, int);
+    int (*type)(void*, int);
+    size_t (*objlen)(void*, int);
+} f;
+int g_state = -1;
+char g_missing[48] = "";
+volatile LONG g_opens = 0, g_matchLogged = 0;
+bool Resolve() {
+    if (g_state >= 0) return g_state == 1;
+    HMODULE exe = GetModuleHandleW(nullptr);
+    const struct { void* slot; const char* name; } t[] = {
+        {&f.createtable, "lua_createtable"}, {&f.pushcclosure, "lua_pushcclosure"}, {&f.setfield, "lua_setfield"},
+        {&f.pushboolean, "lua_pushboolean"}, {&f.pushnumber, "lua_pushnumber"}, {&f.pushstring, "lua_pushstring"},
+        {&f.pushnil, "lua_pushnil"}, {&f.touserdata, "lua_touserdata"}, {&f.type, "lua_type"}, {&f.objlen, "lua_objlen"}};
+    for (const auto& e : t) {
+        FARPROC p = exe ? GetProcAddress(exe, e.name) : nullptr;
+        if (!p) {
+            snprintf(g_missing, sizeof g_missing, "%s", e.name);
+            g_state = 0;
+            return false;
+        }
+        memcpy(e.slot, &p, sizeof p);
+    }
+    g_state = 1;
+    return true;
+}
+int Api(void* L) {
+    f.pushnumber(L, 1.f);
+    return 1;
+}
+int Active(void* L) {
+    f.pushboolean(L, S.active && S.unit ? 1 : 0);
+    return 1;
+}
+int IsHero(void* L) {
+    const uintptr_t unit = S.unit, ent = S.entity;
+    int how = 0;
+    if (S.active && unit && f.type(L, 1) == kTUserdata && f.objlen(L, 1) >= sizeof(uintptr_t)) {
+        const void* blk = f.touserdata(L, 1);
+        uintptr_t wrap = 0;
+        if (blk) memcpy(&wrap, blk, sizeof wrap);
+        const uintptr_t p = wrap ? Ptr(wrap + 8) : 0;
+        if (p && p == unit) {
+            how = 1;
+        } else if (p && ent) {
+            uint32_t n = 0;
+            uintptr_t arr = 0, first = 0;
+            if (Rd(p + 0xa4, n) && n > 0 && n < 10000 && Rd(p + 0xa8, arr) && Rd(arr, first) && first == ent) how = 2;
+        }
+        if (!how && wrap && wrap == unit) how = 3;
+        if (how && InterlockedCompareExchange(&g_matchLogged, how, 0) == 0)
+            Log("lua-api: is_hero matched %s (unit %p, entity %p)",
+                how == 1 ? "by [wrapper+8] unit pointer" : how == 2 ? "by first soldier" : "by wrapper pointer", (void*)unit, (void*)ent);
+    }
+    f.pushboolean(L, how ? 1 : 0);
+    return 1;
+}
+int HudAnchorFn(void* L) {
+    if (!cfg.hudEnabled)
+        f.pushnil(L);
+    else
+        f.pushstring(L, vmgame::HudAnchor() == 1 ? "center" : "left");
+    return 1;
+}
+int PushTable(void* L) {
+    LONG n = InterlockedIncrement(&g_opens);
+    if (!Resolve()) {
+        Log("lua-api: %s not exported by the game - no interface table (luaopen #%ld)", g_missing, n);
+        return 0;
+    }
+    f.createtable(L, 0, 4);
+    const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_anchor", HudAnchorFn}};
+    for (const auto& e : fns) {
+        f.pushcclosure(L, e.fn, 0);
+        f.setfield(L, -2, e.name);
+    }
+    Log("lua-api: interface table v1 returned (luaopen #%ld, lua state %p)", n, L);
+    return 1;
+}
+}
 static volatile LONG g_luaStarted = 0;
 static bool g_pinned = false;
-extern "C" __declspec(dllexport) int luaopen_hero_fps_native(void*) {
+extern "C" __declspec(dllexport) int luaopen_hero_fps_native(void* L) {
     if (InterlockedCompareExchange(&g_luaStarted, 1, 0) == 0) {
         HMODULE self = nullptr;
         g_pinned = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
@@ -4610,7 +4715,7 @@ extern "C" __declspec(dllexport) int luaopen_hero_fps_native(void*) {
         HANDLE t = CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr);
         if (t) CloseHandle(t);
     }
-    return 0;
+    return g_pinned && L ? luaapi::PushTable(L) : 0;
 }
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {

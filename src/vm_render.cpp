@@ -652,6 +652,9 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (s.sceneLight > 1) s.sceneLight = 1;
     s.swayScale = IniFloat(ini, L"sway", s.swayScale);
     s.bobScale = IniFloat(ini, L"bob", s.bobScale);
+    s.bobRate = IniFloat(ini, L"bob_rate", s.bobRate);
+    if (s.bobRate < 0.25f) s.bobRate = 0.25f;
+    if (s.bobRate > 3.f) s.bobRate = 3.f;
     float mb = IniFloat(ini, L"muzzle_bone", static_cast<float>(s.muzzleBone));
     s.muzzleBone = (mb >= -2 && mb < static_cast<float>(kMaxBones)) ? static_cast<int>(mb) : -2;
     IniVec3(ini, L"muzzle_local", s.muzzleLocal);
@@ -711,6 +714,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.stepClothVolume = IniFloat(ini, L"step_cloth_volume", s.stepClothVolume);
     s.stepRattleVolume = IniFloat(ini, L"step_rattle_volume", s.stepRattleVolume);
     s.stepSprintGain = IniFloat(ini, L"step_sprint_gain", s.stepSprintGain);
+    s.stepTacSprintGain = IniFloat(ini, L"step_tac_sprint_gain", s.stepTacSprintGain);
     s.stepAdsGain = IniFloat(ini, L"step_ads_gain", s.stepAdsGain);
     auto fracList = [&](const wchar_t* key, float* out, int& n) {
         wchar_t buf[256] = L"";
@@ -747,10 +751,30 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.adsTimeTac = IniFloat(ini, L"ads_time_tac", s.adsTimeTac);
     for (float* v : {&s.adsTime, &s.adsTimeSprint, &s.adsTimeTac})
         if (!(*v == 0.f || (*v >= 0.01f && *v <= 2.f))) *v = 0.f;
+    {
+        wchar_t buf[128];
+        GetPrivateProfileStringW(L"viewmodel", L"ads_curve_time", L"", buf, 128, ini);
+        float t[4];
+        if (buf[0]) {
+            bool ok = swscanf(buf, L"%f , %f , %f , %f", &t[0], &t[1], &t[2], &t[3]) == 4;
+            for (float x : t) ok = ok && x >= 10.f && x <= 2000.f;
+            for (int k = 0; k < 4; ++k) s.adsCurveTime[k] = ok ? t[k] : 0.f;
+        }
+    }
+    s.adsFovAlt = IniFloat(ini, L"ads_fov", s.adsFovAlt);
+    s.adsVmFovAlt = IniFloat(ini, L"ads_vm_fov", s.adsVmFovAlt);
+    for (float* v : {&s.adsFovAlt, &s.adsVmFovAlt})
+        if (!(*v == 0.f || (*v >= 5.f && *v <= 150.f))) *v = 0.f;
     float spb = IniFloat(ini, L"spin_bone", static_cast<float>(s.spinBone));
     s.spinBone = (spb >= -2 && spb < static_cast<float>(kMaxBones)) ? static_cast<int>(spb) : -2;
     fracList(L"tac_sprint_steps", s.tacSprintSteps, s.tacSprintStepN);
     s.weaponDefault = IniFloat(ini, L"weapon_default", s.weaponDefault ? 1.f : 0.f) != 0.f;
+    {
+        wchar_t ha[16] = L"";
+        GetPrivateProfileStringW(L"viewmodel", L"hud_anchor", L"", ha, 16, ini);
+        if (!_wcsicmp(ha, L"center")) s.hudAnchor = 1;
+        else if (!_wcsicmp(ha, L"left")) s.hudAnchor = 0;
+    }
     {
         wchar_t pw[64] = L"";
         GetPrivateProfileStringW(L"viewmodel", L"projectile", L"", pw, 64, ini);
@@ -1770,7 +1794,8 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
     float det = AffDet(model);
     CFrame cf = {};
     float aspect = static_cast<float>(w) / static_cast<float>(h);
-    float ys = 1.0f / std::tan(s.fovDeg * kDeg * 0.5f), xs = ys / aspect;
+    const float vmFov = (look.fovDeg > 1.f && look.fovDeg < 170.f) ? look.fovDeg : s.fovDeg;
+    float ys = 1.0f / std::tan(vmFov * kDeg * 0.5f), xs = ys / aspect;
     const float zn = 0.01f, zf = 50.0f;
     float P[16] = {xs, 0, 0, 0, 0, ys, 0, 0, 0, 0, zf / (zf - zn), -zn * zf / (zf - zn), 0, 0, 1, 0};
     memcpy(cf.proj, P, sizeof P);

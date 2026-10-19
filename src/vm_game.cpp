@@ -245,6 +245,7 @@ constexpr double kDropFrac = 0.9, kRaiseFrac = 0.7;
 int g_preloadNext = -1;
 LARGE_INTEGER g_qpf, g_t0;
 void AnimStep(vm::Look& l, double now);
+bool MeleeWeapon();
 void StepSounds(double now, float speed);
 void ShieldStep(vm::Look& l, double now, float dt);
 template <class T>
@@ -368,8 +369,32 @@ DXGI_FORMAT RtvFormat(DXGI_FORMAT f, bool* hwEncodes) {
     }
 }
 volatile LONG g_adsTimeUs[3] = {250000, 250000, 250000}, g_curAdsUs[3] = {0, 0, 0};
+volatile LONG g_curveFracMicro = -1, g_curveFovMilli = 0;
+volatile LONG g_hudAnchorNow = 0;
+bool CurveAdsOn() {
+    const float* t = Wp().set.adsCurveTime;
+    return t[0] > 0.f && t[1] > 0.f && t[2] > 0.f && t[3] > 0.f;
+}
+void CurveAdsStep(float& f, float& v, bool want, float dt) {
+    const float* t = Wp().set.adsCurveTime;
+    float vin = 1000.f / t[0], vout = 1000.f / t[1], sum = vin + vout;
+    float target = want ? vin : -vout;
+    if (target > v) v = std::fmin(v + sum * 1000.f / t[3] * dt, target);
+    else v = std::fmax(v - sum * 1000.f / t[2] * dt, target);
+    f += v * dt;
+    if (f >= 1.f) f = 1.f, v = v > 0.f ? 0.f : v;
+    if (f <= 0.f) f = 0.f, v = v < 0.f ? 0.f : v;
+}
+float CurveFullTime(bool in) {
+    const float* t = Wp().set.adsCurveTime;
+    float vin = 1000.f / t[0], vout = 1000.f / t[1], sum = vin + vout;
+    float v = in ? vin : vout, a = sum * 1000.f / (in ? t[3] : t[2]);
+    float ta = v / a, d = 0.5f * a * ta * ta;
+    return d >= 1.f ? std::sqrt(2.f / a) : ta + (1.f - d) / v;
+}
 float AdsTime(int kind = 0) {
     const vm::Settings& s = Wp().set;
+    if (CurveAdsOn()) return CurveFullTime(true) * (1.f + (s.shieldAdsTime - 1.f) * ShieldEase());
     auto pick = [&](int k) {
         float w = k == 2 ? s.adsTimeTac : k == 1 ? s.adsTimeSprint : s.adsTime;
         if (w > 0.f) return w;
@@ -393,12 +418,23 @@ struct Motion {
     double tPrev = 0;
     float lastYaw = 0, lastPitch = 0, swayX = 0, swayY = 0, bobPhase = 0, bobAmount = 0;
     float adsW = 0, sprintW = 0;
+    float curveV = 0;
     float blendT = 0;
     float barrelAngle = 0, barrelSpeed = 0;
     int barrelModel = -1;
     float crossKick = 0, crossMove = 0;
     double crossLastShot = -1;
 } g_mo;
+float AdsWeightStep(float adsW, LONG st, float dt, bool commit) {
+    if (!CurveAdsOn()) {
+        if (commit) g_mo.curveV = 0.f;
+        return AdsSmoothStep(adsW, st, dt);
+    }
+    float v = g_mo.curveV, sk = 1.f + (Wp().set.shieldAdsTime - 1.f) * ShieldEase();
+    CurveAdsStep(adsW, v, (st & 1) != 0, dt / sk);
+    if (commit) g_mo.curveV = v;
+    return adsW;
+}
 void CrossLook(float& spread, float& alpha) {
     const vm::CrosshairSettings& cs = g_crossSet;
     spread = std::fmin(g_mo.crossKick + g_mo.crossMove, cs.spreadMax);
@@ -457,7 +493,7 @@ vm::Look ComputeLook() {
     float target = speed / 4.5f;
     if (target > 1) target = 1;
     g_mo.bobAmount += (target - g_mo.bobAmount) * (1 - std::exp(-dt * 6.0f));
-    g_mo.bobPhase += dt * (2.0f + speed * 1.6f) * (g_mo.bobAmount > 0.02f ? 1.f : 0.f);
+    g_mo.bobPhase += dt * (2.0f + speed * 1.6f) * Wp().set.bobRate * (g_mo.bobAmount > 0.02f ? 1.f : 0.f);
     if (g_mo.bobPhase > 6283.f) g_mo.bobPhase = std::fmod(g_mo.bobPhase, 6.2831853f);
     {
         if (g_mo.crossLastShot < 0 || now - g_mo.crossLastShot >= g_crossSet.spreadHold)
@@ -485,11 +521,22 @@ vm::Look ComputeLook() {
     {
         LONG st = g_fp ? g_stance : 0;
         float k = 1 - std::exp(-dt * 12.0f);
-        g_mo.adsW = AdsSmoothStep(g_mo.adsW, st, dt);
+        g_mo.adsW = AdsWeightStep(g_mo.adsW, st, dt, true);
         for (int k = 0; k < 3; ++k) InterlockedExchange(&g_curAdsUs[k], static_cast<LONG>(AdsTime(k) * 1e6f + 0.5f));
+        const bool curve = CurveAdsOn();
+        InterlockedExchange(&g_curveFracMicro, curve ? static_cast<LONG>(g_mo.adsW * 1e6f + 0.5f) : -1);
+        InterlockedExchange(&g_curveFovMilli, curve ? static_cast<LONG>(Wp().set.adsFovAlt * 1000.f + 0.5f) : 0);
+        InterlockedExchange(&g_hudAnchorNow, Wp().set.hudAnchor >= 0 ? Wp().set.hudAnchor : (MeleeWeapon() ? 1 : 0));
+        if (curve && Wp().set.adsVmFovAlt > 0.f) {
+            const float kD = 0.0174532925f;
+            float sc = 0.5f - 0.5f * std::cos(3.14159265f * g_mo.adsW);
+            float th = std::tan(Wp().set.fovDeg * 0.5f * kD), ta = 0.75f * std::tan(Wp().set.adsVmFovAlt * 0.5f * kD);
+            l.fovDeg = 2.f * std::atan(th + (ta - th) * sc) / kD;
+        }
         g_mo.sprintW += (((st & 6) ? 1.f : 0.f) - g_mo.sprintW) * k;
     }
     float swayK = 1.f - 0.7f * g_mo.adsW, bobK = (1.f - 0.85f * g_mo.adsW) * (1.f - g_mo.sprintW);
+    if (MeleeWeapon() && Wp().rend.FindClip("run") >= 0) bobK = 0.f;
     l.swayX = g_mo.swayX * swayK;
     l.swayY = g_mo.swayY * swayK;
     l.bobPhase = g_mo.bobPhase;
@@ -588,29 +635,47 @@ struct Anim {
     double evStart = 0, evLast = -1;
     double stepK = -1;
     float stepFrac = -1;
+    int stepClip = -1;
+    double stepStart = -1;
     double curStart = 0, prevStart = 0, fadeStart = 0, fadeLen = 0.15;
     double curRate = 1, prevRate = 1;
     double sprintExitEnd = 0;
     bool settled = true;
+    int curveClip = -1;
+    bool curveDown = false;
 } g_an;
 struct FxStat {
     int lastFired = 0, lastShots = 0, lastClips = 0, casings = 0, casingAds = 0, lands = 0, landsDropped = 0, settles = 0;
     float landAgeMin = 1e9f, landAgeMax = 0.f;
 } g_fxStat;
+double ClipT(double now) {
+    if (g_an.curveClip >= 0 && g_an.cur == g_an.curveClip) {
+        double d = Wp().rend.ClipDuration(g_an.cur);
+        return (g_an.curveDown ? 1.0 - g_mo.adsW : g_mo.adsW) * d;
+    }
+    return (now - g_an.curStart) * g_an.curRate;
+}
 void Play(int clip, double now, double fade, double rate = 1.0) {
     if (clip < 0) return;
+    const bool fracPrev = g_an.curveClip >= 0 && g_an.cur == g_an.curveClip;
+    const double tPrev = fracPrev ? ClipT(now) : 0.0;
     g_an.prev = g_an.cur;
     g_an.prevStart = g_an.curStart;
     g_an.prevRate = g_an.curRate;
+    if (fracPrev && g_an.prevRate > 0) g_an.prevStart = now - tPrev / g_an.prevRate;
     g_an.cur = clip;
     g_an.curStart = now;
     g_an.curRate = rate;
     g_an.fadeStart = now;
     g_an.fadeLen = g_an.prev >= 0 ? fade : 0;
+    g_an.curveClip = -1;
 }
-double ClipT(double now) { return (now - g_an.curStart) * g_an.curRate; }
+void MarkCurveClip(int clip, bool down) {
+    if (CurveAdsOn() && clip >= 0 && g_an.cur == clip) g_an.curveClip = clip, g_an.curveDown = down;
+}
 double AdsRate(int clip, int kind = 0) {
     float d = clip >= 0 ? Wp().rend.ClipDuration(clip) : 0.f;
+    if (CurveAdsOn()) return d > 0.f ? d / CurveFullTime(clip != Wp().rend.FindClip("ads_down")) : 1.0;
     return d > 0.f ? d / AdsTime(kind) : 1.0;
 }
 void AnimReset(double now) {
@@ -709,9 +774,11 @@ void AnimStep(vm::Look& l, double now) {
                     g_an.cur = c;
                     g_an.curStart = now;
                     g_an.curRate = AdsRate(c, StanceAdsKind(raw));
+                    MarkCurveClip(c, false);
                 } else {
                     double fade = from == 3 ? 0.3 : from == 2 ? 0.2 : 0.06;
                     Play(c >= 0 ? c : StanceIdle(), now, fade, AdsRate(c, StanceAdsKind(raw)));
+                    MarkCurveClip(c, false);
                     if (from >= 2) g_an.sprintExitEnd = now + fade;
                 }
             } else if (st >= 2) {
@@ -719,6 +786,7 @@ void AnimStep(vm::Look& l, double now) {
             } else if (from == 1) {
                 int c = Wp().rend.FindClip("ads_down");
                 Play(c >= 0 ? c : g_an.idle, now, 0.06, AdsRate(c));
+                MarkCurveClip(c, true);
             } else {
                 double fade = from == 3 ? 0.3 : 0.2;
                 Play(g_an.idle, now, fade);
@@ -1016,7 +1084,7 @@ void StepSounds(double now, float speed) {
     LONG st = g_stance;
     bool sprint = (st & 2) != 0, tac = (st & 4) != 0;
     auto step = [&](bool sprinting, float gain) {
-        float k = gain * (sprinting ? s.stepSprintGain : 1.f);
+        float k = gain * (sprinting ? (tac && s.stepTacSprintGain >= 0.f ? s.stepTacSprintGain : s.stepSprintGain) : 1.f);
         static int logs = 0;
         if (logs < 60) {
             ++logs;
@@ -1035,7 +1103,9 @@ void StepSounds(double now, float speed) {
     if (inSprintClip && nfr > 0) {
         float dur = w.rend.ClipDuration(clip);
         float f = dur > 0.f ? static_cast<float>(std::fmod(now - g_an.curStart, static_cast<double>(dur))) / dur : 0.f;
-        float prev = g_an.stepFrac;
+        float prev = g_an.stepClip == clip && g_an.stepStart == g_an.curStart ? g_an.stepFrac : -1.f;
+        g_an.stepClip = clip;
+        g_an.stepStart = g_an.curStart;
         if (prev >= 0.f)
             for (int i = 0; i < nfr; ++i) {
                 float x = fr[i];
@@ -1052,7 +1122,7 @@ void StepSounds(double now, float speed) {
         return;
     }
     double k = std::floor(g_mo.bobPhase / 3.14159265358979);
-    if (g_an.stepK >= 0 && k != g_an.stepK) step(false, (st & 1) ? s.stepAdsGain : 1.f);
+    if (g_an.stepK >= 0 && k != g_an.stepK) step(sprint, (st & 1) ? s.stepAdsGain : 1.f);
     g_an.stepK = k;
 }
 void LoadWeaponFx(int idx, ID3D11Device* dev) {
@@ -1758,6 +1828,7 @@ void SetTrigger(bool held) {
     }
 }
 int CurrentWeapon() { return g_modelIdx; }
+int HudAnchor() { return static_cast<int>(g_hudAnchorNow); }
 void GetKick(kick::Params* out) {
     int idx = g_modelIdx;
     if (idx < 0 || idx >= kMaxModels) idx = 0;
@@ -1800,6 +1871,13 @@ void PublishAdsTime(float normal, float sprint, float tac) {
     const float v[3] = {normal, sprint, tac};
     for (int k = 0; k < 3; ++k)
         if (v[k] > 0.f) InterlockedExchange(&g_adsTimeUs[k], static_cast<LONG>(v[k] * 1e6f + 0.5f));
+}
+bool CurveAdsState(float* frac, float* adsFovAlt) {
+    LONG f = g_curveFracMicro;
+    if (f < 0) return false;
+    *frac = f * 1e-6f;
+    *adsFovAlt = g_curveFovMilli * 1e-3f;
+    return true;
 }
 void PublishStance(bool ads, bool sprint, bool tac, int adsKind) {
     InterlockedExchange(&g_stance, (ads ? 1 : 0) | (sprint ? 2 : 0) | (tac ? 4 : 0) | (ads ? (adsKind & 3) << 3 : 0));

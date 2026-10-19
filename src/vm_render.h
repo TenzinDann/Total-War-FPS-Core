@@ -21,6 +21,7 @@ struct Settings {
     float sceneLight = 0.7f;
     float swayScale = 1.0f;
     float bobScale = 1.0f;
+    float bobRate = 1.0f;
     int muzzleBone = -2;
     float muzzleLocal[3] = {0.0f, 0.0f, 0.0f};
     float muzzleAxis[3] = {1.0f, 0.0f, 0.0f};
@@ -64,6 +65,7 @@ struct Settings {
     float reloadEmptyRefill = 0.f;
     wchar_t weaponId[64] = L"";
     bool weaponDefault = false;
+    int hudAnchor = -1;
     char projectile[64] = "";
     wchar_t animSounds[128] = L"";
     float animSoundVolume = 0.7f;
@@ -73,6 +75,7 @@ struct Settings {
     wchar_t stepRattle[512] = L"";
     float stepFootVolume = 0.3f, stepClothVolume = 1.f, stepRattleVolume = 0.2f;
     float stepSprintGain = 1.3f;
+    float stepTacSprintGain = -1.f;
     float stepAdsGain = 0.6f;
     float sprintSteps[16] = {};
     int sprintStepN = 0;
@@ -87,6 +90,8 @@ struct Settings {
     float spinDownTime = 1.6f;
     int spinBone = -2;
     float adsTime = 0.f, adsTimeSprint = 0.f, adsTimeTac = 0.f;
+    float adsCurveTime[4] = {0.f, 0.f, 0.f, 0.f};
+    float adsFovAlt = 0.f, adsVmFovAlt = 0.f;
     wchar_t flashFx[128] = L"";
     float flashScale = 1.0f;
     float flashIntensity = 1.0f;
@@ -186,6 +191,7 @@ struct Look {
     float kickRot[3] = {};
     float kickPivot[3] = {};
     float adsAlign = 0;
+    float fovDeg = 0;
     int spinBone = -1;
     float spinAngle = 0;
     float shieldArmW = 0;
