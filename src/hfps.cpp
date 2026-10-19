@@ -149,6 +149,20 @@ const CodePrint kShotPrints904[] = {
     {0x500294, 0x13, 0xa18aa5532e26f9aeull},
     {0x4d7960, 0x39, 0xdf066808b9520cc0ull},
     {0x4d8580, 0x59, 0x78aac2ac213eed1cull}};
+const CodePrint kMeleeHitPrints904[] = {
+    {0x30a9344, 0xdc, 0x464ba6f56a355778ull},
+    {0x30a8f94, 0x3ad, 0xb30056df6fb0a329ull},
+    {0x30a8ddc, 0x1b6, 0x3f368ba650abe582ull},
+    {0x3250ef0, 0x5d, 0x57ffe749a4a8bd11ull},
+    {0x8fc238, 0x63, 0x59342328bccd2923ull},
+    {0x3255c68, 0x146, 0x24bb7edc29c9ecccull},
+    {0x306dbf0, 0x49, 0x12020d3518b4df41ull},
+    {0x3085114, 0x1b4, 0xd8bfa118ace5cd31ull},
+    {0x3253d8c, 0x656, 0xdc53d4d03a3943f8ull},
+    {0x30676cc, 0x2fd, 0x3f85fad2c739bff5ull},
+    {0x307fb18, 0x9a6, 0x11c52f1a3be95d62ull}};
+constexpr uintptr_t kFnMeleeHitCalc904 = 0x30a9344, kFnHitInfoCtor904 = 0x3250ef0, kFnHitInfoDtor904 = 0x8fc238,
+                    kFnKillResolve904 = 0x3253204, kFnCanBeHit904 = 0x306dbf0, kFnHitEffects904 = 0x3085114;
 const unsigned char kPresentHelper904[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x33,
                                            0xDB, 0x48, 0x8B, 0xF9, 0x38, 0x1D, 0x07, 0x3E, 0xED, 0x03, 0x48,
                                            0x8B, 0x09, 0x0F, 0x85, 0x98, 0x9E, 0xCC, 0x00, 0x4C, 0x8B, 0x89,
@@ -316,6 +330,7 @@ constexpr uintptr_t oUnitAttrScript = 0x36f0;
 constexpr int32_t kAttrMeleeDisabled = 0x2a;
 bool g_meleeOk = false;
 bool g_shotOk = false;
+bool g_meleeHitOk = false;
 constexpr uintptr_t oUiHudRoot = 0x358, oUicChildCount = 0x1cc, oUicChildren = 0x1d0, oUicId = 0x2a0, oUicVisible = 0x353;
 constexpr int kMaxHideUi = 12;
 constexpr uintptr_t oUicPos = 0x2c0, oUicLayout = 0x2f0, oLayoutW = 0x11c, oLayoutH = 0x120;
@@ -383,6 +398,11 @@ struct Config {
     float predictSpeed = 6.0f;
     float predictTau = 0.35f;
     float predictMax = 2.0f;
+    bool meleeEngine = true;
+    bool meleeAlwaysHit = true;
+    float meleeDamage = 1.0f;
+    bool meleeReact = true;
+    bool meleeEffects = true;
 } cfg;
 wchar_t g_dir[MAX_PATH];
 uintptr_t g_base = 0;
@@ -544,6 +564,12 @@ void LoadConfig() {
     if (cfg.tpLead < 0.f || cfg.tpLead > 0.6f) cfg.tpLead = 0.2f;
     cfg.revealEnemies = GetPrivateProfileIntW(L"hero", L"reveal_enemies", 1, ini) != 0;
     cfg.noMelee = GetPrivateProfileIntW(L"hero", L"no_melee", 1, ini) != 0;
+    cfg.meleeEngine = GetPrivateProfileIntW(L"melee", L"engine", 1, ini) != 0;
+    cfg.meleeAlwaysHit = GetPrivateProfileIntW(L"melee", L"always_hit", 1, ini) != 0;
+    cfg.meleeDamage = IniF(L"melee", L"damage_scale", cfg.meleeDamage, ini);
+    if (!(cfg.meleeDamage >= 0.f && cfg.meleeDamage <= 20.f)) cfg.meleeDamage = 1.f;
+    cfg.meleeReact = GetPrivateProfileIntW(L"melee", L"react", 1, ini) != 0;
+    cfg.meleeEffects = GetPrivateProfileIntW(L"melee", L"effects", 1, ini) != 0;
     cfg.hideHud = GetPrivateProfileIntW(L"ui", L"hide_hud", 1, ini) != 0;
     cfg.hideCursor = GetPrivateProfileIntW(L"ui", L"hide_cursor", 1, ini) != 0;
     cfg.hidePaths = GetPrivateProfileIntW(L"ui", L"hide_paths", 1, ini) != 0;
@@ -1497,6 +1523,222 @@ bool MeleeStrike(int kind, const float eye[3], const float fwd[3]) {
             viaFast ? "fast queue" : "command queue", c.launch[0], c.launch[1], c.launch[2], c.target[0], c.target[1], c.target[2],
             ground ? "ground + 0.4 m" : "no ground hit, eye - 1.3 m");
     return ok != 0;
+}
+unsigned UnitEntities(uintptr_t u, uintptr_t* ents, unsigned cap);
+bool EntPos(uintptr_t e, float* q);
+struct MeleeArc {
+    float reach;
+    float halfDeg;
+    float dmg;
+    int maxHit;
+    bool damage;
+};
+const MeleeArc kMeleeArcs[vmgame::kStrikeKinds] = {
+    {2.7f, 25.f, 1.0f, 2, true},
+    {2.5f, 65.f, 0.8f, 4, true},
+    {2.6f, 70.f, 1.2f, 5, true},
+    {2.8f, 30.f, 1.6f, 2, true},
+    {2.2f, 60.f, 0.0f, 5, false},
+};
+struct MeleeReq {
+    int kind;
+    float ox, oy, oz;
+    float dx, dz;
+    uintptr_t hero;
+    double t;
+};
+struct MeleeQueue {
+    SRWLOCK lock = SRWLOCK_INIT;
+    MeleeReq q[8];
+    int n = 0;
+    volatile LONG strikes = 0, hits = 0, kills = 0, forced = 0, logs = 0;
+} g_mq;
+struct MeleeAtk {
+    uintptr_t attacker;
+    uintptr_t zero[3];
+    uint16_t attackIdx;
+    uint16_t pad0;
+    float one;
+    float ten;
+    uint32_t pad1;
+    uint8_t flags;
+    uint8_t pad2[7];
+};
+static_assert(sizeof(MeleeAtk) == 0x38 && __builtin_offsetof(MeleeAtk, attackIdx) == 0x20 && __builtin_offsetof(MeleeAtk, flags) == 0x30,
+              "melee attacker block layout");
+bool MeleeEngineReady() { return cfg.meleeEngine && g_meleeHitOk && EarlyFlightActive() && g_ef.world && g_ef.hero == S.entity; }
+bool MeleeEngineQueue(int kind, const float eye[3], const float fwd[3]) {
+    float hx = fwd[0], hz = fwd[2], hl = std::sqrt(hx * hx + hz * hz);
+    if (kind < 0 || kind >= vmgame::kStrikeKinds || hl < 1e-3f || !S.entity) return false;
+    MeleeReq r = {kind, eye[0], eye[1], eye[2], hx / hl, hz / hl, S.entity, Now()};
+    AcquireSRWLockExclusive(&g_mq.lock);
+    bool ok = g_mq.n < 8;
+    if (ok) g_mq.q[g_mq.n++] = r;
+    ReleaseSRWLockExclusive(&g_mq.lock);
+    return ok;
+}
+int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const MeleeArc& arc, int* dmgOut) {
+    using FnCalc = int32_t* (*)(uintptr_t combat, int32_t* out, uintptr_t attacker, uintptr_t victim, uint32_t attackerA58);
+    using FnCtor = void* (*)(void* hitInfo, uintptr_t victim);
+    using FnDtor = void (*)(void* hitInfo);
+    using FnKill = uint16_t* (*)(void* hitInfo, uint16_t* out, uint32_t damage, MeleeAtk* atk, char selfDeath0, int attackType,
+                                 uint32_t p7, const char* debugName);
+    using FnReact = void (*)(uintptr_t self, uintptr_t attacker, float* delta);
+    using FnFx = void (*)(uintptr_t victim, uintptr_t fxMgr, uintptr_t attacker, int kind, float* pos, float* dir, float radius,
+                          uint8_t* result, char flag);
+    float hp[3], vp[3];
+    if (!EntPos(hero, hp) || !EntPos(victim, vp)) return 0;
+    int32_t r[2] = {0, 0};
+    if (arc.damage) {
+        uintptr_t combat = Ptr(world + 0xf8);
+        if (!combat) return 0;
+        uint32_t a58 = 0;
+        Rd(hero + 0xa58, a58);
+        reinterpret_cast<FnCalc>(g_base + kFnMeleeHitCalc904)(combat, r, hero, victim, a58);
+        if (r[0] == 0) {
+            if (!cfg.meleeAlwaysHit) return 0;
+            InterlockedIncrement(&g_mq.forced);
+        }
+    }
+    alignas(16) unsigned char hi[0x100];
+    memset(hi, 0, sizeof hi);
+    reinterpret_cast<FnCtor>(g_base + kFnHitInfoCtor904)(hi, victim);
+    uint16_t res = 0;
+    int dmg = 0;
+    if (arc.damage) {
+        float d = static_cast<float>(r[1]) * arc.dmg * cfg.meleeDamage;
+        dmg = d < 1.f ? 1 : static_cast<int>(d + 0.5f);
+        MeleeAtk atk;
+        memset(&atk, 0, sizeof atk);
+        atk.attacker = hero;
+        atk.attackIdx = 0x8d4;
+        atk.one = 1.f;
+        atk.ten = 10.f;
+        atk.flags = 0x10;
+        reinterpret_cast<FnKill>(g_base + kFnKillResolve904)(hi, &res, static_cast<uint32_t>(dmg), &atk, 0, 0, 0, "HFPS MELEE ATTACK");
+    }
+    bool killed = (res & 0xff) != 0;
+    float delta[3] = {vp[0] - hp[0], vp[1] - hp[1], vp[2] - hp[2]};
+    if (!killed && cfg.meleeReact) {
+        uintptr_t vt = Ptr(victim), fn = vt ? Ptr(vt + 0x3a8) : 0;
+        if (fn >= g_base && fn < g_base + g_imageSize) reinterpret_cast<FnReact>(fn)(victim, hero, delta);
+    }
+    if (cfg.meleeEffects && (dmg > 0 || !arc.damage)) {
+        uintptr_t fx = Ptr(world + 0xf0);
+        float hh = 0.f, vh = 0.f, hr = 0.f, vr = 0.f;
+        Rd(hero + 0x9c, hh);
+        Rd(victim + 0x9c, vh);
+        Rd(hero + 0xa0, hr);
+        Rd(victim + 0xa0, vr);
+        float h = hh < vh ? hh : vh, rad = hr < vr ? hr : vr;
+        if (!(h > 0.3f && h < 20.f)) h = 1.8f;
+        if (!(rad > 0.f && rad < 20.f)) rad = 0.5f;
+        float pos[3] = {vp[0], vp[1] + h * 0.55f, vp[2]};
+        if (fx) reinterpret_cast<FnFx>(g_base + kFnHitEffects904)(victim, fx, hero, 1, pos, delta, rad, reinterpret_cast<uint8_t*>(&res), 1);
+    }
+    reinterpret_cast<FnDtor>(g_base + kFnHitInfoDtor904)(hi);
+    *dmgOut = dmg;
+    return killed ? 2 : 1;
+}
+void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
+    if (!g_mq.n) return;
+    MeleeReq reqs[8];
+    AcquireSRWLockExclusive(&g_mq.lock);
+    int nr = g_mq.n;
+    memcpy(reqs, g_mq.q, sizeof(MeleeReq) * nr);
+    g_mq.n = 0;
+    ReleaseSRWLockExclusive(&g_mq.lock);
+    uintptr_t outer = Ptr(hero + 0x58);
+    if (!outer || Ptr(outer + 0x440) != world) {
+        if (g_mq.logs++ < 8) Log("melee-engine: hero %p world mismatch ([+0x58]=%p [+0x440]=%p, hook world %p) - skipped", (void*)hero,
+                                 (void*)outer, (void*)Ptr(outer + 0x440), (void*)world);
+        return;
+    }
+    uint32_t heroHp = 0, heroL6c = 0;
+    Rd(hero + 0xb1c, heroHp);
+    Rd(hero + 0x6c, heroL6c);
+    uintptr_t heroSide = Ptr(hero + 0x80), heroUnit = Ptr(hero + 0x2e8);
+    if (!heroHp) return;
+    using FnCanHit = char (*)(uintptr_t e);
+    static uintptr_t ents[1024];
+    for (int ri = 0; ri < nr; ++ri) {
+        const MeleeReq& rq = reqs[ri];
+        if (rq.hero != hero || Now() - rq.t > 0.6) continue;
+        const MeleeArc& arc = kMeleeArcs[rq.kind];
+        float cosHalf = std::cos(arc.halfDeg * kPi / 180.f), reach = arc.reach + 0.3f;
+        struct Cand {
+            uintptr_t e;
+            float d;
+        } cand[16];
+        int nc = 0;
+        unsigned scanned = 0;
+        uintptr_t list = Ptr(world + oWorldAlliances);
+        uint32_t na = 0;
+        if (list && Rd(list + oAlliancesCount, na) && na <= 16) {
+            uintptr_t alliances = Ptr(list + oAlliancesArray);
+            for (uint32_t i = 0; i < na && alliances; ++i) {
+                uintptr_t al = Ptr(alliances + 8 * i);
+                uint32_t nArmies = 0;
+                if (!al || !Rd(al + oAllianceArmyCount, nArmies) || nArmies > 64) continue;
+                uintptr_t armies = Ptr(al + oAllianceArmyArray);
+                for (uint32_t j = 0; j < nArmies && armies; ++j) {
+                    uintptr_t army = Ptr(armies + 8 * j);
+                    uint32_t nu = 0;
+                    if (!army || !Rd(army + oArmyUnitCount, nu) || nu > 1024) continue;
+                    uintptr_t units = Ptr(army + oArmyUnitArray);
+                    for (uint32_t k = 0; k < nu && units; ++k) {
+                        uintptr_t u = Ptr(units + 8 * k);
+                        if (!u || u == heroUnit) continue;
+                        unsigned ne = UnitEntities(u, ents, 1024);
+                        for (unsigned m = 0; m < ne; ++m) {
+                            uintptr_t e = ents[m];
+                            float q[3];
+                            if (e == hero || !Plausible(e) || !EntPos(e, q)) continue;
+                            ++scanned;
+                            float vx = q[0] - rq.ox, vz = q[2] - rq.oz, d = std::sqrt(vx * vx + vz * vz);
+                            if (d > reach || std::fabs(q[1] - (rq.oy - 1.7f)) > 3.f) continue;
+                            if (d > 0.6f && (vx * rq.dx + vz * rq.dz) / d < cosHalf) continue;
+                            uint32_t hp = 0, l6c = 0;
+                            uint8_t f108 = 0, f68 = 0;
+                            if (!Rd(e + 0xb1c, hp) || !hp || !Rd(e + 0x108, f108) || !(f108 & 0x10) || !Rd(e + 0x68, f68) || !(f68 & 1) ||
+                                !Rd(e + 0x6c, l6c) || Ptr(e + 0x80) == heroSide || !(l6c & heroL6c & 2))
+                                continue;
+                            if (!reinterpret_cast<FnCanHit>(g_base + kFnCanBeHit904)(e)) continue;
+                            if (nc < 16) {
+                                cand[nc++] = {e, d};
+                            } else {
+                                int worst = 0;
+                                for (int c = 1; c < 16; ++c)
+                                    if (cand[c].d > cand[worst].d) worst = c;
+                                if (d < cand[worst].d) cand[worst] = {e, d};
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (int a = 1; a < nc; ++a)
+            for (int b = a; b > 0 && cand[b].d < cand[b - 1].d; --b) {
+                Cand tmp = cand[b];
+                cand[b] = cand[b - 1];
+                cand[b - 1] = tmp;
+            }
+        int hits = 0, kills = 0, n = nc < arc.maxHit ? nc : arc.maxHit;
+        char dl[160] = "";
+        int dn = 0;
+        for (int c = 0; c < n; ++c) {
+            int dmg = 0, rr = MeleeEngineHit(world, hero, cand[c].e, arc, &dmg);
+            if (rr) ++hits;
+            if (rr == 2) ++kills;
+            if (dn < 140) dn += snprintf(dl + dn, sizeof dl - dn, "%s%d%s@%.1f", c ? " " : "", dmg, rr == 2 ? "k" : rr ? "" : "x", cand[c].d);
+        }
+        InterlockedIncrement(&g_mq.strikes);
+        InterlockedExchangeAdd(&g_mq.hits, hits);
+        InterlockedExchangeAdd(&g_mq.kills, kills);
+        if (g_mq.logs++ < 200)
+            Log("melee-engine: kind %d (%.0f ms after queue) scanned %u, in arc %d, hit %d, killed %d, damage [%s] (forced hits so far %ld)",
+                rq.kind, (Now() - rq.t) * 1000.0, scanned, nc, hits, kills, dl, g_mq.forced);
+    }
 }
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
               int nBodies, float clearance) {
@@ -3289,10 +3531,13 @@ void Apply(uintptr_t mgr) {
         vmgame::MeleeInput(held && !S.sprint && now >= S.fireBlock, blockKey && !S.sprint);
         int strike = vmgame::TakeMeleeStrike();
         if (strike >= 0 && g_fireOk && cfg.fireEnabled) {
-            if (MeleeStrike(strike, eye, vFwd))
+            bool engine = MeleeEngineReady();
+            if (engine ? MeleeEngineQueue(strike, eye, vFwd) : MeleeStrike(strike, eye, vFwd))
                 ++S.meleeStrikes;
             else
                 ++S.meleeFailed;
+            if (S.strikeLogs < 4 && S.meleeStrikes == 1)
+                Log("melee: first strike via %s", engine ? "engine melee hit (sim thread)" : "splash explosion");
         }
         held = false;
     }
@@ -3685,6 +3930,8 @@ bool VerifyGame() {
         Log("ui: battle hud hiding %s", g_uiOk ? "ok" : "OFF");
         g_shotOk = PrintsMatch(game->shot, "fire owner / bullet speed");
         Log("fire: owner + unlimited ammo + bullet speed %s", g_shotOk ? "ok" : "OFF");
+        g_meleeHitOk = g_shotOk && PrintsMatch(Prints(kMeleeHitPrints904), "engine melee hit");
+        Log("melee: engine melee hit %s", g_meleeHitOk ? "ok" : "OFF (melee weapon falls back to splash explosions)");
         Log("move: unit orders %s, entity halt %s, entity move %s, entity teleport %s (unavailable modes fall back to unit orders)",
             m ? "ok" : "OFF", h ? "ok" : "OFF", o ? "ok" : "OFF", t ? "ok" : "OFF");
     }
@@ -3789,6 +4036,7 @@ extern "C" void hfps_post_step_begin(uintptr_t self, uintptr_t world) {
     QueryPerformanceCounter(&q);
     g_ef.lastQpc = q.QuadPart;
     if (!world || world != g_ef.world || !g_ef.hero) return;
+    MeleeEngineStep(world, g_ef.hero);
     uintptr_t pm = *reinterpret_cast<uintptr_t*>(world + 0x1c8);
     if (!pm) return;
     uint32_t pc = *reinterpret_cast<uint32_t*>(pm + 0x24);
