@@ -163,6 +163,11 @@ const CodePrint kMeleeHitPrints904[] = {
     {0x307fb18, 0x9a6, 0x11c52f1a3be95d62ull}};
 constexpr uintptr_t kFnMeleeHitCalc904 = 0x30a9344, kFnHitInfoCtor904 = 0x3250ef0, kFnHitInfoDtor904 = 0x8fc238,
                     kFnKillResolve904 = 0x3253204, kFnCanBeHit904 = 0x306dbf0, kFnHitEffects904 = 0x3085114;
+const CodePrint kNoKnockPrints904[] = {
+    {0x325369c, 0x1c8, 0x7c8a1f823c6190dbull},
+    {0x3253864, 0x145, 0x5976029983ed5217ull},
+    {0x32539ac, 0x2da, 0x26345717ef031c0cull},
+    {0x325c70c, 0x62, 0xd2c4dec66c65fbebull}};
 const unsigned char kPresentHelper904[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x33,
                                            0xDB, 0x48, 0x8B, 0xF9, 0x38, 0x1D, 0x07, 0x3E, 0xED, 0x03, 0x48,
                                            0x8B, 0x09, 0x0F, 0x85, 0x98, 0x9E, 0xCC, 0x00, 0x4C, 0x8B, 0x89,
@@ -331,6 +336,7 @@ constexpr int32_t kAttrMeleeDisabled = 0x2a;
 bool g_meleeOk = false;
 bool g_shotOk = false;
 bool g_meleeHitOk = false;
+bool g_noKnockOk = false;
 constexpr uintptr_t oUiHudRoot = 0x358, oUicChildCount = 0x1cc, oUicChildren = 0x1d0, oUicId = 0x2a0, oUicVisible = 0x353;
 constexpr int kMaxHideUi = 12;
 constexpr uintptr_t oUicPos = 0x2c0, oUicLayout = 0x2f0, oLayoutW = 0x11c, oLayoutH = 0x120;
@@ -385,6 +391,7 @@ struct Config {
     bool ghost = false;
     bool revealEnemies = true;
     bool noMelee = true;
+    bool noKnock = true;
     bool hideHud = true;
     bool hideCursor = true;
     bool hidePaths = true;
@@ -568,6 +575,7 @@ void LoadConfig() {
     if (cfg.tpLead < 0.f || cfg.tpLead > 0.6f) cfg.tpLead = 0.2f;
     cfg.revealEnemies = GetPrivateProfileIntW(L"hero", L"reveal_enemies", 1, ini) != 0;
     cfg.noMelee = GetPrivateProfileIntW(L"hero", L"no_melee", 1, ini) != 0;
+    cfg.noKnock = GetPrivateProfileIntW(L"hero", L"no_knockdown", 1, ini) != 0;
     cfg.meleeEngine = GetPrivateProfileIntW(L"melee", L"engine", 1, ini) != 0;
     cfg.meleeAlwaysHit = GetPrivateProfileIntW(L"melee", L"always_hit", 1, ini) != 0;
     cfg.meleeDamage = IniF(L"melee", L"damage_scale", cfg.meleeDamage, ini);
@@ -2570,6 +2578,81 @@ void MeleeStep() {
     if (S.meleeLogs++ < 20)
         Log("melee: hero %p melee_disabled set (no melee, no fighting back; enemies can still hit it) issued %d", (void*)S.unit, ok);
 }
+constexpr uintptr_t kVtKnockBack = 0x540, kVtKnockDown = 0x548, kVtKnockFlying = 0x550;
+struct NoKnock {
+    uintptr_t ent = 0, origVt = 0;
+    uintptr_t* copy = nullptr;
+    uintptr_t copyOf = 0;
+    size_t slots = 0;
+    volatile LONG blocked[3] = {0, 0, 0};
+    LONG logged = 0;
+    unsigned logs = 0;
+} g_nk;
+uint64_t KnockBackStub(uintptr_t, void*) { return InterlockedIncrement(&g_nk.blocked[0]), 0; }
+uint64_t KnockDownStub(uintptr_t, void*) { return InterlockedIncrement(&g_nk.blocked[1]), 0; }
+uint64_t KnockFlyingStub(uintptr_t, void*) { return InterlockedIncrement(&g_nk.blocked[2]), 0; }
+void NoKnockRemove(const char* why) {
+    if (!g_nk.ent) return;
+    bool ours = g_nk.copy && Ptr(g_nk.ent) == reinterpret_cast<uintptr_t>(g_nk.copy + 1);
+    if (ours) Wr(g_nk.ent, g_nk.origVt);
+    Log("hero: no-knockdown off for %p (%s)%s - blocked knock back %ld, knock down %ld, knock flying %ld", (void*)g_nk.ent, why,
+        ours ? "" : " (vtable was not ours any more - left alone)", g_nk.blocked[0], g_nk.blocked[1], g_nk.blocked[2]);
+    g_nk.ent = 0;
+}
+bool NoKnockInstall(uintptr_t ent) {
+    uintptr_t vt = Ptr(ent), lo = 0, hi = 0;
+    if (!vt || vt < g_base || vt >= g_base + g_imageSize || !CodeRange(&lo, &hi)) {
+        if (g_nk.logs++ < 8) Log("hero: no-knockdown: entity %p vtable %p not in the game image - not hooking", (void*)ent, (void*)vt);
+        return false;
+    }
+    if (g_nk.copy && vt == reinterpret_cast<uintptr_t>(g_nk.copy + 1)) return true;
+    if (!g_nk.copy || g_nk.copyOf != vt) {
+        size_t slots = 0;
+        while (slots < 4096) {
+            uintptr_t f = Ptr(vt + 8 * slots);
+            if (f < lo || f >= hi) break;
+            ++slots;
+        }
+        if (slots <= kVtKnockFlying / 8) {
+            if (g_nk.logs++ < 8) Log("hero: no-knockdown: entity vtable %p has only %zu slots - not hooking", (void*)vt, slots);
+            return false;
+        }
+        size_t n = slots + 64;
+        auto* c = static_cast<uintptr_t*>(VirtualAlloc(nullptr, (n + 1) * sizeof(uintptr_t), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!c) return false;
+        c[0] = Ptr(vt - 8);
+        for (size_t i = 0; i < n; ++i) c[1 + i] = Ptr(vt + 8 * i);
+        c[1 + kVtKnockBack / 8] = reinterpret_cast<uintptr_t>(&KnockBackStub);
+        c[1 + kVtKnockDown / 8] = reinterpret_cast<uintptr_t>(&KnockDownStub);
+        c[1 + kVtKnockFlying / 8] = reinterpret_cast<uintptr_t>(&KnockFlyingStub);
+        g_nk.copy = c;
+        g_nk.copyOf = vt;
+        g_nk.slots = slots;
+    }
+    g_nk.origVt = vt;
+    g_nk.ent = ent;
+    bool ok = Wr(ent, reinterpret_cast<uintptr_t>(g_nk.copy + 1));
+    Log("hero: no-knockdown on for entity %p (vtable +0x%llx -> copy %p, %zu slots; knock back / down / flying slots replaced) %s", (void*)ent,
+        (unsigned long long)(vt - g_base), (void*)(g_nk.copy + 1), g_nk.slots, ok ? "" : "WRITE FAILED");
+    if (!ok) g_nk.ent = 0;
+    return ok;
+}
+void NoKnockStep() {
+    bool want = S.active && cfg.noKnock && g_noKnockOk && S.entity;
+    if (g_nk.ent && (!want || g_nk.ent != S.entity)) NoKnockRemove(!want ? "first person off / switched off" : "hero changed");
+    if (!want) return;
+    if (g_nk.ent == S.entity && g_nk.copy && Ptr(S.entity) != reinterpret_cast<uintptr_t>(g_nk.copy + 1)) {
+        if (g_nk.logs++ < 8) Log("hero: no-knockdown: entity %p vtable changed to +0x%llx by the game - re-hooking", (void*)S.entity,
+                                 (unsigned long long)(Ptr(S.entity) - g_base));
+        g_nk.ent = 0;
+    }
+    if (g_nk.ent != S.entity) NoKnockInstall(S.entity);
+    LONG total = g_nk.blocked[0] + g_nk.blocked[1] + g_nk.blocked[2];
+    if (total != g_nk.logged && g_nk.logs++ < 60) {
+        g_nk.logged = total;
+        Log("hero: knock blocked (so far: back %ld, down %ld, flying %ld)", g_nk.blocked[0], g_nk.blocked[1], g_nk.blocked[2]);
+    }
+}
 bool UicName(uintptr_t uic, char* out, size_t n) {
     out[0] = 0;
     uintptr_t p = Ptr(uic + oUicId);
@@ -4006,6 +4089,8 @@ bool VerifyGame() {
         Log("fire: owner + unlimited ammo + bullet speed %s", g_shotOk ? "ok" : "OFF");
         g_meleeHitOk = g_shotOk && PrintsMatch(Prints(kMeleeHitPrints904), "engine melee hit");
         Log("melee: engine melee hit %s", g_meleeHitOk ? "ok" : "OFF (melee weapon falls back to splash explosions)");
+        g_noKnockOk = PrintsMatch(Prints(kNoKnockPrints904), "hero no knockdown");
+        Log("hero: no-knockdown switch %s", g_noKnockOk ? "ok" : "OFF");
         Log("move: unit orders %s, entity halt %s, entity move %s, entity teleport %s (unavailable modes fall back to unit orders)",
             m ? "ok" : "OFF", h ? "ok" : "OFF", o ? "ok" : "OFF", t ? "ok" : "OFF");
     }
@@ -4212,6 +4297,7 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     if (S.active) Apply(mgr);
     RevealStep(mgr);
     MeleeStep();
+    NoKnockStep();
     UiStep();
     CursorStep();
     PathStep();
