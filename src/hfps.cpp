@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include "shield_hit.h"
 #include "vm_game.h"
 #ifdef HFPS_PACK_ASSETS
 #include "pack_extract.h"
@@ -38,6 +39,10 @@ void* g_orig_post_step;
 uintptr_t g_post_step_ret;
 void hfps_post_step_thunk();
 void hfps_post_step_begin(uintptr_t self, uintptr_t world);
+void* g_orig_hero_1c8;
+uintptr_t g_hero_1c8_ret1, g_hero_1c8_ret2;
+void hfps_hero_1c8_thunk();
+void hfps_hero_melee(uintptr_t self, uintptr_t pend);
 }
 namespace {
 struct CodePrint {
@@ -168,6 +173,19 @@ const CodePrint kNoKnockPrints904[] = {
     {0x3253864, 0x145, 0x5976029983ed5217ull},
     {0x32539ac, 0x2da, 0x26345717ef031c0cull},
     {0x325c70c, 0x62, 0xd2c4dec66c65fbebull}};
+const CodePrint kShieldGamePrints904[] = {
+    {0x306b1a8, 0x8e4, 0x735cc3a5886923b0ull},
+    {0x305947c, 0x57, 0x43af29536f3defa7ull},
+    {0x3253d8c, 0x656, 0xdc53d4d03a3943f8ull},
+    {0x32654d0, 0x708, 0xe253d33a7cb2f415ull},
+    {0x307517c, 0x68, 0xc7cbd99e65c01a48ull},
+    {0x306ee40, 0x296, 0xa637304bb565fab0ull},
+    {0x3075b20, 0xa8, 0x24bab350ff394161ull},
+    {0x3252ed0, 0xb1, 0x63f194fe2dc7f0a0ull},
+    {0x310157c, 0x1e, 0x891955780f4d6a5eull},
+    {0x8d3ca0, 0x3, 0x58389c18233078ffull}};
+constexpr uintptr_t kVtSoldier904 = 0x3912950, kFnProjHit904 = 0x306b1a8, kFnProjCanHit904 = 0x305947c, kFnRet0Of1c8_904 = 0x8d3ca0,
+                    kFnHitReact904 = 0x307517c, kFnStagger904 = 0x306ee40, kMeleeRet1_904 = 0x3253e70, kMeleeRet2_904 = 0x326565e;
 const unsigned char kPresentHelper904[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x33,
                                            0xDB, 0x48, 0x8B, 0xF9, 0x38, 0x1D, 0x07, 0x3E, 0xED, 0x03, 0x48,
                                            0x8B, 0x09, 0x0F, 0x85, 0x98, 0x9E, 0xCC, 0x00, 0x4C, 0x8B, 0x89,
@@ -337,6 +355,7 @@ bool g_meleeOk = false;
 bool g_shotOk = false;
 bool g_meleeHitOk = false;
 bool g_noKnockOk = false;
+bool g_shieldGameOk = false;
 constexpr uintptr_t oUiHudRoot = 0x358, oUicChildCount = 0x1cc, oUicChildren = 0x1d0, oUicId = 0x2a0, oUicVisible = 0x353;
 constexpr int kMaxHideUi = 12;
 constexpr uintptr_t oUicPos = 0x2c0, oUicLayout = 0x2f0, oLayoutW = 0x11c, oLayoutH = 0x120;
@@ -392,6 +411,10 @@ struct Config {
     bool revealEnemies = true;
     bool noMelee = true;
     bool noKnock = true;
+    bool shieldGame = true;
+    bool shieldStagger = true;
+    float shieldAngle = 180.f;
+    bool shieldRefund = true;
     bool hideHud = true;
     bool hideCursor = true;
     bool hidePaths = true;
@@ -414,6 +437,10 @@ struct Config {
     float meleeSplashRadius = 1.5f;
     float meleeSplashDamage = 0.5f;
     int meleeSplashMax = 6;
+    float meleeHeavySplashRadius = 2.5f;
+    float meleeHeavySplashDamage = 0.6f;
+    int meleeHeavySplashMax = 12;
+    float meleeHeavyReach = 1.3f;
 } cfg;
 wchar_t g_dir[MAX_PATH];
 uintptr_t g_base = 0;
@@ -477,10 +504,12 @@ float IniF(const wchar_t* sec, const wchar_t* key, float def, const wchar_t* ini
     double v = wcstod(buf, &end);
     return (end != buf && std::isfinite(v)) ? static_cast<float>(v) : def;
 }
+LONG g_cfgGen = 0;
 void LoadConfig() {
     wchar_t ini[MAX_PATH];
     wcscpy(ini, g_dir);
     wcscat(ini, L"\\hero_fps.ini");
+    InterlockedIncrement(&g_cfgGen);
     cfg.enabled = GetPrivateProfileIntW(L"general", L"enabled", 1, ini) != 0;
     UINT key = GetPrivateProfileIntW(L"general", L"toggle_key", VK_F6, ini);
     cfg.toggleKey = (key > 0 && key < 0xFF) ? key : VK_F6;
@@ -576,6 +605,11 @@ void LoadConfig() {
     cfg.revealEnemies = GetPrivateProfileIntW(L"hero", L"reveal_enemies", 1, ini) != 0;
     cfg.noMelee = GetPrivateProfileIntW(L"hero", L"no_melee", 1, ini) != 0;
     cfg.noKnock = GetPrivateProfileIntW(L"hero", L"no_knockdown", 1, ini) != 0;
+    cfg.shieldGame = GetPrivateProfileIntW(L"viewmodel", L"shield_block_game", 1, ini) != 0;
+    cfg.shieldStagger = GetPrivateProfileIntW(L"viewmodel", L"shield_block_stagger", 1, ini) != 0;
+    cfg.shieldAngle = IniF(L"viewmodel", L"shield_block_angle", 180.f, ini);
+    if (!(cfg.shieldAngle >= 0.f && cfg.shieldAngle <= 180.f)) cfg.shieldAngle = 180.f;
+    cfg.shieldRefund = GetPrivateProfileIntW(L"viewmodel", L"shield_block_refund", 1, ini) != 0;
     cfg.meleeEngine = GetPrivateProfileIntW(L"melee", L"engine", 1, ini) != 0;
     cfg.meleeAlwaysHit = GetPrivateProfileIntW(L"melee", L"always_hit", 1, ini) != 0;
     cfg.meleeDamage = IniF(L"melee", L"damage_scale", cfg.meleeDamage, ini);
@@ -590,6 +624,14 @@ void LoadConfig() {
     if (!(cfg.meleeSplashDamage >= 0.f && cfg.meleeSplashDamage <= 5.f)) cfg.meleeSplashDamage = 0.5f;
     cfg.meleeSplashMax = GetPrivateProfileIntW(L"melee", L"splash_max", cfg.meleeSplashMax, ini);
     if (cfg.meleeSplashMax < 0 || cfg.meleeSplashMax > 32) cfg.meleeSplashMax = 6;
+    cfg.meleeHeavySplashRadius = IniF(L"melee", L"heavy_splash_radius", cfg.meleeHeavySplashRadius, ini);
+    if (!(cfg.meleeHeavySplashRadius >= 0.f && cfg.meleeHeavySplashRadius <= 6.f)) cfg.meleeHeavySplashRadius = 2.5f;
+    cfg.meleeHeavySplashDamage = IniF(L"melee", L"heavy_splash_damage", cfg.meleeHeavySplashDamage, ini);
+    if (!(cfg.meleeHeavySplashDamage >= 0.f && cfg.meleeHeavySplashDamage <= 5.f)) cfg.meleeHeavySplashDamage = 0.6f;
+    cfg.meleeHeavySplashMax = GetPrivateProfileIntW(L"melee", L"heavy_splash_max", cfg.meleeHeavySplashMax, ini);
+    if (cfg.meleeHeavySplashMax < 0 || cfg.meleeHeavySplashMax > 32) cfg.meleeHeavySplashMax = 12;
+    cfg.meleeHeavyReach = IniF(L"melee", L"heavy_reach", cfg.meleeHeavyReach, ini);
+    if (!(cfg.meleeHeavyReach >= 0.5f && cfg.meleeHeavyReach <= 3.f)) cfg.meleeHeavyReach = 1.3f;
     cfg.hideHud = GetPrivateProfileIntW(L"ui", L"hide_hud", 1, ini) != 0;
     cfg.hideCursor = GetPrivateProfileIntW(L"ui", L"hide_cursor", 1, ini) != 0;
     cfg.hidePaths = GetPrivateProfileIntW(L"ui", L"hide_paths", 1, ini) != 0;
@@ -1556,8 +1598,8 @@ struct MeleeArc {
 const MeleeArc kMeleeArcs[vmgame::kStrikeKinds] = {
     {2.7f, 25.f, 1.0f, 2, true},
     {2.5f, 65.f, 0.8f, 4, true},
-    {2.6f, 70.f, 1.2f, 5, true},
-    {2.8f, 30.f, 1.6f, 2, true},
+    {2.6f, 80.f, 1.2f, 8, true},
+    {2.8f, 40.f, 1.6f, 3, true},
     {2.2f, 60.f, 0.0f, 5, false},
 };
 struct MeleeReq {
@@ -1700,15 +1742,19 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         const MeleeReq& rq = reqs[ri];
         if (rq.hero != hero || Now() - rq.t > 0.6) continue;
         const MeleeArc& arc = kMeleeArcs[rq.kind];
-        float cosHalf = std::cos(arc.halfDeg * kPi / 180.f), reach = arc.reach + 0.3f;
-        const bool splash = cfg.meleeSplashRadius > 0.f && cfg.meleeSplashMax > 0;
-        const float scanR = reach + (splash ? cfg.meleeSplashRadius : 0.f);
+        const bool heavy = rq.kind == vmgame::kStrikeHeavySweep || rq.kind == vmgame::kStrikeHeavy;
+        const float splashR = heavy ? cfg.meleeHeavySplashRadius : cfg.meleeSplashRadius;
+        const float splashDmg = heavy ? cfg.meleeHeavySplashDamage : cfg.meleeSplashDamage;
+        const int splashMax = heavy ? cfg.meleeHeavySplashMax : cfg.meleeSplashMax;
+        float cosHalf = std::cos(arc.halfDeg * kPi / 180.f), reach = arc.reach * (heavy ? cfg.meleeHeavyReach : 1.f) + 0.3f;
+        const bool splash = splashR > 0.f && splashMax > 0;
+        const float scanR = reach + (splash ? splashR : 0.f);
         struct Cand {
             uintptr_t e;
             float d, x, z;
             bool inArc, done;
         };
-        static Cand cand[64];
+        static Cand cand[96];
         int nc = 0;
         unsigned scanned = 0;
         uintptr_t list = Ptr(world + oWorldAlliances);
@@ -1745,11 +1791,11 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
                                 continue;
                             if (!reinterpret_cast<FnCanHit>(g_base + kFnCanBeHit904)(e)) continue;
                             Cand cd = {e, d, q[0], q[2], inArc, false};
-                            if (nc < 64) {
+                            if (nc < 96) {
                                 cand[nc++] = cd;
                             } else {
                                 int worst = 0;
-                                for (int c = 1; c < 64; ++c)
+                                for (int c = 1; c < 96; ++c)
                                     if (cand[c].d > cand[worst].d) worst = c;
                                 if (d < cand[worst].d) cand[worst] = cd;
                             }
@@ -1785,9 +1831,9 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
             struct SCand {
                 int c;
                 float d;
-            } sc[64];
+            } sc[96];
             int ns = 0;
-            float r2 = cfg.meleeSplashRadius * cfg.meleeSplashRadius;
+            float r2 = splashR * splashR;
             for (int c = 0; c < nc; ++c) {
                 if (cand[c].done) continue;
                 float best = 1e9f;
@@ -1795,7 +1841,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
                     float dx = cand[c].x - cand[prim[k]].x, dz = cand[c].z - cand[prim[k]].z, dd = dx * dx + dz * dz;
                     if (dd < best) best = dd;
                 }
-                if (best <= r2 && ns < 64) sc[ns++] = {c, std::sqrt(best)};
+                if (best <= r2 && ns < 96) sc[ns++] = {c, std::sqrt(best)};
             }
             for (int a = 1; a < ns; ++a)
                 for (int b = a; b > 0 && sc[b].d < sc[b - 1].d; --b) {
@@ -1803,11 +1849,11 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
                     sc[b] = sc[b - 1];
                     sc[b - 1] = tmp;
                 }
-            int ms = ns < cfg.meleeSplashMax ? ns : cfg.meleeSplashMax;
+            int ms = ns < splashMax ? ns : splashMax;
             for (int s = 0; s < ms; ++s) {
                 Cand& cd = cand[sc[s].c];
                 cd.done = true;
-                int dmg = 0, rr = MeleeEngineHit(world, hero, cd.e, arc, cfg.meleeSplashDamage, &dmg);
+                int dmg = 0, rr = MeleeEngineHit(world, hero, cd.e, arc, splashDmg, &dmg);
                 if (rr) ++sHits;
                 if (rr == 2) ++sKills;
                 if (sn < 140) sn += snprintf(sl + sn, sizeof sl - sn, "%s%d%s@%.1f", s ? " " : "", dmg, rr == 2 ? "k" : rr ? "" : "x", sc[s].d);
@@ -1817,9 +1863,10 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         InterlockedExchangeAdd(&g_mq.hits, hits + sHits);
         InterlockedExchangeAdd(&g_mq.kills, kills + sKills);
         if (g_mq.logs++ < 200)
-            Log("melee-engine: kind %d (%.0f ms after queue) scanned %u, in arc %d, hit %d, killed %d, damage [%s] | splash hit %d, killed %d "
-                "[%s] (forced hits so far %ld, fallback damage so far %ld)",
-                rq.kind, (Now() - rq.t) * 1000.0, scanned, inArc, hits, kills, dl, sHits, sKills, sl, g_mq.forced, g_mq.fallback);
+            Log("melee-engine: kind %d %s (reach %.1f m, splash %.1f m x%d) (%.0f ms after queue) scanned %u, in arc %d, hit %d, killed %d, "
+                "damage [%s] | splash hit %d, killed %d [%s] (forced hits so far %ld, fallback damage so far %ld)",
+                rq.kind, heavy ? "heavy" : "light", reach, splashR, splashMax, (Now() - rq.t) * 1000.0, scanned, inArc, hits, kills, dl, sHits,
+                sKills, sl, g_mq.forced, g_mq.fallback);
     }
 }
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
@@ -2583,20 +2630,224 @@ struct NoKnock {
     uintptr_t ent = 0, origVt = 0;
     uintptr_t* copy = nullptr;
     uintptr_t copyOf = 0;
+    bool copyKnock = false, copyShield = false;
+    bool knock = false, shield = false;
+    LONG gen = 0;
     size_t slots = 0;
     volatile LONG blocked[3] = {0, 0, 0};
     LONG logged = 0;
     unsigned logs = 0;
 } g_nk;
-uint64_t KnockBackStub(uintptr_t, void*) { return InterlockedIncrement(&g_nk.blocked[0]), 0; }
-uint64_t KnockDownStub(uintptr_t, void*) { return InterlockedIncrement(&g_nk.blocked[1]), 0; }
-uint64_t KnockFlyingStub(uintptr_t, void*) { return InterlockedIncrement(&g_nk.blocked[2]), 0; }
+void ShieldBracketClose(uintptr_t self);
+uint64_t KnockBackStub(uintptr_t self, void*) { return ShieldBracketClose(self), InterlockedIncrement(&g_nk.blocked[0]), 0; }
+uint64_t KnockDownStub(uintptr_t self, void*) { return ShieldBracketClose(self), InterlockedIncrement(&g_nk.blocked[1]), 0; }
+uint64_t KnockFlyingStub(uintptr_t self, void*) { return ShieldBracketClose(self), InterlockedIncrement(&g_nk.blocked[2]), 0; }
+struct ShieldGameState {
+    uintptr_t ent = 0;
+    uintptr_t orig310 = 0, orig3a8 = 0, orig558 = 0;
+    SRWLOCK lock = SRWLOCK_INIT;
+    uintptr_t hpEnt = 0;
+    uint32_t hpPrev = 0;
+    uint32_t exempt = 0;
+    uint32_t bracketHp = 0;
+    bool bracket = false;
+    LONG64 lastFxQpc = 0;
+    volatile LONG missileFull = 0, missilePart = 0, meleeFull = 0, meleePart = 0, meleeMiss = 0, side = 0, stagger = 0, refunds = 0, refundHp = 0;
+    volatile LONG logs = 0;
+    LONG statSum = 0;
+    unsigned statLogs = 0;
+    volatile LONG hookTid = 0, stepTid = 0;
+} g_sb;
+float ShieldFrac(uintptr_t self) {
+    return self && self == g_sb.ent && S.active && cfg.shieldGame ? vmgame::ShieldBlockFraction() : 0.f;
+}
+bool ShieldLog() { return InterlockedIncrement(&g_sb.logs) <= 120; }
+void ShieldBracketCloseLocked(uintptr_t self) {
+    if (!g_sb.bracket) return;
+    g_sb.bracket = false;
+    uint32_t hp = 0;
+    if (Rd(self + 0xb1c, hp) && hp < g_sb.bracketHp) g_sb.exempt += g_sb.bracketHp - hp;
+}
+void ShieldBracketClose(uintptr_t self) {
+    if (!self || self != g_sb.ent || !g_sb.bracket) return;
+    AcquireSRWLockExclusive(&g_sb.lock);
+    ShieldBracketCloseLocked(self);
+    ReleaseSRWLockExclusive(&g_sb.lock);
+}
+using FnHeroProjHit = uint64_t (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+uint64_t HeroProjHit(uintptr_t self, uintptr_t proj, uintptr_t list, uintptr_t flag, uintptr_t out) {
+    auto orig = reinterpret_cast<FnHeroProjHit>(g_sb.orig310);
+    ShieldBracketClose(self);
+    float f = ShieldFrac(self);
+    if (!(f > 0.f) || !proj || !out) return orig(self, proj, list, flag, out);
+    uint8_t alive = 0;
+    uintptr_t mount = 1;
+    if (!Rd(self + 0x108, alive) || !(alive & 0x10) || !Rd(self + 0x2e0, mount) || mount) return orig(self, proj, list, flag, out);
+    using FnCanHit = char (*)(uintptr_t, uintptr_t, uintptr_t);
+    if (!reinterpret_cast<FnCanHit>(g_base + kFnProjCanHit904)(self, proj, flag & 0xff)) return orig(self, proj, list, flag, out);
+    float v[3] = {}, h[3] = {}, src[3] = {};
+    for (int i = 0; i < 3; ++i) Rd(proj + 0x100 + 4 * i, v[i]), Rd(self + oEntPos + 4 * i, h[i]);
+    float dx = -v[0], dz = -v[2];
+    if (dx * dx + dz * dz < 1.f) {
+        uintptr_t shooter = Ptr(proj + 0x20);
+        if (shooter ? ReadVec(shooter + oEntPos, src) : ReadVec(proj + 0xf4, src)) dx = src[0] - h[0], dz = src[2] - h[2];
+    }
+    float ang = 0.f;
+    bool front = shieldhit::Frontal(S.yaw, dx, dz, cfg.shieldAngle, &ang);
+    float m[4] = {}, rec[2] = {};
+    for (int i = 0; i < 4; ++i) Rd(proj + 0x78 + 4 * i, m[i]);
+    uintptr_t r = Ptr(proj + 0x90);
+    if (r) Rd(r + 0x70, rec[0]), Rd(r + 0x74, rec[1]);
+    float raw = rec[0] * m[0] + m[1] + rec[1] * m[2] + m[3];
+    float speed = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (!front) {
+        InterlockedIncrement(&g_sb.side);
+        if (ShieldLog()) Log("shield-game: missile from the side (%.0f deg > %.0f) not blocked, raw %.0f, speed %.1f", ang, cfg.shieldAngle, raw, speed);
+        return orig(self, proj, list, flag, out);
+    }
+    vmgame::ShieldHit();
+    if (!g_sb.hookTid) InterlockedExchange(&g_sb.hookTid, static_cast<LONG>(GetCurrentThreadId()));
+    if (shieldhit::Full(f)) {
+        *reinterpret_cast<uint16_t*>(out) = 0;
+        InterlockedIncrement(&g_sb.missileFull);
+        if (ShieldLog())
+            Log("shield-game: missile blocked 100%% (raw %.0f, speed %.1f, from %.0f deg, shooter %p, projectile %p) - eaten by the shield", raw, speed, ang,
+                (void*)Ptr(proj + 0x20), (void*)proj);
+        return 1;
+    }
+    float* pm = reinterpret_cast<float*>(proj + 0x78);
+    float save[4] = {pm[0], pm[1], pm[2], pm[3]};
+    shieldhit::ScaleProjectile(pm, f);
+    uint32_t hp0 = 0, hp1 = 0;
+    Rd(self + 0xb1c, hp0);
+    uint64_t res = orig(self, proj, list, flag, out);
+    for (int i = 0; i < 4; ++i) pm[i] = save[i];
+    Rd(self + 0xb1c, hp1);
+    if (hp1 < hp0) {
+        AcquireSRWLockExclusive(&g_sb.lock);
+        g_sb.exempt += hp0 - hp1;
+        ReleaseSRWLockExclusive(&g_sb.lock);
+    }
+    InterlockedIncrement(&g_sb.missilePart);
+    if (ShieldLog())
+        Log("shield-game: missile blocked %.0f%% (raw %.0f -> %.0f, speed %.1f, from %.0f deg) hp %u -> %u", f * 100.f, raw, raw * (1.f - f), speed, ang, hp0,
+            hp1);
+    return res;
+}
+extern "C" void hfps_hero_melee(uintptr_t self, uintptr_t pend) {
+    ShieldBracketClose(self);
+    float f = ShieldFrac(self);
+    uintptr_t victim = 0;
+    if (!(f > 0.f) || !pend || !Rd(pend + 0x10, victim) || victim != self) return;
+    if (!g_sb.hookTid) InterlockedExchange(&g_sb.hookTid, static_cast<LONG>(GetCurrentThreadId()));
+    int32_t kind = 0;
+    uint32_t dmg = 0;
+    Rd(pend, kind);
+    Rd(pend + 4, dmg);
+    uintptr_t attacker = pend - 0xaf0;
+    float a[3] = {}, h[3] = {};
+    ReadVec(attacker + oEntPos, a);
+    ReadVec(self + oEntPos, h);
+    float ang = 0.f;
+    if (!shieldhit::Frontal(S.yaw, a[0] - h[0], a[2] - h[2], cfg.shieldAngle, &ang)) {
+        InterlockedIncrement(&g_sb.side);
+        if (ShieldLog()) Log("shield-game: melee from the side (%.0f deg > %.0f) not blocked, kind %d damage %u", ang, cfg.shieldAngle, kind, dmg);
+        return;
+    }
+    shieldhit::MeleeRewrite rw = shieldhit::RewriteMelee(kind, dmg, f);
+    if (!rw.feedback) return;
+    uint32_t hp = 0;
+    Rd(self + 0xb1c, hp);
+    *reinterpret_cast<volatile int32_t*>(pend) = rw.kind;
+    *reinterpret_cast<volatile uint32_t*>(pend + 4) = rw.damage;
+    if (rw.partial) {
+        AcquireSRWLockExclusive(&g_sb.lock);
+        g_sb.bracket = true;
+        g_sb.bracketHp = hp;
+        ReleaseSRWLockExclusive(&g_sb.lock);
+    }
+    InterlockedIncrement(shieldhit::Full(f) ? &g_sb.meleeFull : kind == shieldhit::kMiss ? &g_sb.meleeMiss : &g_sb.meleePart);
+    if (ShieldLog())
+        Log("shield-game: melee blocked %.0f%% kind %d -> %d, damage %u -> %u (attacker %p, from %.0f deg, hero hp %u)", f * 100.f, kind, rw.kind, dmg, rw.damage,
+            (void*)attacker, ang, hp);
+    vmgame::ShieldHit();
+}
+using FnHeroReact = uint64_t (*)(uintptr_t, uintptr_t, uintptr_t);
+uint64_t HeroHitReact(uintptr_t self, uintptr_t attacker, uintptr_t delta) {
+    ShieldBracketClose(self);
+    return reinterpret_cast<FnHeroReact>(g_sb.orig3a8)(self, attacker, delta);
+}
+using FnHeroStagger = uint64_t (*)(uintptr_t, uintptr_t);
+uint64_t HeroStagger(uintptr_t self, uintptr_t info) {
+    float f = ShieldFrac(self);
+    if (f > 0.f && info && shieldhit::EatStagger(f, cfg.shieldStagger)) {
+        float v[3] = {};
+        for (int i = 0; i < 3; ++i) Rd(info + 8 + 4 * i, v[i]);
+        float ang = 0.f;
+        if (shieldhit::Frontal(S.yaw, -v[0], -v[2], cfg.shieldAngle, &ang)) {
+            InterlockedIncrement(&g_sb.stagger);
+            uint8_t flag = 0;
+            Rd(info + 0x14, flag);
+            if (ShieldLog()) Log("shield-game: hit reaction (state 18, flag %u) eaten by the shield (%.0f%%, from %.0f deg)", flag, f * 100.f, ang);
+            return 0;
+        }
+    }
+    return reinterpret_cast<FnHeroStagger>(g_sb.orig558)(self, info);
+}
+void ShieldHpStep() {
+    uintptr_t e = g_sb.ent;
+    float f = ShieldFrac(e);
+    if (!g_sb.stepTid) InterlockedExchange(&g_sb.stepTid, static_cast<LONG>(GetCurrentThreadId()));
+    AcquireSRWLockExclusive(&g_sb.lock);
+    if (!e || !S.active || !cfg.shieldGame) {
+        g_sb.hpEnt = 0;
+        g_sb.bracket = false;
+        g_sb.exempt = 0;
+        ReleaseSRWLockExclusive(&g_sb.lock);
+        return;
+    }
+    ShieldBracketCloseLocked(e);
+    uint32_t hp = 0, mx = 0;
+    uint8_t alive = 0;
+    if (!Rd(e + 0xb1c, hp) || !Rd(e + 0xb18, mx) || !Rd(e + 0x108, alive)) {
+        ReleaseSRWLockExclusive(&g_sb.lock);
+        return;
+    }
+    if (g_sb.hpEnt != e) {
+        g_sb.hpEnt = e;
+        g_sb.hpPrev = hp;
+        g_sb.exempt = 0;
+        ReleaseSRWLockExclusive(&g_sb.lock);
+        return;
+    }
+    uint32_t prev = g_sb.hpPrev, ex = g_sb.exempt;
+    uint32_t add = cfg.shieldRefund && (alive & 0x10) ? shieldhit::Refund(prev, hp, ex, f, mx) : 0;
+    if (add) Wr(e + 0xb1c, hp + add);
+    g_sb.hpPrev = hp + add;
+    g_sb.exempt = 0;
+    ReleaseSRWLockExclusive(&g_sb.lock);
+    if (hp < prev && f > 0.f && ShieldLog())
+        Log("shield-game: hero hp %u -> %u this step (already reduced by hooks %u, refund %u at %.0f%%) -> %u / %u", prev, hp, ex, add, f * 100.f, hp + add, mx);
+    if (!add) return;
+    InterlockedIncrement(&g_sb.refunds);
+    InterlockedExchangeAdd(&g_sb.refundHp, static_cast<LONG>(add));
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    if (q.QuadPart - g_sb.lastFxQpc > g_qpf.QuadPart / 4) {
+        g_sb.lastFxQpc = q.QuadPart;
+        vmgame::ShieldHit();
+    }
+}
 void NoKnockRemove(const char* why) {
     if (!g_nk.ent) return;
     bool ours = g_nk.copy && Ptr(g_nk.ent) == reinterpret_cast<uintptr_t>(g_nk.copy + 1);
     if (ours) Wr(g_nk.ent, g_nk.origVt);
-    Log("hero: no-knockdown off for %p (%s)%s - blocked knock back %ld, knock down %ld, knock flying %ld", (void*)g_nk.ent, why,
-        ours ? "" : " (vtable was not ours any more - left alone)", g_nk.blocked[0], g_nk.blocked[1], g_nk.blocked[2]);
+    g_sb.ent = 0;
+    Log("hero: no-knockdown%s off for %p (%s)%s - blocked knock back %ld, knock down %ld, knock flying %ld", g_nk.shield ? " + shield-game" : "",
+        (void*)g_nk.ent, why, ours ? "" : " (vtable was not ours any more - left alone)", g_nk.blocked[0], g_nk.blocked[1], g_nk.blocked[2]);
+    if (g_nk.shield)
+        Log("shield-game: so far missile 100%% %ld / partial %ld, melee 100%% %ld / partial %ld / miss %ld, side %ld, stagger eaten %ld, hp refunds %ld (+%ld hp)",
+            g_sb.missileFull, g_sb.missilePart, g_sb.meleeFull, g_sb.meleePart, g_sb.meleeMiss, g_sb.side, g_sb.stagger, g_sb.refunds, g_sb.refundHp);
     g_nk.ent = 0;
 }
 bool NoKnockInstall(uintptr_t ent) {
@@ -2606,7 +2857,14 @@ bool NoKnockInstall(uintptr_t ent) {
         return false;
     }
     if (g_nk.copy && vt == reinterpret_cast<uintptr_t>(g_nk.copy + 1)) return true;
-    if (!g_nk.copy || g_nk.copyOf != vt) {
+    bool knock = cfg.noKnock && g_noKnockOk;
+    bool shield = cfg.shieldGame && g_shieldGameOk && vt == g_base + kVtSoldier904 && Ptr(vt + 0x310) == g_base + kFnProjHit904 &&
+                  Ptr(vt + 0x1c8) == g_base + kFnRet0Of1c8_904 && Ptr(vt + 0x3a8) == g_base + kFnHitReact904 && Ptr(vt + 0x558) == g_base + kFnStagger904;
+    if (cfg.shieldGame && g_shieldGameOk && !shield && g_nk.logs++ < 8)
+        Log("shield-game: entity %p vtable +0x%llx is not the soldier class +0x%llx (or its slots differ) - shield blocks only the debug key", (void*)ent,
+            (unsigned long long)(vt - g_base), (unsigned long long)kVtSoldier904);
+    if (!knock && !shield) return false;
+    if (!g_nk.copy || g_nk.copyOf != vt || g_nk.copyKnock != knock || g_nk.copyShield != shield) {
         size_t slots = 0;
         while (slots < 4096) {
             uintptr_t f = Ptr(vt + 8 * slots);
@@ -2622,35 +2880,65 @@ bool NoKnockInstall(uintptr_t ent) {
         if (!c) return false;
         c[0] = Ptr(vt - 8);
         for (size_t i = 0; i < n; ++i) c[1 + i] = Ptr(vt + 8 * i);
-        c[1 + kVtKnockBack / 8] = reinterpret_cast<uintptr_t>(&KnockBackStub);
-        c[1 + kVtKnockDown / 8] = reinterpret_cast<uintptr_t>(&KnockDownStub);
-        c[1 + kVtKnockFlying / 8] = reinterpret_cast<uintptr_t>(&KnockFlyingStub);
+        if (knock) {
+            c[1 + kVtKnockBack / 8] = reinterpret_cast<uintptr_t>(&KnockBackStub);
+            c[1 + kVtKnockDown / 8] = reinterpret_cast<uintptr_t>(&KnockDownStub);
+            c[1 + kVtKnockFlying / 8] = reinterpret_cast<uintptr_t>(&KnockFlyingStub);
+        }
+        if (shield) {
+            g_sb.orig310 = c[1 + 0x310 / 8];
+            g_sb.orig3a8 = c[1 + 0x3a8 / 8];
+            g_sb.orig558 = c[1 + 0x558 / 8];
+            g_orig_hero_1c8 = reinterpret_cast<void*>(c[1 + 0x1c8 / 8]);
+            c[1 + 0x310 / 8] = reinterpret_cast<uintptr_t>(&HeroProjHit);
+            c[1 + 0x1c8 / 8] = reinterpret_cast<uintptr_t>(&hfps_hero_1c8_thunk);
+            c[1 + 0x3a8 / 8] = reinterpret_cast<uintptr_t>(&HeroHitReact);
+            c[1 + 0x558 / 8] = reinterpret_cast<uintptr_t>(&HeroStagger);
+        }
         g_nk.copy = c;
         g_nk.copyOf = vt;
+        g_nk.copyKnock = knock;
+        g_nk.copyShield = shield;
         g_nk.slots = slots;
     }
     g_nk.origVt = vt;
     g_nk.ent = ent;
+    g_nk.knock = knock;
+    g_nk.shield = shield;
+    g_nk.gen = g_cfgGen;
+    if (shield) g_sb.ent = ent;
     bool ok = Wr(ent, reinterpret_cast<uintptr_t>(g_nk.copy + 1));
-    Log("hero: no-knockdown on for entity %p (vtable +0x%llx -> copy %p, %zu slots; knock back / down / flying slots replaced) %s", (void*)ent,
-        (unsigned long long)(vt - g_base), (void*)(g_nk.copy + 1), g_nk.slots, ok ? "" : "WRITE FAILED");
-    if (!ok) g_nk.ent = 0;
+    Log("hero: no-knockdown on for entity %p (vtable +0x%llx -> copy %p, %zu slots; knock back / down / flying slots %s; shield-game slots "
+        "+0x310 / +0x1c8 / +0x3a8 / +0x558 %s) %s",
+        (void*)ent, (unsigned long long)(vt - g_base), (void*)(g_nk.copy + 1), g_nk.slots, knock ? "replaced" : "kept", shield ? "replaced" : "kept",
+        ok ? "" : "WRITE FAILED");
+    if (!ok) g_nk.ent = 0, g_sb.ent = 0;
     return ok;
 }
 void NoKnockStep() {
-    bool want = S.active && cfg.noKnock && g_noKnockOk && S.entity;
-    if (g_nk.ent && (!want || g_nk.ent != S.entity)) NoKnockRemove(!want ? "first person off / switched off" : "hero changed");
+    bool want = S.active && S.entity && ((cfg.noKnock && g_noKnockOk) || (cfg.shieldGame && g_shieldGameOk));
+    if (g_nk.ent && (!want || g_nk.ent != S.entity || g_nk.gen != g_cfgGen))
+        NoKnockRemove(!want ? "first person off / switched off" : g_nk.ent != S.entity ? "hero changed" : "ini reloaded");
     if (!want) return;
     if (g_nk.ent == S.entity && g_nk.copy && Ptr(S.entity) != reinterpret_cast<uintptr_t>(g_nk.copy + 1)) {
         if (g_nk.logs++ < 8) Log("hero: no-knockdown: entity %p vtable changed to +0x%llx by the game - re-hooking", (void*)S.entity,
                                  (unsigned long long)(Ptr(S.entity) - g_base));
         g_nk.ent = 0;
+        g_sb.ent = 0;
     }
     if (g_nk.ent != S.entity) NoKnockInstall(S.entity);
     LONG total = g_nk.blocked[0] + g_nk.blocked[1] + g_nk.blocked[2];
     if (total != g_nk.logged && g_nk.logs++ < 60) {
         g_nk.logged = total;
         Log("hero: knock blocked (so far: back %ld, down %ld, flying %ld)", g_nk.blocked[0], g_nk.blocked[1], g_nk.blocked[2]);
+    }
+    LONG sum = g_sb.missileFull + g_sb.missilePart + g_sb.meleeFull + g_sb.meleePart + g_sb.meleeMiss + g_sb.stagger + g_sb.refunds;
+    if (sum != g_sb.statSum && g_sb.statLogs++ < 60) {
+        g_sb.statSum = sum;
+        Log("shield-game: so far missile 100%% %ld / partial %ld, melee 100%% %ld / partial %ld / miss %ld, side %ld, stagger eaten %ld, hp refunds %ld "
+            "(+%ld hp); hook thread %ld, step thread %ld",
+            g_sb.missileFull, g_sb.missilePart, g_sb.meleeFull, g_sb.meleePart, g_sb.meleeMiss, g_sb.side, g_sb.stagger, g_sb.refunds, g_sb.refundHp,
+            g_sb.hookTid, g_sb.stepTid);
     }
 }
 bool UicName(uintptr_t uic, char* out, size_t n) {
@@ -4091,6 +4379,11 @@ bool VerifyGame() {
         Log("melee: engine melee hit %s", g_meleeHitOk ? "ok" : "OFF (melee weapon falls back to splash explosions)");
         g_noKnockOk = PrintsMatch(Prints(kNoKnockPrints904), "hero no knockdown");
         Log("hero: no-knockdown switch %s", g_noKnockOk ? "ok" : "OFF");
+        g_shieldGameOk = PrintsMatch(Prints(kShieldGamePrints904), "shield block (game hits)") &&
+                         Ptr(g_base + kVtSoldier904 + 0x310) == g_base + kFnProjHit904 && Ptr(g_base + kVtSoldier904 + 0x1c8) == g_base + kFnRet0Of1c8_904 &&
+                         Ptr(g_base + kVtSoldier904 + 0x3a8) == g_base + kFnHitReact904 && Ptr(g_base + kVtSoldier904 + 0x558) == g_base + kFnStagger904;
+        if (g_shieldGameOk) g_hero_1c8_ret1 = g_base + kMeleeRet1_904, g_hero_1c8_ret2 = g_base + kMeleeRet2_904;
+        Log("shield-game: shield blocks real hits (missile +0x310 / melee +0x1c8 / stagger +0x558 / hp refund) %s", g_shieldGameOk ? "ok" : "OFF");
         Log("move: unit orders %s, entity halt %s, entity move %s, entity teleport %s (unavailable modes fall back to unit orders)",
             m ? "ok" : "OFF", h ? "ok" : "OFF", o ? "ok" : "OFF", t ? "ok" : "OFF");
     }
@@ -4195,6 +4488,7 @@ extern "C" void hfps_post_step_begin(uintptr_t self, uintptr_t world) {
     QueryPerformanceCounter(&q);
     g_ef.lastQpc = q.QuadPart;
     if (!world || world != g_ef.world || !g_ef.hero) return;
+    ShieldHpStep();
     MeleeEngineStep(world, g_ef.hero);
     uintptr_t pm = *reinterpret_cast<uintptr_t*>(world + 0x1c8);
     if (!pm) return;
