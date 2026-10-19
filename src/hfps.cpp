@@ -404,6 +404,9 @@ struct Config {
     bool meleeReact = true;
     bool meleeEffects = true;
     float meleeFallback = 60.f;
+    float meleeSplashRadius = 1.5f;
+    float meleeSplashDamage = 0.5f;
+    int meleeSplashMax = 6;
 } cfg;
 wchar_t g_dir[MAX_PATH];
 uintptr_t g_base = 0;
@@ -573,6 +576,12 @@ void LoadConfig() {
     cfg.meleeEffects = GetPrivateProfileIntW(L"melee", L"effects", 1, ini) != 0;
     cfg.meleeFallback = IniF(L"melee", L"fallback_damage", cfg.meleeFallback, ini);
     if (!(cfg.meleeFallback >= 0.f && cfg.meleeFallback <= 5000.f)) cfg.meleeFallback = 60.f;
+    cfg.meleeSplashRadius = IniF(L"melee", L"splash_radius", cfg.meleeSplashRadius, ini);
+    if (!(cfg.meleeSplashRadius >= 0.f && cfg.meleeSplashRadius <= 6.f)) cfg.meleeSplashRadius = 1.5f;
+    cfg.meleeSplashDamage = IniF(L"melee", L"splash_damage", cfg.meleeSplashDamage, ini);
+    if (!(cfg.meleeSplashDamage >= 0.f && cfg.meleeSplashDamage <= 5.f)) cfg.meleeSplashDamage = 0.5f;
+    cfg.meleeSplashMax = GetPrivateProfileIntW(L"melee", L"splash_max", cfg.meleeSplashMax, ini);
+    if (cfg.meleeSplashMax < 0 || cfg.meleeSplashMax > 32) cfg.meleeSplashMax = 6;
     cfg.hideHud = GetPrivateProfileIntW(L"ui", L"hide_hud", 1, ini) != 0;
     cfg.hideCursor = GetPrivateProfileIntW(L"ui", L"hide_cursor", 1, ini) != 0;
     cfg.hidePaths = GetPrivateProfileIntW(L"ui", L"hide_paths", 1, ini) != 0;
@@ -1580,7 +1589,7 @@ bool MeleeEngineQueue(int kind, const float eye[3], const float fwd[3]) {
     ReleaseSRWLockExclusive(&g_mq.lock);
     return ok;
 }
-int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const MeleeArc& arc, int* dmgOut) {
+int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const MeleeArc& arc, float frac, int* dmgOut) {
     using FnCalc = int32_t* (*)(uintptr_t combat, int32_t* out, uintptr_t attacker, uintptr_t victim, uint32_t splitTargets);
     using FnCtor = void* (*)(void* hitInfo, uintptr_t victim);
     using FnDtor = void (*)(void* hitInfo);
@@ -1624,7 +1633,7 @@ int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const Mele
             base = cfg.meleeFallback;
             InterlockedIncrement(&g_mq.fallback);
         }
-        float d = base * arc.dmg * cfg.meleeDamage;
+        float d = base * arc.dmg * frac * cfg.meleeDamage;
         dmg = d < 1.f ? 1 : static_cast<int>(d + 0.5f);
         MeleeAtk atk;
         memset(&atk, 0, sizeof atk);
@@ -1684,10 +1693,14 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         if (rq.hero != hero || Now() - rq.t > 0.6) continue;
         const MeleeArc& arc = kMeleeArcs[rq.kind];
         float cosHalf = std::cos(arc.halfDeg * kPi / 180.f), reach = arc.reach + 0.3f;
+        const bool splash = cfg.meleeSplashRadius > 0.f && cfg.meleeSplashMax > 0;
+        const float scanR = reach + (splash ? cfg.meleeSplashRadius : 0.f);
         struct Cand {
             uintptr_t e;
-            float d;
-        } cand[16];
+            float d, x, z;
+            bool inArc, done;
+        };
+        static Cand cand[64];
         int nc = 0;
         unsigned scanned = 0;
         uintptr_t list = Ptr(world + oWorldAlliances);
@@ -1714,21 +1727,23 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
                             if (e == hero || !Plausible(e) || !EntPos(e, q)) continue;
                             ++scanned;
                             float vx = q[0] - rq.ox, vz = q[2] - rq.oz, d = std::sqrt(vx * vx + vz * vz);
-                            if (d > reach || std::fabs(q[1] - (rq.oy - 1.7f)) > 3.f) continue;
-                            if (d > 0.6f && (vx * rq.dx + vz * rq.dz) / d < cosHalf) continue;
+                            if (d > scanR || std::fabs(q[1] - (rq.oy - 1.7f)) > 3.f) continue;
+                            bool inArc = d <= reach && (d <= 0.6f || (vx * rq.dx + vz * rq.dz) / d >= cosHalf);
+                            if (!inArc && !splash) continue;
                             uint32_t hp = 0, l6c = 0;
                             uint8_t f108 = 0, f68 = 0;
                             if (!Rd(e + 0xb1c, hp) || !hp || !Rd(e + 0x108, f108) || !(f108 & 0x10) || !Rd(e + 0x68, f68) || !(f68 & 1) ||
                                 !Rd(e + 0x6c, l6c) || Ptr(e + 0x80) == heroSide || !(l6c & heroL6c & 2))
                                 continue;
                             if (!reinterpret_cast<FnCanHit>(g_base + kFnCanBeHit904)(e)) continue;
-                            if (nc < 16) {
-                                cand[nc++] = {e, d};
+                            Cand cd = {e, d, q[0], q[2], inArc, false};
+                            if (nc < 64) {
+                                cand[nc++] = cd;
                             } else {
                                 int worst = 0;
-                                for (int c = 1; c < 16; ++c)
+                                for (int c = 1; c < 64; ++c)
                                     if (cand[c].d > cand[worst].d) worst = c;
-                                if (d < cand[worst].d) cand[worst] = {e, d};
+                                if (d < cand[worst].d) cand[worst] = cd;
                             }
                         }
                     }
@@ -1741,22 +1756,62 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
                 cand[b] = cand[b - 1];
                 cand[b - 1] = tmp;
             }
-        int hits = 0, kills = 0, n = nc < arc.maxHit ? nc : arc.maxHit;
+        int hits = 0, kills = 0, inArc = 0, prim[16], np = 0;
         char dl[160] = "";
         int dn = 0;
-        for (int c = 0; c < n; ++c) {
-            int dmg = 0, rr = MeleeEngineHit(world, hero, cand[c].e, arc, &dmg);
+        for (int c = 0; c < nc; ++c) {
+            if (!cand[c].inArc) continue;
+            ++inArc;
+            if (np >= arc.maxHit || np >= 16) continue;
+            prim[np++] = c;
+            cand[c].done = true;
+            int dmg = 0, rr = MeleeEngineHit(world, hero, cand[c].e, arc, 1.f, &dmg);
             if (rr) ++hits;
             if (rr == 2) ++kills;
-            if (dn < 140) dn += snprintf(dl + dn, sizeof dl - dn, "%s%d%s@%.1f", c ? " " : "", dmg, rr == 2 ? "k" : rr ? "" : "x", cand[c].d);
+            if (dn < 140) dn += snprintf(dl + dn, sizeof dl - dn, "%s%d%s@%.1f", np > 1 ? " " : "", dmg, rr == 2 ? "k" : rr ? "" : "x", cand[c].d);
+        }
+        int sHits = 0, sKills = 0;
+        char sl[160] = "";
+        int sn = 0;
+        if (splash && np > 0) {
+            struct SCand {
+                int c;
+                float d;
+            } sc[64];
+            int ns = 0;
+            float r2 = cfg.meleeSplashRadius * cfg.meleeSplashRadius;
+            for (int c = 0; c < nc; ++c) {
+                if (cand[c].done) continue;
+                float best = 1e9f;
+                for (int k = 0; k < np; ++k) {
+                    float dx = cand[c].x - cand[prim[k]].x, dz = cand[c].z - cand[prim[k]].z, dd = dx * dx + dz * dz;
+                    if (dd < best) best = dd;
+                }
+                if (best <= r2 && ns < 64) sc[ns++] = {c, std::sqrt(best)};
+            }
+            for (int a = 1; a < ns; ++a)
+                for (int b = a; b > 0 && sc[b].d < sc[b - 1].d; --b) {
+                    SCand tmp = sc[b];
+                    sc[b] = sc[b - 1];
+                    sc[b - 1] = tmp;
+                }
+            int ms = ns < cfg.meleeSplashMax ? ns : cfg.meleeSplashMax;
+            for (int s = 0; s < ms; ++s) {
+                Cand& cd = cand[sc[s].c];
+                cd.done = true;
+                int dmg = 0, rr = MeleeEngineHit(world, hero, cd.e, arc, cfg.meleeSplashDamage, &dmg);
+                if (rr) ++sHits;
+                if (rr == 2) ++sKills;
+                if (sn < 140) sn += snprintf(sl + sn, sizeof sl - sn, "%s%d%s@%.1f", s ? " " : "", dmg, rr == 2 ? "k" : rr ? "" : "x", sc[s].d);
+            }
         }
         InterlockedIncrement(&g_mq.strikes);
-        InterlockedExchangeAdd(&g_mq.hits, hits);
-        InterlockedExchangeAdd(&g_mq.kills, kills);
+        InterlockedExchangeAdd(&g_mq.hits, hits + sHits);
+        InterlockedExchangeAdd(&g_mq.kills, kills + sKills);
         if (g_mq.logs++ < 200)
-            Log("melee-engine: kind %d (%.0f ms after queue) scanned %u, in arc %d, hit %d, killed %d, damage [%s] (forced hits so far %ld, "
-                "fallback damage so far %ld)",
-                rq.kind, (Now() - rq.t) * 1000.0, scanned, nc, hits, kills, dl, g_mq.forced, g_mq.fallback);
+            Log("melee-engine: kind %d (%.0f ms after queue) scanned %u, in arc %d, hit %d, killed %d, damage [%s] | splash hit %d, killed %d "
+                "[%s] (forced hits so far %ld, fallback damage so far %ld)",
+                rq.kind, (Now() - rq.t) * 1000.0, scanned, inArc, hits, kills, dl, sHits, sKills, sl, g_mq.forced, g_mq.fallback);
     }
 }
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
