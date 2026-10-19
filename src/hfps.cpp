@@ -1581,7 +1581,7 @@ bool MeleeEngineQueue(int kind, const float eye[3], const float fwd[3]) {
     return ok;
 }
 int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const MeleeArc& arc, int* dmgOut) {
-    using FnCalc = int32_t* (*)(uintptr_t combat, int32_t* out, uintptr_t attacker, uintptr_t victim, uint32_t attackerA58);
+    using FnCalc = int32_t* (*)(uintptr_t combat, int32_t* out, uintptr_t attacker, uintptr_t victim, uint32_t splitTargets);
     using FnCtor = void* (*)(void* hitInfo, uintptr_t victim);
     using FnDtor = void (*)(void* hitInfo);
     using FnKill = uint16_t* (*)(void* hitInfo, uint16_t* out, uint32_t damage, MeleeAtk* atk, char selfDeath0, int attackType,
@@ -1597,20 +1597,16 @@ int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const Mele
         if (!combat) return 0;
         uint32_t a58 = 0;
         Rd(hero + 0xa58, a58);
-        reinterpret_cast<FnCalc>(g_base + kFnMeleeHitCalc904)(combat, r, hero, victim, a58);
+        reinterpret_cast<FnCalc>(g_base + kFnMeleeHitCalc904)(combat, r, hero, victim, 1);
         if (g_mq.diag < 40) {
             InterlockedIncrement(&g_mq.diag);
             int32_t rv[2] = {0, 0};
-            uint32_t va58 = 0;
-            uint64_t uattr = 0;
-            int32_t act = 0;
-            Rd(victim + 0xa58, va58);
-            Rd(hero + 0x324, act);
-            uintptr_t hu = Ptr(hero + 0x2e8);
-            if (hu) Rd(hu + 0x36f0, uattr);
-            reinterpret_cast<FnCalc>(g_base + kFnMeleeHitCalc904)(combat, rv, victim, hero, va58);
-            Log("melee-engine diag: hero->enemy kind %d dmg %d | enemy->hero kind %d dmg %d | hero a58 %u activity %d melee_disabled bit %u",
-                r[0], r[1], rv[0], rv[1], a58, act, static_cast<unsigned>((uattr >> kAttrMeleeDisabled) & 1u));
+            uint32_t vhp = 0, vmax = 0;
+            Rd(victim + 0xb1c, vhp);
+            Rd(victim + 0xb18, vmax);
+            reinterpret_cast<FnCalc>(g_base + kFnMeleeHitCalc904)(combat, rv, victim, hero, 1);
+            Log("melee-engine diag: hero->enemy kind %d dmg %d | enemy->hero kind %d dmg %d | victim hp %u/%u | hero a58 %u", r[0], r[1],
+                rv[0], rv[1], vhp, vmax, a58);
         }
         if (r[0] == 0) {
             if (!cfg.meleeAlwaysHit) return 0;
