@@ -403,6 +403,7 @@ struct Config {
     float meleeDamage = 1.0f;
     bool meleeReact = true;
     bool meleeEffects = true;
+    float meleeFallback = 60.f;
 } cfg;
 wchar_t g_dir[MAX_PATH];
 uintptr_t g_base = 0;
@@ -570,6 +571,8 @@ void LoadConfig() {
     if (!(cfg.meleeDamage >= 0.f && cfg.meleeDamage <= 20.f)) cfg.meleeDamage = 1.f;
     cfg.meleeReact = GetPrivateProfileIntW(L"melee", L"react", 1, ini) != 0;
     cfg.meleeEffects = GetPrivateProfileIntW(L"melee", L"effects", 1, ini) != 0;
+    cfg.meleeFallback = IniF(L"melee", L"fallback_damage", cfg.meleeFallback, ini);
+    if (!(cfg.meleeFallback >= 0.f && cfg.meleeFallback <= 5000.f)) cfg.meleeFallback = 60.f;
     cfg.hideHud = GetPrivateProfileIntW(L"ui", L"hide_hud", 1, ini) != 0;
     cfg.hideCursor = GetPrivateProfileIntW(L"ui", L"hide_cursor", 1, ini) != 0;
     cfg.hidePaths = GetPrivateProfileIntW(L"ui", L"hide_paths", 1, ini) != 0;
@@ -1551,7 +1554,7 @@ struct MeleeQueue {
     SRWLOCK lock = SRWLOCK_INIT;
     MeleeReq q[8];
     int n = 0;
-    volatile LONG strikes = 0, hits = 0, kills = 0, forced = 0, logs = 0;
+    volatile LONG strikes = 0, hits = 0, kills = 0, forced = 0, logs = 0, fallback = 0, diag = 0;
 } g_mq;
 struct MeleeAtk {
     uintptr_t attacker;
@@ -1595,6 +1598,20 @@ int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const Mele
         uint32_t a58 = 0;
         Rd(hero + 0xa58, a58);
         reinterpret_cast<FnCalc>(g_base + kFnMeleeHitCalc904)(combat, r, hero, victim, a58);
+        if (g_mq.diag < 40) {
+            InterlockedIncrement(&g_mq.diag);
+            int32_t rv[2] = {0, 0};
+            uint32_t va58 = 0;
+            uint64_t uattr = 0;
+            int32_t act = 0;
+            Rd(victim + 0xa58, va58);
+            Rd(hero + 0x324, act);
+            uintptr_t hu = Ptr(hero + 0x2e8);
+            if (hu) Rd(hu + 0x36f0, uattr);
+            reinterpret_cast<FnCalc>(g_base + kFnMeleeHitCalc904)(combat, rv, victim, hero, va58);
+            Log("melee-engine diag: hero->enemy kind %d dmg %d | enemy->hero kind %d dmg %d | hero a58 %u activity %d melee_disabled bit %u",
+                r[0], r[1], rv[0], rv[1], a58, act, static_cast<unsigned>((uattr >> kAttrMeleeDisabled) & 1u));
+        }
         if (r[0] == 0) {
             if (!cfg.meleeAlwaysHit) return 0;
             InterlockedIncrement(&g_mq.forced);
@@ -1606,7 +1623,12 @@ int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const Mele
     uint16_t res = 0;
     int dmg = 0;
     if (arc.damage) {
-        float d = static_cast<float>(r[1]) * arc.dmg * cfg.meleeDamage;
+        float base = static_cast<float>(r[1]);
+        if (base <= 1.f && cfg.meleeFallback > 0.f) {
+            base = cfg.meleeFallback;
+            InterlockedIncrement(&g_mq.fallback);
+        }
+        float d = base * arc.dmg * cfg.meleeDamage;
         dmg = d < 1.f ? 1 : static_cast<int>(d + 0.5f);
         MeleeAtk atk;
         memset(&atk, 0, sizeof atk);
@@ -1736,8 +1758,9 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         InterlockedExchangeAdd(&g_mq.hits, hits);
         InterlockedExchangeAdd(&g_mq.kills, kills);
         if (g_mq.logs++ < 200)
-            Log("melee-engine: kind %d (%.0f ms after queue) scanned %u, in arc %d, hit %d, killed %d, damage [%s] (forced hits so far %ld)",
-                rq.kind, (Now() - rq.t) * 1000.0, scanned, nc, hits, kills, dl, g_mq.forced);
+            Log("melee-engine: kind %d (%.0f ms after queue) scanned %u, in arc %d, hit %d, killed %d, damage [%s] (forced hits so far %ld, "
+                "fallback damage so far %ld)",
+                rq.kind, (Now() - rq.t) * 1000.0, scanned, nc, hits, kills, dl, g_mq.forced, g_mq.fallback);
     }
 }
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
