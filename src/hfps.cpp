@@ -1431,6 +1431,8 @@ struct MeleeKind {
     const char* proj;
     float reach;
 };
+const float kMeleeFlight = 1.5f;
+const float kMeleeBurstUp = 0.4f;
 const MeleeKind kMeleeKinds[vmgame::kStrikeKinds] = {
     {"hero_fps_melee_stab", 2.0f},
     {"hero_fps_melee_sweep", 1.6f},
@@ -1473,25 +1475,27 @@ bool MeleeStrike(int kind, const float eye[3], const float fwd[3]) {
     c.vt = g_base + kVtFireCmd;
     c.projId = id;
     c.f0c = 6.2831855f;
-    c.launch[0] = eye[0] + hx * 0.4f;
-    c.launch[1] = eye[1] - 0.5f;
-    c.launch[2] = eye[2] + hz * 0.4f;
+    float burst[3] = {eye[0] + hx * mk.reach, eye[1] - 1.3f, eye[2] + hz * mk.reach};
     alignas(16) float g[8];
-    if (MakeDestAt(c.launch[0], c.launch[2], g) && c.launch[1] < g[1] + 0.25f && c.launch[1] > g[1] - 5.f) c.launch[1] = g[1] + 0.25f;
-    c.target[0] = eye[0] + hx * mk.reach;
-    c.target[2] = eye[2] + hz * mk.reach;
-    c.target[1] = eye[1] - 1.7f;
-    bool ground = MakeDestAt(c.target[0], c.target[2], g) && g[1] < eye[1] + 3.f && g[1] > eye[1] - 10.f;
-    if (ground) c.target[1] = g[1];
+    bool ground = MakeDestAt(burst[0], burst[2], g) && g[1] < eye[1] + 3.f && g[1] > eye[1] - 10.f;
+    if (ground) burst[1] = g[1] + kMeleeBurstUp;
+    float dir[3] = {burst[0] - eye[0], burst[1] - (eye[1] - 0.5f), burst[2] - eye[2]};
+    float dl = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    if (dl < 0.1f) return false;
+    for (int i = 0; i < 3; ++i) {
+        dir[i] /= dl;
+        c.launch[i] = burst[i] - dir[i] * kMeleeFlight;
+        c.target[i] = burst[i];
+    }
     c.tgtIsPos = 1;
     c.shooter = S.entity;
     using FnIssue = unsigned char (*)(uintptr_t queue, FireCmd* cmd);
     bool viaFast = FastFireReady(battle) && FastFireQueue(&c);
     unsigned char ok = viaFast ? 1 : reinterpret_cast<FnIssue>(g_base + kFnIssueCmd)(queue, &c);
     if (S.strikeLogs++ < 60)
-        Log("melee: strike %s %s via %s: launch %.2f,%.2f,%.2f -> target %.2f,%.2f,%.2f (%s)", mk.proj, ok ? "issued" : "REJECTED",
+        Log("melee: strike %s %s via %s: launch %.2f,%.2f,%.2f -> burst %.2f,%.2f,%.2f (%s)", mk.proj, ok ? "issued" : "REJECTED",
             viaFast ? "fast queue" : "command queue", c.launch[0], c.launch[1], c.launch[2], c.target[0], c.target[1], c.target[2],
-            ground ? "ground" : "no ground hit, eye - 1.7 m");
+            ground ? "ground + 0.4 m" : "no ground hit, eye - 1.3 m");
     return ok != 0;
 }
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
