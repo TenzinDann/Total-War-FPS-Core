@@ -732,6 +732,8 @@ struct State {
     uintptr_t fpProj = 0;
     int32_t fpProjId = -1;
     int projFor = -1;
+    int32_t meleeProjId[vmgame::kStrikeKinds] = {-1, -1, -1, -1, -1};
+    unsigned meleeStrikes = 0, meleeFailed = 0, strikeLogs = 0;
     bool speedApplied = false;
     uintptr_t speedRec = 0;
     float speedOrig = 0, massOrig = 0;
@@ -1074,6 +1076,8 @@ void Enter(uintptr_t mgr) {
     S.fpProj = 0;
     S.fpProjId = -1;
     S.projFor = vmgame::CurrentWeapon();
+    for (int32_t& id : S.meleeProjId) id = -1;
+    S.strikeLogs = 0;
     S.tracerLogs = 0;
     S.movingLogs = 0;
     S.aimShots = S.aimSoldier = S.aimGround = S.aimRange = S.aimMoving = 0;
@@ -1422,6 +1426,73 @@ bool FastFireQueue(FireCmd* c) {
     }
     ReleaseSRWLockExclusive(&g_ff.lock);
     return queued;
+}
+struct MeleeKind {
+    const char* proj;
+    float reach;
+};
+const MeleeKind kMeleeKinds[vmgame::kStrikeKinds] = {
+    {"hero_fps_melee_stab", 2.0f},
+    {"hero_fps_melee_sweep", 1.6f},
+    {"hero_fps_melee_heavy_sweep", 1.7f},
+    {"hero_fps_melee_heavy", 2.0f},
+    {"hero_fps_melee_bash", 1.3f},
+};
+bool MeleeStrike(int kind, const float eye[3], const float fwd[3]) {
+    if (kind < 0 || kind >= vmgame::kStrikeKinds) return false;
+    const MeleeKind& mk = kMeleeKinds[kind];
+    uintptr_t sb = Ptr(g_base + kGlobalScript);
+    uintptr_t battle = sb ? Ptr(sb + oScriptBattle) : 0;
+    uintptr_t queue = battle ? Ptr(battle + oBattleCmdQueue) : 0;
+    unsigned char no1 = 1, no2 = 1;
+    if (battle) {
+        Rd(battle + oBattleNoCmd1, no1);
+        Rd(battle + oBattleNoCmd2, no2);
+    }
+    int32_t entId = 0;
+    if (S.entity) Rd(S.entity + oEntId, entId);
+    int32_t& id = S.meleeProjId[kind];
+    if (id == -1 && battle) {
+        int32_t got = -1;
+        uintptr_t rec = FindProjectile(mk.proj, &got);
+        id = rec && got >= 0 ? got : -2;
+        Log("melee: strike projectile '%s' -> %s (id %d)", mk.proj, id >= 0 ? "found" : "NOT FOUND (hero_fps.pack out of date?)", got);
+    }
+    if (!battle || !queue || no1 || no2 || id < 0 || !entId) {
+        if (S.strikeLogs++ < 8)
+            Log("melee: strike refused: battle=%p queue=%p blocked=%u/%u projectile id=%d entityId=%d", (void*)battle, (void*)queue, no1,
+                no2, id, entId);
+        return false;
+    }
+    float hx = fwd[0], hz = fwd[2], hl = std::sqrt(hx * hx + hz * hz);
+    if (hl < 1e-3f) return false;
+    hx /= hl;
+    hz /= hl;
+    FireCmd c;
+    memset(&c, 0, sizeof c);
+    c.vt = g_base + kVtFireCmd;
+    c.projId = id;
+    c.f0c = 6.2831855f;
+    c.launch[0] = eye[0] + hx * 0.4f;
+    c.launch[1] = eye[1] - 0.5f;
+    c.launch[2] = eye[2] + hz * 0.4f;
+    alignas(16) float g[8];
+    if (MakeDestAt(c.launch[0], c.launch[2], g) && c.launch[1] < g[1] + 0.25f && c.launch[1] > g[1] - 5.f) c.launch[1] = g[1] + 0.25f;
+    c.target[0] = eye[0] + hx * mk.reach;
+    c.target[2] = eye[2] + hz * mk.reach;
+    c.target[1] = eye[1] - 1.7f;
+    bool ground = MakeDestAt(c.target[0], c.target[2], g) && g[1] < eye[1] + 3.f && g[1] > eye[1] - 10.f;
+    if (ground) c.target[1] = g[1];
+    c.tgtIsPos = 1;
+    c.shooter = S.entity;
+    using FnIssue = unsigned char (*)(uintptr_t queue, FireCmd* cmd);
+    bool viaFast = FastFireReady(battle) && FastFireQueue(&c);
+    unsigned char ok = viaFast ? 1 : reinterpret_cast<FnIssue>(g_base + kFnIssueCmd)(queue, &c);
+    if (S.strikeLogs++ < 60)
+        Log("melee: strike %s %s via %s: launch %.2f,%.2f,%.2f -> target %.2f,%.2f,%.2f (%s)", mk.proj, ok ? "issued" : "REJECTED",
+            viaFast ? "fast queue" : "command queue", c.launch[0], c.launch[1], c.launch[2], c.target[0], c.target[1], c.target[2],
+            ground ? "ground" : "no ground hit, eye - 1.7 m");
+    return ok != 0;
 }
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
               int nBodies, float clearance) {
@@ -2851,7 +2922,7 @@ void Apply(uintptr_t mgr) {
             else if (!vmgame::ShieldWanted())
                 S.tac = true;
         }
-        S.ads = rmb && !S.sprint && !reloading;
+        S.ads = rmb && !S.sprint && !reloading && !vmgame::MeleeActive();
         if (S.ads && !wasAds) S.adsKind = now < S.fireBlock ? (S.exitTac ? 2 : 1) : 0;
         if (!S.ads) S.adsKind = 0;
         float adsTime = vmgame::CurrentAdsTime(S.adsKind);
@@ -3209,6 +3280,18 @@ void Apply(uintptr_t mgr) {
         FastFireStats(false);
     }
     bool held = Foreground() && (GetAsyncKeyState(VK_LBUTTON) & 0x8000);
+    if (vmgame::MeleeActive()) {
+        bool blockKey = Foreground() && (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
+        vmgame::MeleeInput(held && !S.sprint && now >= S.fireBlock, blockKey && !S.sprint);
+        int strike = vmgame::TakeMeleeStrike();
+        if (strike >= 0 && g_fireOk && cfg.fireEnabled) {
+            if (MeleeStrike(strike, eye, vFwd))
+                ++S.meleeStrikes;
+            else
+                ++S.meleeFailed;
+        }
+        held = false;
+    }
     double fireGap = vmgame::FireInterval() > 0 ? vmgame::FireInterval() : cfg.fireInterval;
     vmgame::SetTrigger(held && g_fireOk && cfg.fireEnabled && !S.sprint && now >= S.fireBlock);
     if (held && g_fireOk && cfg.fireEnabled && now >= S.nextShot && !S.sprint && now >= S.fireBlock && vmgame::CanFire()) {
