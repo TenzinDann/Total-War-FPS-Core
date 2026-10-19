@@ -6,6 +6,9 @@
 #include <cstdio>
 #include <cstring>
 #include "vm_game.h"
+#ifdef HFPS_PACK_ASSETS
+#include "pack_extract.h"
+#endif
 extern "C" {
 void* p_GetFileVersionInfoA;
 void* p_GetFileVersionInfoByHandle;
@@ -356,6 +359,7 @@ struct Config {
     float tacSprintToFire = 0.3f;
     float adsMoveScale = 0.6f;
     float sprintToFire = 0.2f;
+    float adsTimeSprint = 0.35f, adsTimeTac = 0.55f;
     float adsZoom = 1.25f;
     float adsTime = 0.25f;
     float accelTau = 0.06f;
@@ -504,11 +508,16 @@ void LoadConfig() {
     if (cfg.tacSprintToFire < 0.f || cfg.tacSprintToFire > 2.f) cfg.tacSprintToFire = 0.3f;
     cfg.adsZoom = IniF(L"camera", L"ads_zoom", cfg.adsZoom, ini);
     cfg.adsTime = IniF(L"camera", L"ads_time", cfg.adsTime, ini);
+    cfg.adsTimeSprint = IniF(L"camera", L"ads_time_sprint", cfg.adsTimeSprint, ini);
+    cfg.adsTimeTac = IniF(L"camera", L"ads_time_tac", cfg.adsTimeTac, ini);
+    if (cfg.adsTimeSprint < 0.01f || cfg.adsTimeSprint > 2.f) cfg.adsTimeSprint = 0.35f;
+    if (cfg.adsTimeTac < 0.01f || cfg.adsTimeTac > 2.f) cfg.adsTimeTac = 0.55f;
     if (cfg.sprintSpeed < 0.5f || cfg.sprintSpeed > 40.f) cfg.sprintSpeed = 10.f;
     if (cfg.adsMoveScale < 0.05f || cfg.adsMoveScale > 1.f) cfg.adsMoveScale = 0.6f;
     if (cfg.sprintToFire < 0.f || cfg.sprintToFire > 2.f) cfg.sprintToFire = 0.2f;
     if (cfg.adsZoom < 1.f || cfg.adsZoom > 8.f) cfg.adsZoom = 1.25f;
     if (cfg.adsTime < 0.01f || cfg.adsTime > 2.f) cfg.adsTime = 0.25f;
+    vmgame::PublishAdsTime(cfg.adsTime, cfg.adsTimeSprint, cfg.adsTimeTac);
     cfg.accelTau = IniF(L"move", L"accel", cfg.accelTau, ini);
     cfg.tpInterval = IniF(L"move", L"teleport_interval", cfg.tpInterval, ini);
     cfg.leash = IniF(L"move", L"leash", cfg.leash, ini);
@@ -707,8 +716,11 @@ struct State {
     bool shiftPrev = false;
     float adsT = 0;
     double fireBlock = 0;
+    int adsKind = 0;
+    bool exitTac = false;
     float baseFov = 0, lastFov = 0;
     unsigned stanceLogs = 0;
+    kick::CamKick camKick;
     unsigned shots = 0, shotsFailed = 0, shotLogs = 0;
     struct ShotRec {
         double t;
@@ -980,6 +992,10 @@ void Enter(uintptr_t mgr) {
     S.shiftPrev = true;
     S.adsT = 0;
     S.fireBlock = 0;
+    S.adsKind = 0;
+    S.exitTac = false;
+    S.camKick = kick::CamKick();
+    S.camKick.rng.Seed(GetTickCount() ^ 0x5bd1e995u);
     CamSetF(cam, vtSetNear, cfg.nearClip);
     if (std::isfinite(farClip) && farClip > 10.f) CamSetF(cam, vtSetFar, farClip);
     unsigned char done = 0;
@@ -2766,7 +2782,9 @@ void Apply(uintptr_t mgr) {
         InterlockedExchange(&g_rawDy, 0);
         S.skipFirstCursor = true;
     }
-    float zoomNow = 1.f + (cfg.adsZoom - 1.f) * S.adsT * S.adsT * (3.f - 2.f * S.adsT);
+    float shieldW = 0.f, shieldMove = 1.f, shieldZoom = 1.f;
+    vmgame::ShieldGame(&shieldW, &shieldMove, &shieldZoom);
+    float zoomNow = 1.f + (cfg.adsZoom - 1.f) * shieldZoom * S.adsT * S.adsT * (3.f - 2.f * S.adsT);
     float rad = cfg.sensitivity * kPi / 180.f / zoomNow;
     S.yaw += dx * rad;
     S.pitch += (cfg.invertY ? dy : -dy) * rad;
@@ -2777,7 +2795,7 @@ void Apply(uintptr_t mgr) {
     if (S.yaw < -kPi) S.yaw += 2 * kPi;
     S.sumDx += dx;
     S.sumDy += dy;
-    float sy = std::sin(S.yaw), cy = std::cos(S.yaw), sp = std::sin(S.pitch), cpi = std::cos(S.pitch);
+    float sy = std::sin(S.yaw), cy = std::cos(S.yaw);
     int mode = MoveMode();
     float dt = static_cast<float>(now - S.tLastFrame);
     S.tLastFrame = now;
@@ -2825,22 +2843,27 @@ void Apply(uintptr_t mgr) {
         bool wasSprint = S.sprint, wasTac = S.tac, wasAds = S.ads;
         if (S.sprint && !canSprint) {
             S.fireBlock = now + (S.tac ? cfg.tacSprintToFire : cfg.sprintToFire);
+            S.exitTac = S.tac;
             S.sprint = S.tac = false;
         } else if (tap && canSprint) {
             if (!S.sprint)
                 S.sprint = true;
-            else
+            else if (!vmgame::ShieldWanted())
                 S.tac = true;
         }
         S.ads = rmb && !S.sprint && !reloading;
-        float step = dt > 0.f ? dt / cfg.adsTime : 0.f;
+        if (S.ads && !wasAds) S.adsKind = now < S.fireBlock ? (S.exitTac ? 2 : 1) : 0;
+        if (!S.ads) S.adsKind = 0;
+        float adsTime = vmgame::CurrentAdsTime(S.adsKind);
+        if (!(adsTime > 0.f)) adsTime = S.adsKind == 2 ? cfg.adsTimeTac : S.adsKind == 1 ? cfg.adsTimeSprint : cfg.adsTime;
+        float step = dt > 0.f ? dt / adsTime : 0.f;
         S.adsT += S.ads ? step : -step;
         if (S.adsT < 0.f) S.adsT = 0.f;
         if (S.adsT > 1.f) S.adsT = 1.f;
         if ((wasSprint != S.sprint || wasTac != S.tac || wasAds != S.ads) && S.stanceLogs++ < 80)
             Log("stance: %s%s (fire block %.2f s)", S.tac ? "tactical sprint" : S.sprint ? "sprint" : S.ads ? "ads" : "hip",
                 lmb ? " [fire held]" : "", S.fireBlock > now ? S.fireBlock - now : 0.0);
-        vmgame::PublishStance(S.ads, S.sprint, S.tac);
+        vmgame::PublishStance(S.ads, S.sprint, S.tac, S.adsKind);
     }
     float camPos[3];
     if (canMove && mode == 0) {
@@ -2930,6 +2953,7 @@ void Apply(uintptr_t mgr) {
         bool paused = CmdQueue(nullptr) == 0;
         float spd = S.tac ? cfg.tacSprintSpeed
                     : S.sprint ? cfg.sprintSpeed : cfg.runSpeed * (1.f - (1.f - cfg.adsMoveScale) * S.adsT);
+        spd *= shieldMove;
         (void)run;
         if (pinned) {
             float kp = dt > 0.f ? 1.f - std::exp(-dt / 0.08f) : 1.f;
@@ -3061,10 +3085,22 @@ void Apply(uintptr_t mgr) {
         }
         memcpy(S.prevCam, camPos, sizeof camPos);
     }
+    kick::Params kp;
+    vmgame::GetKick(&kp);
+    float adsW = S.adsT * S.adsT * (3.f - 2.f * S.adsT);
+    S.camKick.Step(kp, now, dt, &S.pitch);
+    if (float hk = vmgame::ShieldCamKick())
+        S.camKick.v[0] += kick::Impulse(hk, kp.punchSpring[0], kp.punchSpring[1]);
+    kick::View kv = kick::CamView(S.camKick, S.pitch, S.yaw, lim);
+    const float vRoll = kv.roll;
+    const float* vFwd = kv.fwd;
+    const float* vRight = kv.right;
+    const float* vUp = kv.up;
     vmgame::PublishView(S.yaw, S.pitch, S.camSpeed);
     float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + cfg.eyeHeight, camPos[2] + cy * cfg.eyeForward};
-    float target[3] = {eye[0] + sy * cpi * 10.f, eye[1] + sp * 10.f, eye[2] + cy * cpi * 10.f};
-    const float up[3] = {0.f, 1.f, 0.f};
+    float target[3] = {eye[0] + vFwd[0] * 10.f, eye[1] + vFwd[1] * 10.f, eye[2] + vFwd[2] * 10.f};
+    float up[3] = {0.f, 1.f, 0.f};
+    if (vRoll != 0.f) memcpy(up, vUp, sizeof up);
     CamSetVec(S.cam, vtSetUp, up);
     CamSetVec(S.cam, vtSetPos, eye);
     if (S.baseFov > 0.f) {
@@ -3075,10 +3111,9 @@ void Apply(uintptr_t mgr) {
         }
     }
     {
-        const float cf[3] = {sy * cpi, sp, cy * cpi}, cr[3] = {cy, 0.f, -sy}, cu[3] = {-sy * sp, cpi, -cy * sp};
         float fov = 0;
         if (!Rd(S.cam + oCamFov, fov) || !(fov > 0.2f && fov < 2.8f)) fov = 1.1345f;
-        vmgame::PublishCamera(eye, cr, cu, cf, fov);
+        vmgame::PublishCamera(eye, vRight, vUp, vFwd, fov);
     }
     CamSetVec(S.cam, vtSetTarget, target);
     uintptr_t active = Ptr(mgr + oMgrActive);
@@ -3170,16 +3205,16 @@ void Apply(uintptr_t mgr) {
     {
         uintptr_t sbp = Ptr(g_base + kGlobalScript), bp = sbp ? Ptr(sbp + oScriptBattle) : 0;
         ProbeFrame(bp, now);
-        const float vf[3] = {sy * cpi, sp, cy * cpi};
-        VelStep(bp, eye, vf);
+        VelStep(bp, eye, vFwd);
         FastFireStats(false);
     }
     bool held = Foreground() && (GetAsyncKeyState(VK_LBUTTON) & 0x8000);
     double fireGap = vmgame::FireInterval() > 0 ? vmgame::FireInterval() : cfg.fireInterval;
+    vmgame::SetTrigger(held && g_fireOk && cfg.fireEnabled && !S.sprint && now >= S.fireBlock);
     if (held && g_fireOk && cfg.fireEnabled && now >= S.nextShot && !S.sprint && now >= S.fireBlock && vmgame::CanFire()) {
-        const float fwd[3] = {sy * cpi, sp, cy * cpi};
-        const float right[3] = {cy, 0.f, -sy};
-        const float camUp[3] = {-sy * sp, cpi, -cy * sp};
+        const float* fwd = vFwd;
+        const float* right = vRight;
+        const float* camUp = vUp;
         float bodies[4][3];
         int nb = 0;
         memcpy(bodies[nb++], raw, sizeof raw);
@@ -3216,6 +3251,7 @@ void Apply(uintptr_t mgr) {
         if (FireShot(eye, fwd, right, camUp, bodies, nb, clearance)) {
             ++S.shots;
             vmgame::Fire();
+            S.camKick.OnShot(kp, adsW, now, &S.pitch, &S.yaw, lim);
             uintptr_t sbp = Ptr(g_base + kGlobalScript);
             if (sbp && !S.lastShotFast) ProbeShot(Ptr(sbp + oScriptBattle), now);
         } else {
@@ -3333,6 +3369,14 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (!(l & (1L << 30))) vmgame::SelectWeapon(static_cast<int>(w - '0'));
             return 0;
         }
+        if (S.active && vmgame::ShieldKey() && w == vmgame::ShieldKey()) {
+            if (!(l & (1L << 30))) vmgame::ToggleShield();
+            return 0;
+        }
+        if (S.active && vmgame::ShieldHitKey() && w == vmgame::ShieldHitKey()) {
+            if (!(l & (1L << 30))) vmgame::DebugShieldHit();
+            return 0;
+        }
         if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D')) return 0;
         break;
     case WM_KEYUP:
@@ -3342,6 +3386,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (vmgame::LayerActive() && (w == vmgame::ReloadKey() || w == vmgame::AnimKey() || w == vmgame::ModelKey()))
             return 0;
         if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D' || w == 'R' || (w >= '1' && w <= '9'))) return 0;
+        if (S.active && ((vmgame::ShieldKey() && w == vmgame::ShieldKey()) || (vmgame::ShieldHitKey() && w == vmgame::ShieldHitKey()))) return 0;
         break;
     case WM_MOUSEWHEEL:
         if (S.active) {
@@ -3561,7 +3606,28 @@ bool VerifyGame() {
 DWORD WINAPI InitThread(LPVOID) {
     if (!HostIsWh3()) return 0;
     OpenLog();
+#ifdef HFPS_LUA_MODULE
+    Log("==== hero_fps native loaded (hero_fps.pack Lua loader, require hero_fps_native) pid=%lu", GetCurrentProcessId());
+    {
+        wchar_t vp[MAX_PATH] = {}, want[MAX_PATH];
+        HMODULE vm = GetModuleHandleW(L"version.dll");
+        if (vm) GetModuleFileNameW(vm, vp, MAX_PATH);
+        swprintf(want, MAX_PATH, L"%ls\\version.dll", g_dir);
+        if (vm && _wcsicmp(vp, want) == 0) {
+            Log("loader: old version.dll proxy %ls is also loaded (version.dll route retired 10-18 - remove it) - this copy stays idle", vp);
+            return 0;
+        }
+        Log("loader: version.dll = %ls (not ours), module dir %ls", vp[0] ? vp : L"(none)", g_dir);
+    }
+#ifdef HFPS_PACK_ASSETS
+    if (!packx::ExtractFromPack(g_dir, &Log)) {
+        Log("onepack: assets not available - first person stays off");
+        return 0;
+    }
+#endif
+#else
     Log("==== hero_fps native M1 + viewmodel test loaded (version.dll proxy) pid=%lu", GetCurrentProcessId());
+#endif
     QueryPerformanceFrequency(&g_qpf);
     if (!VerifyGame()) return 0;
     LoadConfig();
@@ -3743,6 +3809,33 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     EdgeStep();
     ShotStep();
 }
+#ifdef HFPS_LUA_MODULE
+static volatile LONG g_luaStarted = 0;
+static bool g_pinned = false;
+extern "C" __declspec(dllexport) int luaopen_hero_fps_native(void*) {
+    if (InterlockedCompareExchange(&g_luaStarted, 1, 0) == 0) {
+        HMODULE self = nullptr;
+        g_pinned = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                                      reinterpret_cast<LPCWSTR>(&luaopen_hero_fps_native), &self) != FALSE;
+        if (!g_pinned) return 0;
+        HANDLE t = CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr);
+        if (t) CloseHandle(t);
+    }
+    return 0;
+}
+BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
+    if (reason == DLL_PROCESS_ATTACH) {
+        DisableThreadLibraryCalls(inst);
+        GetModuleFileNameW(inst, g_dir, MAX_PATH);
+        wchar_t* slash = wcsrchr(g_dir, L'\\');
+        if (slash) *slash = 0;
+    } else if (reason == DLL_PROCESS_DETACH && !reserved && g_log) {
+        fprintf(g_log, "loader: DLL unloaded by FreeLibrary (pinned=%d) - hooks would dangle\n", g_pinned ? 1 : 0);
+        fflush(g_log);
+    }
+    return TRUE;
+}
+#else
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(inst);
@@ -3755,3 +3848,4 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
     }
     return TRUE;
 }
+#endif
