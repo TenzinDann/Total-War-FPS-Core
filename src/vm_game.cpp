@@ -1,5 +1,6 @@
 #include "vm_game.h"
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <dxgi.h>
 #include <cmath>
 #include <cstdio>
@@ -371,6 +372,8 @@ DXGI_FORMAT RtvFormat(DXGI_FORMAT f, bool* hwEncodes) {
 }
 volatile LONG g_adsTimeUs[3] = {250000, 250000, 250000}, g_curAdsUs[3] = {0, 0, 0};
 volatile LONG g_curveFracMicro = -1, g_curveFovMilli = 0, g_curveFovScaling = 1;
+volatile LONG g_spreadMicro = 0;
+unsigned g_spreadRng = 0x2545f491u;
 volatile LONG64 g_hudCover = 0;
 ID3D11Texture2D* g_hudTex = nullptr;
 UINT g_hudTexW = 0, g_hudTexH = 0;
@@ -561,6 +564,12 @@ vm::Look ComputeLook() {
             g_mo.crossKick *= std::exp(-dt * g_crossSet.spreadRecover);
         float mt = g_crossSet.spreadMove * std::fmin(speed / 6.f, 1.5f);
         g_mo.crossMove += (mt - g_mo.crossMove) * (1 - std::exp(-dt * 8.0f));
+    }
+    {
+        const vm::Settings& s = Wp().set;
+        float k = g_crossSet.spreadMax > 0.f ? std::fmin((g_mo.crossKick + g_mo.crossMove) / g_crossSet.spreadMax, 1.f) : 0.f;
+        float deg = (s.hipSpreadMin + (s.hipSpreadMax - s.hipSpreadMin) * k) * (1.f - std::fmin(std::fmax(g_mo.adsW, 0.f), 1.f));
+        InterlockedExchange(&g_spreadMicro, (!g_fp || MeleeWeapon()) ? 0 : static_cast<LONG>(deg * 17453.2925f + 0.5f));
     }
     vm::Look l;
     AnimStep(l, now);
@@ -760,7 +769,7 @@ int FindLastClip() {
     return c >= 0 ? c : (g_an.stance == 1 ? -1 : Wp().rend.FindClip("fire_last"));
 }
 #include "melee.inc"
-#include "ui_probe.inc"
+#include "ui_layer.inc"
 void AnimStep(vm::Look& l, double now) {
     bool fired = InterlockedExchange(&g_reqFire, 0) != 0;
     const bool lastFired = fired && InterlockedExchange(&g_reqFireLast, 0) != 0;
@@ -1462,15 +1471,15 @@ void SwitchStep(ID3D11Device* dev) {
         InterlockedExchange(&g_switching, 0);
     }
 }
-void DrawLayer(IDXGISwapChain* sc) {
+void DrawLayer(IDXGISwapChain* sc, int part) {
     if (g_failed || !(g_testLayer || g_fp)) return;
     double t0 = Now();
-    if (InterlockedExchange(&g_reqModelNext, 0) && g_modelCount > 1) {
+    if (part != kPartCross && InterlockedExchange(&g_reqModelNext, 0) && g_modelCount > 1) {
         int next = ((g_sw.phase == 1 ? g_sw.target : g_modelIdx) + 1) % g_modelCount;
         InterlockedExchange(&g_wantIdx, next);
         InterlockedExchange(&g_reqWeapon, next + 1);
     }
-    if (InterlockedExchange(&g_reload, 0)) {
+    if (part != kPartCross && InterlockedExchange(&g_reload, 0)) {
         LoadAllSettings(g_modelIdx, Wp().set);
         Wp().fxDirty = true;
         InterlockedExchange(&g_reqRoster, 1);
@@ -1486,23 +1495,25 @@ void DrawLayer(IDXGISwapChain* sc) {
         g_failed = true;
         return;
     }
-    if (Wp().rend.Ready() && Wp().rend.Device() != dev) {
-        g_log("viewmodel: device changed (%p -> %p); reloading", (void*)Wp().rend.Device(), (void*)dev);
-        for (int i = 0; i < g_modelCount; ++i) {
-            g_w[i].rend.Release();
-            g_w[i].fxDirty = true;
+    if (part != kPartCross) {
+        if (Wp().rend.Ready() && Wp().rend.Device() != dev) {
+            g_log("viewmodel: device changed (%p -> %p); reloading", (void*)Wp().rend.Device(), (void*)dev);
+            for (int i = 0; i < g_modelCount; ++i) {
+                g_w[i].rend.Release();
+                g_w[i].fxDirty = true;
+            }
+            g_shieldR.Release();
+            InterlockedExchange(&g_reqRoster, 1);
         }
-        g_shieldR.Release();
-        InterlockedExchange(&g_reqRoster, 1);
+        if (!EnsureWeapon(g_modelIdx, dev)) {
+            g_failed = true;
+            dev->Release();
+            return;
+        }
+        RosterStep(dev);
+        SwitchStep(dev);
+        PreloadStep(dev);
     }
-    if (!EnsureWeapon(g_modelIdx, dev)) {
-        g_failed = true;
-        dev->Release();
-        return;
-    }
-    RosterStep(dev);
-    SwitchStep(dev);
-    PreloadStep(dev);
     ID3D11Texture2D* bb = nullptr;
     if (SUCCEEDED(sc->GetBuffer(0, IID_ID3D11Texture2D, reinterpret_cast<void**>(&bb))) && bb) {
         D3D11_TEXTURE2D_DESC td;
@@ -1523,73 +1534,78 @@ void DrawLayer(IDXGISwapChain* sc) {
                 ID3D11DeviceContext* ctx = nullptr;
                 dev->GetImmediateContext(&ctx);
                 if (ctx) {
-                    ProbeOnPresent(ctx, bb, td.Width, td.Height);
-                    vm::Look look = ComputeLook();
-                    HudCoverSave(dev, ctx, bb, td);
-                    if (Wp().rend.Draw(ctx, rtv, bb, td.Width, td.Height, hw, Wp().set, look)) ++g_st.draws;
+                    if (part != kPartGun) UiLayerOnPresent(ctx, bb, td.Width, td.Height);
                     float mx = 0, my = 0, ma = 1;
-                    bool mv = Wp().rend.Muzzle(&mx, &my, &ma);
-                    vm::MuzzleFrame mf;
-                    vm::WorldCam wc;
-                    bool hasMf = g_fp && Wp().rend.MuzzleView(&mf), hasCam = g_fp && ReadCam(&wc);
-                    if (g_fp) ShieldDraw(dev, ctx, rtv, td.Width, td.Height, hw, hasCam ? &wc : nullptr);
-                    if (hasMf)
-                        Wp().shells.Draw(ctx, rtv, Wp().rend.Depth(td.Width, td.Height), td.Width, td.Height, hw, Now(), &mf,
-                                         hasCam ? &wc : nullptr, Wp().set, look.flashLight, Wp().rend.SceneSrv(), Wp().rend.SceneGamma());
-                    else
-                        Wp().shells.Clear();
-                    {
-                        Weapon& w = Wp();
-                        float dist, age;
-                        int kind;
-                        static unsigned rng = 0x7f4a7c15u;
-                        double tnow = Now();
-                        while (w.shells.PopLanding(&dist, &age, &kind)) {
-                            if (age < g_fxStat.landAgeMin) g_fxStat.landAgeMin = age;
-                            if (age > g_fxStat.landAgeMax) g_fxStat.landAgeMax = age;
-                            int recent = 0, oldest = 0;
-                            for (int k = 0; k < 16; ++k) {
-                                if (tnow - w.landAt[k] < 1.0) ++recent;
-                                if (w.landAt[k] < w.landAt[oldest]) oldest = k;
+                    bool mv = false, gun = part != kPartCross;
+                    if (gun) {
+                        vm::Look look = ComputeLook();
+                        if (part == kPartAll) HudCoverSave(dev, ctx, bb, td);
+                        if (Wp().rend.Draw(ctx, rtv, bb, td.Width, td.Height, hw, Wp().set, look)) ++g_st.draws;
+                        mv = Wp().rend.Muzzle(&mx, &my, &ma);
+                        vm::MuzzleFrame mf;
+                        vm::WorldCam wc;
+                        bool hasMf = g_fp && Wp().rend.MuzzleView(&mf), hasCam = g_fp && ReadCam(&wc);
+                        if (g_fp) ShieldDraw(dev, ctx, rtv, td.Width, td.Height, hw, hasCam ? &wc : nullptr);
+                        if (hasMf)
+                            Wp().shells.Draw(ctx, rtv, Wp().rend.Depth(td.Width, td.Height), td.Width, td.Height, hw, Now(), &mf,
+                                             hasCam ? &wc : nullptr, Wp().set, look.flashLight, Wp().rend.SceneSrv(), Wp().rend.SceneGamma());
+                        else
+                            Wp().shells.Clear();
+                        {
+                            Weapon& w = Wp();
+                            float dist, age;
+                            int kind;
+                            static unsigned rng = 0x7f4a7c15u;
+                            double tnow = Now();
+                            while (w.shells.PopLanding(&dist, &age, &kind)) {
+                                if (age < g_fxStat.landAgeMin) g_fxStat.landAgeMin = age;
+                                if (age > g_fxStat.landAgeMax) g_fxStat.landAgeMax = age;
+                                int recent = 0, oldest = 0;
+                                for (int k = 0; k < 16; ++k) {
+                                    if (tnow - w.landAt[k] < 1.0) ++recent;
+                                    if (w.landAt[k] < w.landAt[oldest]) oldest = k;
+                                }
+                                if (!w.shellLand.Loaded() || recent >= static_cast<int>(w.set.shellLandPerSec)) {
+                                    ++g_fxStat.landsDropped;
+                                    continue;
+                                }
+                                float att = dist <= 1.f ? 1.f : dist >= 3.f ? 0.3f : 1.f - 0.35f * (dist - 1.f);
+                                rng = rng * 1664525u + 1013904223u;
+                                float pitch = 0.85f + 0.15f * static_cast<float>((rng >> 8) & 0xffff) / 65535.f;
+                                w.shellLand.Play(w.set.shellLandVolume * att, false, pitch);
+                                w.landAt[oldest] = tnow;
+                                ++g_fxStat.lands;
                             }
-                            if (!w.shellLand.Loaded() || recent >= static_cast<int>(w.set.shellLandPerSec)) {
-                                ++g_fxStat.landsDropped;
-                                continue;
-                            }
-                            float att = dist <= 1.f ? 1.f : dist >= 3.f ? 0.3f : 1.f - 0.35f * (dist - 1.f);
-                            rng = rng * 1664525u + 1013904223u;
-                            float pitch = 0.85f + 0.15f * static_cast<float>((rng >> 8) & 0xffff) / 65535.f;
-                            w.shellLand.Play(w.set.shellLandVolume * att, false, pitch);
-                            w.landAt[oldest] = tnow;
-                            ++g_fxStat.lands;
                         }
+                        {
+                            static const bool preGun = getenv("HFPS_DISTORT_PRE_GUN") != nullptr;
+                            bool dg = false;
+                            ID3D11ShaderResourceView* ds = Wp().flash.HasDistortion() ? Wp().rend.CopyForDistort(ctx, bb, td.Width, td.Height, &dg) : nullptr;
+                            if (preGun) ds = Wp().rend.SceneSrv(), dg = Wp().rend.SceneGamma();
+                            Wp().flash.SetScene(ds, dg);
+                        }
+                        if (hasMf || hasCam)
+                            Wp().flash.Draw(ctx, rtv, Wp().rend.Depth(td.Width, td.Height), td.Width, td.Height, hw, Now(), hasMf ? &mf : nullptr,
+                                         hasCam ? &wc : nullptr, Wp().set);
+                        if (part == kPartAll) HudCoverRestore(ctx, bb);
                     }
-                    {
-                        static const bool preGun = getenv("HFPS_DISTORT_PRE_GUN") != nullptr;
-                        bool dg = false;
-                        ID3D11ShaderResourceView* ds = Wp().flash.HasDistortion() ? Wp().rend.CopyForDistort(ctx, bb, td.Width, td.Height, &dg) : nullptr;
-                        if (preGun) ds = Wp().rend.SceneSrv(), dg = Wp().rend.SceneGamma();
-                        Wp().flash.SetScene(ds, dg);
-                    }
-                    if (hasMf || hasCam)
-                        Wp().flash.Draw(ctx, rtv, Wp().rend.Depth(td.Width, td.Height), td.Width, td.Height, hw, Now(), hasMf ? &mf : nullptr,
-                                     hasCam ? &wc : nullptr, Wp().set);
-                    HudCoverRestore(ctx, bb);
-                    if (g_fp && !(g_stance & 1)) {
+                    if (part != kPartGun && g_fp && !(g_stance & 1)) {
                         float cspread, calpha;
                         CrossLook(cspread, calpha);
                         g_cross.Draw(ctx, rtv, td.Width, td.Height, hw, g_crossSet, cspread, calpha);
                     }
                     ctx->Release();
-                    InterlockedIncrement(&g_muz.seq);
-                    MemoryBarrier();
-                    g_muz.valid = mv;
-                    g_muz.x = mx;
-                    g_muz.y = my;
-                    g_muz.aspect = ma;
-                    g_muz.t = Now();
-                    MemoryBarrier();
-                    InterlockedIncrement(&g_muz.seq);
+                    if (gun) {
+                        InterlockedIncrement(&g_muz.seq);
+                        MemoryBarrier();
+                        g_muz.valid = mv;
+                        g_muz.x = mx;
+                        g_muz.y = my;
+                        g_muz.aspect = ma;
+                        g_muz.t = Now();
+                        MemoryBarrier();
+                        InterlockedIncrement(&g_muz.seq);
+                    }
                 }
                 rtv->Release();
                 if (!g_st.loggedFirst) {
@@ -1605,7 +1621,7 @@ void DrawLayer(IDXGISwapChain* sc) {
     double ms = (Now() - t0) * 1000.0;
     g_st.msSum += ms;
     if (ms > g_st.msMax) g_st.msMax = ms;
-    ++g_st.frames;
+    if (part != kPartGun) ++g_st.frames;
     double now = Now();
     if (now - g_st.tStat >= 5.0) {
         if (g_st.frames)
@@ -1621,8 +1637,10 @@ __attribute__((noinline)) HRESULT STDMETHODCALLTYPE HkPresent(IDXGISwapChain* sc
     uintptr_t ret = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
     if (ret == g_base + g_ra.presentReturn) {
         if (!(flags & DXGI_PRESENT_TEST)) {
+            g_lastSc = sc, g_presentTid = GetCurrentThreadId();
+            int part = UiLayerPresentPart();
             g_probeMute = true;
-            DrawLayer(sc);
+            DrawLayer(sc, part);
             g_probeMute = false;
         }
     } else if (InterlockedIncrement(&g_foreignPresents) <= 3) {
@@ -1974,6 +1992,25 @@ void PublishAdsTime(float normal, float sprint, float tac) {
         if (v[k] > 0.f) InterlockedExchange(&g_adsTimeUs[k], static_cast<LONG>(v[k] * 1e6f + 0.5f));
 }
 bool CurveAdsFovScaling() { return g_curveFovScaling != 0; }
+float HipSpreadCone() { return g_spreadMicro * 1e-6f; }
+void SpreadSeed(unsigned seed) { g_spreadRng = seed ? seed : 1u; }
+void SpreadDir(const float fwd[3], const float right[3], const float up[3], float out[3]) {
+    float cone = HipSpreadCone();
+    for (int i = 0; i < 3; ++i) out[i] = fwd[i];
+    if (!(cone > 0.f)) return;
+    auto rnd = [] {
+        g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
+        return static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
+    };
+    float r = std::tan(cone * rnd()), th = 6.2831853f * rnd();
+    float a = r * std::cos(th), b = r * std::sin(th), n = 0.f;
+    for (int i = 0; i < 3; ++i) {
+        out[i] = fwd[i] + right[i] * a + up[i] * b;
+        n += out[i] * out[i];
+    }
+    n = 1.f / std::sqrt(n);
+    for (int i = 0; i < 3; ++i) out[i] *= n;
+}
 bool CurveAdsState(float* frac, float* adsFovAlt) {
     LONG f = g_curveFracMicro;
     if (f < 0) return false;

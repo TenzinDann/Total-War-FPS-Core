@@ -4050,7 +4050,9 @@ void Apply(uintptr_t mgr) {
             S.fpProjId = S.fpProj ? id : -1;
             Log("fire: weapon %d projectile '%s' -> %s (id %d)", S.projFor, want, S.fpProj ? "found" : "NOT FOUND (hero's own)", S.fpProjId);
         }
-        if (FireShot(eye, fwd, right, camUp, bodies, nb, clearance)) {
+        float sfwd[3];
+        vmgame::SpreadDir(fwd, right, camUp, sfwd);
+        if (FireShot(eye, sfwd, right, camUp, bodies, nb, clearance)) {
             ++S.shots;
             vmgame::Fire();
             S.camKick.OnShot(kp, adsW, now, &S.pitch, &S.yaw, lim);
