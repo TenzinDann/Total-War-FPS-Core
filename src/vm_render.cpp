@@ -773,6 +773,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
         }
     }
     s.adsFovAlt = IniFloat(ini, L"ads_fov", s.adsFovAlt);
+    s.adsFovScaling = IniFloat(ini, L"ads_fov_scaling", s.adsFovScaling ? 1.f : 0.f) != 0.f;
     s.adsVmFovAlt = IniFloat(ini, L"ads_vm_fov", s.adsVmFovAlt);
     for (float* v : {&s.adsFovAlt, &s.adsVmFovAlt})
         if (!(*v == 0.f || (*v >= 5.f && *v <= 150.f))) *v = 0.f;

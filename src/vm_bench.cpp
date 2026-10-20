@@ -2493,7 +2493,11 @@ void GameFrame(double now, const Input& in) {
         float mf = 0.f, mfov = 0.f;
         if (vmgame::CurveAdsState(&mf, &mfov)) {
             zoomCurve = 0.5f - 0.5f * std::cos(kPi * mf);
-            if (mfov > 0.f) zoomMax = std::fmax(1.f, std::tan(BaseFov() * 0.5f) / (0.75f * std::tan(mfov * kPi / 360.f)));
+            if (mfov > 0.f) {
+                float hip = std::tan(BaseFov() * 0.5f);
+                if (vmgame::CurveAdsFovScaling()) mfov = std::fmin(mfov * 2.f * std::atan(hip / 0.75f) * 180.f / kPi / 65.f, 170.f);
+                zoomMax = std::fmax(1.f, hip / (0.75f * std::tan(mfov * kPi / 360.f)));
+            }
         }
     }
     float zoomNow = 1.f + (zoomMax - 1.f) * shieldZoom * zoomCurve;
@@ -2709,6 +2713,13 @@ const Ev kEvAdsGas[] = {
     {2.05, 2, 0, L"adsgas_050.bmp"}, {2.1, 2, 0, L"adsgas_100.bmp"}, {2.15, 2, 0, L"adsgas_150.bmp"}, {2.2, 2, 0, L"adsgas_200.bmp"},
     {2.3, 2, 0, L"adsgas_300.bmp"}, {2.4, 2, 0, L"adsgas_400.bmp"}, {2.5, 2, 0, L"adsgas_500.bmp"}, {2.7, 2, 0, L"adsgas_700.bmp"},
     {2.9, 17, 1, nullptr}, {3.0, 5, 0, nullptr},
+};
+const Ev kEvTacAds[] = {
+    {0.5, 17, 0, nullptr}, {1.0, 6, 1, nullptr}, {1.2, 7, 0, nullptr}, {1.5, 7, 0, nullptr}, {2.6, 3, 1, nullptr},
+    {2.633, 2, 0, L"tacads_033.bmp"}, {2.667, 2, 0, L"tacads_067.bmp"}, {2.7, 2, 0, L"tacads_100.bmp"}, {2.733, 2, 0, L"tacads_133.bmp"},
+    {2.767, 2, 0, L"tacads_167.bmp"}, {2.8, 2, 0, L"tacads_200.bmp"}, {2.85, 2, 0, L"tacads_250.bmp"}, {2.9, 2, 0, L"tacads_300.bmp"},
+    {3.0, 2, 0, L"tacads_400.bmp"}, {3.1, 2, 0, L"tacads_500.bmp"}, {3.4, 3, 0, nullptr}, {3.5, 6, 0, nullptr}, {3.7, 17, 1, nullptr},
+    {3.8, 5, 0, nullptr},
 };
 #define SHELL_SHOTS(t,tag) {t + 0.017, 2, 0, L"shell_" tag L"_017.bmp"}, {t + 0.033, 2, 0, L"shell_" tag L"_033.bmp"}, {t + 0.05, 2, 0, L"shell_" tag L"_050.bmp"}, {t + 0.083, 2, 0, L"shell_" tag L"_083.bmp"}, {t + 0.133, 2, 0, L"shell_" tag L"_133.bmp"}, {t + 0.2, 2, 0, L"shell_" tag L"_200.bmp"}, {t + 0.3, 2, 0, L"shell_" tag L"_300.bmp"}
 const Ev kEvShell[] = {
@@ -3623,7 +3634,8 @@ int wmain(int argc, wchar_t** argv) {
                                 !wcscmp(script, L"sprintads") || !wcscmp(script, L"gas") || !wcscmp(script, L"shell") ||
                                 !wcscmp(script, L"shellmove") || !wcscmp(script, L"shield") || !wcscmp(script, L"lastshot") || !wcscmp(script, L"onset") ||
                                 !wcscmp(script, L"shake") || !wcscmp(script, L"melee") || !wcscmp(script, L"rapid") || !wcscmp(script, L"crossfade") ||
-                                !wcscmp(script, L"meleeblock") || !wcscmp(script, L"meleerun") || !wcscmp(script, L"adsgas"));
+                                !wcscmp(script, L"meleeblock") || !wcscmp(script, L"meleerun") || !wcscmp(script, L"adsgas") ||
+                                !wcscmp(script, L"tacads"));
     g_csvOn = !script || layersScript;
     using FnPeriod = UINT(WINAPI*)(UINT);
     FnPeriod timeBegin = nullptr, timeEnd = nullptr;
@@ -3734,6 +3746,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (!wcscmp(script, L"sprintads")) ev = kEvSprintAds, nev = sizeof kEvSprintAds / sizeof *kEvSprintAds;
         else if (!wcscmp(script, L"gas")) ev = kEvGas, nev = sizeof kEvGas / sizeof *kEvGas;
         else if (!wcscmp(script, L"adsgas")) ev = kEvAdsGas, nev = sizeof kEvAdsGas / sizeof *kEvAdsGas;
+        else if (!wcscmp(script, L"tacads")) ev = kEvTacAds, nev = sizeof kEvTacAds / sizeof *kEvTacAds;
         else if (!wcscmp(script, L"shell")) ev = kEvShell, nev = sizeof kEvShell / sizeof *kEvShell;
         else if (!wcscmp(script, L"shellmove")) ev = kEvShellMove, nev = sizeof kEvShellMove / sizeof *kEvShellMove;
         else if (!wcscmp(script, L"shield")) ev = kEvShield, nev = sizeof kEvShield / sizeof *kEvShield;

@@ -51,6 +51,7 @@ void PublishStance(bool ads, bool sprint, bool tac, int adsKind = 0);
 void PublishAdsTime(float normal, float sprint, float tac);
 float CurrentAdsTime(int kind);
 bool CurveAdsState(float* frac, float* adsFovAlt);
+bool CurveAdsFovScaling();
 void PublishCamera(const float eye[3], const float right[3], const float up[3], const float fwd[3], float fovY);
 void Tracer(const float from[3], const float to[3]);
 bool Muzzle(float* ndcX, float* ndcY, float* aspect);

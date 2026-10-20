@@ -3560,7 +3560,11 @@ void Apply(uintptr_t mgr) {
         float mf = 0.f, mfov = 0.f;
         if (vmgame::CurveAdsState(&mf, &mfov)) {
             zoomCurve = 0.5f - 0.5f * std::cos(kPi * mf);
-            if (mfov > 0.f && S.baseFov > 0.f) zoomMax = std::fmax(1.f, std::tan(S.baseFov * 0.5f) / (0.75f * std::tan(mfov * kPi / 360.f)));
+            if (mfov > 0.f && S.baseFov > 0.f) {
+                float hip = std::tan(S.baseFov * 0.5f);
+                if (vmgame::CurveAdsFovScaling()) mfov = std::fmin(mfov * 2.f * std::atan(hip / 0.75f) * 180.f / kPi / 65.f, 170.f);
+                zoomMax = std::fmax(1.f, hip / (0.75f * std::tan(mfov * kPi / 360.f)));
+            }
         }
     }
     float zoomNow = 1.f + (zoomMax - 1.f) * shieldZoom * zoomCurve;

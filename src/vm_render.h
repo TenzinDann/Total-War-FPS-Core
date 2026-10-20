@@ -93,6 +93,7 @@ struct Settings {
     float adsTime = 0.f, adsTimeSprint = 0.f, adsTimeTac = 0.f;
     float adsCurveTime[4] = {0.f, 0.f, 0.f, 0.f};
     float adsFovAlt = 0.f, adsVmFovAlt = 0.f;
+    bool adsFovScaling = true;
     wchar_t flashFx[128] = L"";
     float flashScale = 1.0f;
     float flashIntensity = 1.0f;

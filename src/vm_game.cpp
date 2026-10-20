@@ -370,7 +370,7 @@ DXGI_FORMAT RtvFormat(DXGI_FORMAT f, bool* hwEncodes) {
     }
 }
 volatile LONG g_adsTimeUs[3] = {250000, 250000, 250000}, g_curAdsUs[3] = {0, 0, 0};
-volatile LONG g_curveFracMicro = -1, g_curveFovMilli = 0;
+volatile LONG g_curveFracMicro = -1, g_curveFovMilli = 0, g_curveFovScaling = 1;
 volatile LONG64 g_hudCover = 0;
 ID3D11Texture2D* g_hudTex = nullptr;
 UINT g_hudTexW = 0, g_hudTexH = 0;
@@ -438,9 +438,19 @@ float CurveFullTime(bool in) {
     float ta = v / a, d = 0.5f * a * ta * ta;
     return d >= 1.f ? std::sqrt(2.f / a) : ta + (1.f - d) / v;
 }
+float AdsTimeClassic(int k) {
+    const vm::Settings& s = Wp().set;
+    float w = k == 2 ? s.adsTimeTac : k == 1 ? s.adsTimeSprint : s.adsTime;
+    if (w > 0.f) return w;
+    LONG us = g_adsTimeUs[k];
+    return us > 0 ? us * 1e-6f : 0.25f;
+}
 float AdsTime(int kind = 0) {
     const vm::Settings& s = Wp().set;
-    if (CurveAdsOn()) return CurveFullTime(true) * (1.f + (s.shieldAdsTime - 1.f) * ShieldEase());
+    if (CurveAdsOn()) {
+        float full = CurveFullTime(true), want = (kind == 1 || kind == 2) ? AdsTimeClassic(kind) : 0.f;
+        return (want > full ? want : full) * (1.f + (s.shieldAdsTime - 1.f) * ShieldEase());
+    }
     auto pick = [&](int k) {
         float w = k == 2 ? s.adsTimeTac : k == 1 ? s.adsTimeSprint : s.adsTime;
         if (w > 0.f) return w;
@@ -477,6 +487,11 @@ float AdsWeightStep(float adsW, LONG st, float dt, bool commit) {
         return AdsSmoothStep(adsW, st, dt);
     }
     float v = g_mo.curveV, sk = 1.f + (Wp().set.shieldAdsTime - 1.f) * ShieldEase();
+    {
+        int kind = StanceAdsKind(st);
+        float want = (kind == 1 || kind == 2) ? AdsTimeClassic(kind) : 0.f, full = CurveFullTime(true);
+        if (want > full && full > 0.f) sk *= want / full;
+    }
     CurveAdsStep(adsW, v, (st & 1) != 0, dt / sk);
     if (commit) g_mo.curveV = v;
     return adsW;
@@ -572,10 +587,13 @@ vm::Look ComputeLook() {
         const bool curve = CurveAdsOn();
         InterlockedExchange(&g_curveFracMicro, curve ? static_cast<LONG>(g_mo.adsW * 1e6f + 0.5f) : -1);
         InterlockedExchange(&g_curveFovMilli, curve ? static_cast<LONG>(Wp().set.adsFovAlt * 1000.f + 0.5f) : 0);
+        InterlockedExchange(&g_curveFovScaling, Wp().set.adsFovScaling ? 1 : 0);
         if (curve && Wp().set.adsVmFovAlt > 0.f) {
             const float kD = 0.0174532925f;
             float sc = 0.5f - 0.5f * std::cos(3.14159265f * g_mo.adsW);
-            float th = std::tan(Wp().set.fovDeg * 0.5f * kD), ta = 0.75f * std::tan(Wp().set.adsVmFovAlt * 0.5f * kD);
+            float th = std::tan(Wp().set.fovDeg * 0.5f * kD), avm = Wp().set.adsVmFovAlt;
+            if (Wp().set.adsFovScaling) avm = std::fmin(avm * 2.f * std::atan(th / 0.75f) / kD / 65.f, 170.f);
+            float ta = 0.75f * std::tan(avm * 0.5f * kD);
             l.fovDeg = 2.f * std::atan(th + (ta - th) * sc) / kD;
         }
         g_mo.sprintW += (((st & 6) ? 1.f : 0.f) - g_mo.sprintW) * k;
@@ -742,6 +760,7 @@ int FindLastClip() {
     return c >= 0 ? c : (g_an.stance == 1 ? -1 : Wp().rend.FindClip("fire_last"));
 }
 #include "melee.inc"
+#include "ui_probe.inc"
 void AnimStep(vm::Look& l, double now) {
     bool fired = InterlockedExchange(&g_reqFire, 0) != 0;
     const bool lastFired = fired && InterlockedExchange(&g_reqFireLast, 0) != 0;
@@ -1504,6 +1523,7 @@ void DrawLayer(IDXGISwapChain* sc) {
                 ID3D11DeviceContext* ctx = nullptr;
                 dev->GetImmediateContext(&ctx);
                 if (ctx) {
+                    ProbeOnPresent(ctx, bb, td.Width, td.Height);
                     vm::Look look = ComputeLook();
                     HudCoverSave(dev, ctx, bb, td);
                     if (Wp().rend.Draw(ctx, rtv, bb, td.Width, td.Height, hw, Wp().set, look)) ++g_st.draws;
@@ -1600,7 +1620,11 @@ volatile LONG g_foreignPresents = 0;
 __attribute__((noinline)) HRESULT STDMETHODCALLTYPE HkPresent(IDXGISwapChain* sc, UINT sync, UINT flags) {
     uintptr_t ret = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
     if (ret == g_base + g_ra.presentReturn) {
-        if (!(flags & DXGI_PRESENT_TEST)) DrawLayer(sc);
+        if (!(flags & DXGI_PRESENT_TEST)) {
+            g_probeMute = true;
+            DrawLayer(sc);
+            g_probeMute = false;
+        }
     } else if (InterlockedIncrement(&g_foreignPresents) <= 3) {
         g_log("viewmodel: Present from elsewhere (return %p, thread %lu) - forwarded without drawing", (void*)ret,
               GetCurrentThreadId());
@@ -1949,6 +1973,7 @@ void PublishAdsTime(float normal, float sprint, float tac) {
     for (int k = 0; k < 3; ++k)
         if (v[k] > 0.f) InterlockedExchange(&g_adsTimeUs[k], static_cast<LONG>(v[k] * 1e6f + 0.5f));
 }
+bool CurveAdsFovScaling() { return g_curveFovScaling != 0; }
 bool CurveAdsState(float* frac, float* adsFovAlt) {
     LONG f = g_curveFracMicro;
     if (f < 0) return false;
