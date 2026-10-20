@@ -228,7 +228,8 @@ const GameAddrs kGames[] = {
      Prints(kHaltPrints904), Prints(kTpPrints904), Prints(kGhostPrints904), Prints(kRevealPrints904),
      Prints(kMeleePrints904), Prints(kUiPrints904), Prints(kShotPrints904),
                    {0x3de7a28, 0x33d6a78, 0x120, 0x582ae4, 0x5acedc, 0x5acf21, 0x59c538, 0x59c69b, 0x1350, kPresentHelper904,
-                sizeof kPresentHelper904, kGlobalWrite904, sizeof kGlobalWrite904}},
+                sizeof kPresentHelper904, kGlobalWrite904, sizeof kGlobalWrite904,
+                                                      0x208, 0x583710, 0x4128, 0x1988b7c}},
 };
 const GameAddrs* g_game = nullptr;
 uintptr_t kGlobalUi, kVtCamMgr, kFnCamMgrUpdate, kFnCamSetPos, kFnCamSetTarget, kFnCamSetUp, kFnCamSetFov, kFnCamSetNear,
