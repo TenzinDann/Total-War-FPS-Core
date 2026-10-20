@@ -632,6 +632,9 @@ void IniVec3(const wchar_t* ini, const wchar_t* key, float* v) {
     }
 }
 }
+const wchar_t* const kMeleeSfxNames[kMeleeSfx] = {L"swing", L"swing_layer", L"push", L"hit_stab", L"hit_stab_heavy",
+                                                  L"hit_slash", L"hit_slash_heavy", L"hit_bash", L"hit_body", L"hit_gore",
+                                                  L"hit_tail_stab", L"hit_tail_slash", L"block", L"block_tail"};
 bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (GetFileAttributesW(ini) == INVALID_FILE_ATTRIBUTES) return false;
     s.fovDeg = IniFloat(ini, L"fov", s.fovDeg);
@@ -698,6 +701,14 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.fireTailGap = IniFloat(ini, L"fire_tail_gap", s.fireTailGap);
     s.meleeStrikeLead = IniFloat(ini, L"melee_strike_lead", s.meleeStrikeLead);
     if (!(s.meleeStrikeLead >= 0.f && s.meleeStrikeLead <= 0.6f)) s.meleeStrikeLead = 0.25f;
+    for (int i = 0; i < kMeleeSfx; ++i) {
+        wchar_t key[64];
+        swprintf(key, 64, L"melee_sfx_%ls", kMeleeSfxNames[i]);
+        GetPrivateProfileStringW(L"viewmodel", key, s.meleeSfx[i], s.meleeSfx[i], 512, ini);
+        swprintf(key, 64, L"melee_sfx_%ls_volume", kMeleeSfxNames[i]);
+        s.meleeSfxVolume[i] = IniFloat(ini, key, s.meleeSfxVolume[i]);
+    }
+    s.meleeSfxMaster = IniFloat(ini, L"melee_sfx_volume", s.meleeSfxMaster);
     s.fireRpm = IniFloat(ini, L"fire_rpm", s.fireRpm);
     s.magSize = static_cast<int>(IniFloat(ini, L"mag_size", static_cast<float>(s.magSize)));
     s.magDisposable = IniFloat(ini, L"mag_disposable", s.magDisposable ? 1.f : 0.f) != 0.f;
@@ -769,12 +780,6 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.spinBone = (spb >= -2 && spb < static_cast<float>(kMaxBones)) ? static_cast<int>(spb) : -2;
     fracList(L"tac_sprint_steps", s.tacSprintSteps, s.tacSprintStepN);
     s.weaponDefault = IniFloat(ini, L"weapon_default", s.weaponDefault ? 1.f : 0.f) != 0.f;
-    {
-        wchar_t ha[16] = L"";
-        GetPrivateProfileStringW(L"viewmodel", L"hud_anchor", L"", ha, 16, ini);
-        if (!_wcsicmp(ha, L"center")) s.hudAnchor = 1;
-        else if (!_wcsicmp(ha, L"left")) s.hudAnchor = 0;
-    }
     {
         wchar_t pw[64] = L"";
         GetPrivateProfileStringW(L"viewmodel", L"projectile", L"", pw, 64, ini);
@@ -1237,6 +1242,47 @@ bool Renderer::EnsureDepth(UINT w, UINT h) {
     depthW_ = w;
     depthH_ = h;
     return true;
+}
+ID3D11ShaderResourceView* Renderer::CopyForDistort(ID3D11DeviceContext* ctx, ID3D11Texture2D* backBuffer, UINT w, UINT h, bool* gamma) {
+    if (gamma) *gamma = false;
+    if (!ctx || !backBuffer || !dev_ || distBroken_) return nullptr;
+    D3D11_TEXTURE2D_DESC sd;
+    backBuffer->GetDesc(&sd);
+    if (sd.SampleDesc.Count != 1 || sd.Width != w || sd.Height != h) return nullptr;
+    DXGI_FORMAT f = sd.Format;
+    switch (f) {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS: f = DXGI_FORMAT_R8G8B8A8_UNORM; break;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS: f = DXGI_FORMAT_B8G8R8A8_UNORM; break;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS: f = DXGI_FORMAT_R10G10B10A2_UNORM; break;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS: f = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
+    default: break;
+    }
+    if (!distSrv_ || w != distW_ || h != distH_ || f != distFmt_) {
+        SafeRelease(distSrv_);
+        SafeRelease(distTex_);
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = w;
+        td.Height = h;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = f;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(dev_->CreateTexture2D(&td, nullptr, &distTex_)) || FAILED(dev_->CreateShaderResourceView(distTex_, nullptr, &distSrv_))) {
+            SafeRelease(distSrv_);
+            SafeRelease(distTex_);
+            distBroken_ = true;
+            return nullptr;
+        }
+        distW_ = w;
+        distH_ = h;
+        distFmt_ = f;
+    }
+    ctx->CopySubresourceRegion(distTex_, 0, 0, 0, 0, backBuffer, 0, nullptr);
+    if (gamma)
+        *gamma = !(f == DXGI_FORMAT_R16G16B16A16_FLOAT || f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
+    return distSrv_;
 }
 bool Renderer::EnsureScene(UINT w, UINT h, DXGI_FORMAT fmt) {
     if (sceneBroken_) return false;
@@ -1985,6 +2031,11 @@ void Renderer::Release() {
     sceneW_ = sceneH_ = sceneMips_ = 0;
     sceneFmt_ = DXGI_FORMAT_UNKNOWN;
     sceneBroken_ = false;
+    SafeRelease(distSrv_);
+    SafeRelease(distTex_);
+    distW_ = distH_ = 0;
+    distFmt_ = DXGI_FORMAT_UNKNOWN;
+    distBroken_ = false;
     for (auto*& s : srv_) SafeRelease(s);
     texCount_ = 0;
     delete[] subs_;
@@ -3089,6 +3140,11 @@ void MuzzleFlash::Dump(double now) const {
         printf("  part %2d tex %2d age %7.3f life %6.3f alpha %.3f locked %d placed %d\n", i, p.tex,
                static_cast<float>(now - tSpawn_) - p.delay, p.life, p.alpha, p.locked, p.placed);
     }
+}
+bool MuzzleFlash::HasDistortion() const {
+    for (int i = 0; i < n_; ++i)
+        if (parts_[i].tex == kFlashTexDistRing || parts_[i].tex == kFlashTexDistHaze) return true;
+    return false;
 }
 void MuzzleFlash::Release() {
     SafeRelease(vs_);

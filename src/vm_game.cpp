@@ -222,6 +222,7 @@ struct Weapon {
     vm::MuzzleFlash flash;
     vm::ShellEject shells;
     vm::GunSound lastShot, casing, casingAds, shellLand;
+    vm::GunSound meleeSfx[vm::kMeleeSfx];
     double landAt[16] = {};
     bool fxDirty = true;
     double lastShotAt = 0;
@@ -370,7 +371,52 @@ DXGI_FORMAT RtvFormat(DXGI_FORMAT f, bool* hwEncodes) {
 }
 volatile LONG g_adsTimeUs[3] = {250000, 250000, 250000}, g_curAdsUs[3] = {0, 0, 0};
 volatile LONG g_curveFracMicro = -1, g_curveFovMilli = 0;
-volatile LONG g_hudAnchorNow = 0;
+volatile LONG64 g_hudCover = 0;
+ID3D11Texture2D* g_hudTex = nullptr;
+UINT g_hudTexW = 0, g_hudTexH = 0;
+DXGI_FORMAT g_hudTexFmt = DXGI_FORMAT_UNKNOWN;
+D3D11_BOX g_hudBox = {};
+bool g_hudSaved = false;
+void HudCoverSave(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* bb, const D3D11_TEXTURE2D_DESC& td) {
+    g_hudSaved = false;
+    const LONG64 v = g_hudCover;
+    if (!v || !g_fp) return;
+    auto px = [](LONG64 q, UINT size) { return static_cast<UINT>((static_cast<double>(q & 0xffff) / 65535.0) * size + 0.5); };
+    UINT x0 = px(v, td.Width), y0 = px(v >> 16, td.Height), x1 = px(v >> 32, td.Width), y1 = px(v >> 48, td.Height);
+    if (x1 > td.Width) x1 = td.Width;
+    if (y1 > td.Height) y1 = td.Height;
+    if (x1 <= x0 + 1 || y1 <= y0 + 1) return;
+    const UINT w = x1 - x0, h = y1 - y0;
+    if (!g_hudTex || g_hudTexW != w || g_hudTexH != h || g_hudTexFmt != td.Format) {
+        if (g_hudTex) g_hudTex->Release();
+        g_hudTex = nullptr;
+        D3D11_TEXTURE2D_DESC d = {};
+        d.Width = w;
+        d.Height = h;
+        d.MipLevels = d.ArraySize = 1;
+        d.Format = td.Format;
+        d.SampleDesc.Count = 1;
+        d.Usage = D3D11_USAGE_DEFAULT;
+        if (FAILED(dev->CreateTexture2D(&d, nullptr, &g_hudTex)) || !g_hudTex) {
+            g_hudTex = nullptr;
+            static bool told = false;
+            if (!told && g_log) g_log("viewmodel: hud cover texture %ux%u format %d failed - HUD stays under the gun", w, h, td.Format);
+            told = true;
+            return;
+        }
+        g_hudTexW = w;
+        g_hudTexH = h;
+        g_hudTexFmt = td.Format;
+    }
+    g_hudBox = {x0, y0, 0, x1, y1, 1};
+    ctx->CopySubresourceRegion(g_hudTex, 0, 0, 0, 0, bb, 0, &g_hudBox);
+    g_hudSaved = true;
+}
+void HudCoverRestore(ID3D11DeviceContext* ctx, ID3D11Texture2D* bb) {
+    if (!g_hudSaved || !g_hudTex) return;
+    ctx->CopySubresourceRegion(bb, 0, g_hudBox.left, g_hudBox.top, 0, g_hudTex, 0, nullptr);
+    g_hudSaved = false;
+}
 bool CurveAdsOn() {
     const float* t = Wp().set.adsCurveTime;
     return t[0] > 0.f && t[1] > 0.f && t[2] > 0.f && t[3] > 0.f;
@@ -526,7 +572,6 @@ vm::Look ComputeLook() {
         const bool curve = CurveAdsOn();
         InterlockedExchange(&g_curveFracMicro, curve ? static_cast<LONG>(g_mo.adsW * 1e6f + 0.5f) : -1);
         InterlockedExchange(&g_curveFovMilli, curve ? static_cast<LONG>(Wp().set.adsFovAlt * 1000.f + 0.5f) : 0);
-        InterlockedExchange(&g_hudAnchorNow, Wp().set.hudAnchor >= 0 ? Wp().set.hudAnchor : (MeleeWeapon() ? 1 : 0));
         if (curve && Wp().set.adsVmFovAlt > 0.f) {
             const float kD = 0.0174532925f;
             float sc = 0.5f - 0.5f * std::cos(3.14159265f * g_mo.adsW);
@@ -743,6 +788,7 @@ void AnimStep(vm::Look& l, double now) {
                                  &w.lastShot, &w.casing, &w.casingAds, &w.shellLand};
         for (vm::GunSound* gs : all) gs->Update();
         for (int k = 0; k < w.nAnim; ++k) w.anim[k].snd.Update();
+        for (vm::GunSound& m : w.meleeSfx) m.Update();
     }
     InterlockedExchange(&g_meleeOn, MeleeWeapon() ? 1 : 0);
     if (!Wp().rend.Clips()) return;
@@ -942,6 +988,7 @@ void ShieldStep(vm::Look& l, double now, float dt) {
             float a = static_cast<float>((g_sh.rng >> 8) & 0xffff) / 65536.f * 6.2831853f;
             g_sh.meleeShake[0] = std::cos(a), g_sh.meleeShake[1] = std::sin(a);
             InterlockedExchangeAdd(&g_sh.camKickMdeg, static_cast<LONG>(s.shieldHitCam * 1000.f * n));
+            melee::BlockSound();
             if (g_sh.hitLogs++ < 120) g_log("shield: hit x%ld blocked %.0f%% (spear block)", n, frac * 100.f);
         } else if (frac > 0.f) {
             g_sh.lastBlock = frac;
@@ -1180,6 +1227,16 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
             else
                 g_log("viewmodel: [%d] %s %ls failed: %s", idx, st.tag, st.list, err);
         }
+    }
+    for (int i = 0; i < vm::kMeleeSfx; ++i) {
+        vm::GunSound& m = w.meleeSfx[i];
+        m.Release();
+        if (!w.set.meleeSfx[i][0]) continue;
+        err[0] = 0;
+        if (m.Load(dir, w.set.meleeSfx[i], 4, err, sizeof err))
+            g_log("viewmodel: [%d] melee sfx %ls (%d variants)", idx, vm::kMeleeSfxNames[i], m.Variants());
+        else
+            g_log("viewmodel: [%d] melee sfx %ls %ls failed: %s", idx, vm::kMeleeSfxNames[i], w.set.meleeSfx[i], err);
     }
     {
         for (int i = 0; i < w.nAnim; ++i) w.anim[i].snd.Release();
@@ -1448,6 +1505,7 @@ void DrawLayer(IDXGISwapChain* sc) {
                 dev->GetImmediateContext(&ctx);
                 if (ctx) {
                     vm::Look look = ComputeLook();
+                    HudCoverSave(dev, ctx, bb, td);
                     if (Wp().rend.Draw(ctx, rtv, bb, td.Width, td.Height, hw, Wp().set, look)) ++g_st.draws;
                     float mx = 0, my = 0, ma = 1;
                     bool mv = Wp().rend.Muzzle(&mx, &my, &ma);
@@ -1455,7 +1513,6 @@ void DrawLayer(IDXGISwapChain* sc) {
                     vm::WorldCam wc;
                     bool hasMf = g_fp && Wp().rend.MuzzleView(&mf), hasCam = g_fp && ReadCam(&wc);
                     if (g_fp) ShieldDraw(dev, ctx, rtv, td.Width, td.Height, hw, hasCam ? &wc : nullptr);
-                    Wp().flash.SetScene(Wp().rend.SceneSrv(), Wp().rend.SceneGamma());
                     if (hasMf)
                         Wp().shells.Draw(ctx, rtv, Wp().rend.Depth(td.Width, td.Height), td.Width, td.Height, hw, Now(), &mf,
                                          hasCam ? &wc : nullptr, Wp().set, look.flashLight, Wp().rend.SceneSrv(), Wp().rend.SceneGamma());
@@ -1487,9 +1544,17 @@ void DrawLayer(IDXGISwapChain* sc) {
                             ++g_fxStat.lands;
                         }
                     }
+                    {
+                        static const bool preGun = getenv("HFPS_DISTORT_PRE_GUN") != nullptr;
+                        bool dg = false;
+                        ID3D11ShaderResourceView* ds = Wp().flash.HasDistortion() ? Wp().rend.CopyForDistort(ctx, bb, td.Width, td.Height, &dg) : nullptr;
+                        if (preGun) ds = Wp().rend.SceneSrv(), dg = Wp().rend.SceneGamma();
+                        Wp().flash.SetScene(ds, dg);
+                    }
                     if (hasMf || hasCam)
                         Wp().flash.Draw(ctx, rtv, Wp().rend.Depth(td.Width, td.Height), td.Width, td.Height, hw, Now(), hasMf ? &mf : nullptr,
                                      hasCam ? &wc : nullptr, Wp().set);
+                    HudCoverRestore(ctx, bb);
                     if (g_fp && !(g_stance & 1)) {
                         float cspread, calpha;
                         CrossLook(cspread, calpha);
@@ -1828,7 +1893,12 @@ void SetTrigger(bool held) {
     }
 }
 int CurrentWeapon() { return g_modelIdx; }
-int HudAnchor() { return static_cast<int>(g_hudAnchorNow); }
+void SetHudCover(float x0, float y0, float x1, float y1) {
+    auto q = [](float f) { return static_cast<LONG64>((f < 0.f ? 0.f : f > 1.f ? 1.f : f) * 65535.f + 0.5f); };
+    LONG64 v = 0;
+    if (x1 > x0 && y1 > y0) v = q(x0) | (q(y0) << 16) | (q(x1) << 32) | (q(y1) << 48);
+    InterlockedExchange64(&g_hudCover, v);
+}
 void GetKick(kick::Params* out) {
     int idx = g_modelIdx;
     if (idx < 0 || idx >= kMaxModels) idx = 0;
@@ -1862,6 +1932,13 @@ float ShieldCamKick() { return InterlockedExchange(&g_sh.camKickMdeg, 0) * 1e-3f
 bool MeleeActive() { return g_meleeOn != 0; }
 void MeleeInput(bool attack, bool block) { InterlockedExchange(&g_meleeIn, (attack ? 1 : 0) | (block ? 2 : 0)); }
 int TakeMeleeStrike() { return static_cast<int>(InterlockedExchange(&g_meleeStrike, 0)) - 1; }
+void MeleeHitFeedback(int hits) {
+    LONG t = g_meleeHitQTail;
+    if (t - g_meleeHitQHead >= 32) return;
+    g_meleeHitQ[t & 31] = hits;
+    MemoryBarrier();
+    InterlockedExchange(&g_meleeHitQTail, t + 1);
+}
 const char* WeaponProjectile(int idx) { return idx >= 0 && idx < g_modelCount ? g_w[idx].set.projectile : ""; }
 float CurrentAdsTime(int kind) {
     LONG us = kind >= 0 && kind < 3 ? g_curAdsUs[kind] : 0;

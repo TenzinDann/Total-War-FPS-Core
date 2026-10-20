@@ -4,6 +4,8 @@
 #include <d3d11.h>
 #include <cstdint>
 namespace vm {
+constexpr int kMeleeSfx = 14;
+extern const wchar_t* const kMeleeSfxNames[kMeleeSfx];
 struct Settings {
     float fovDeg = 55.0f;
     float offset[3] = {0.13f, -0.15f, 0.32f};
@@ -65,7 +67,6 @@ struct Settings {
     float reloadEmptyRefill = 0.f;
     wchar_t weaponId[64] = L"";
     bool weaponDefault = false;
-    int hudAnchor = -1;
     char projectile[64] = "";
     wchar_t animSounds[128] = L"";
     float animSoundVolume = 0.7f;
@@ -161,6 +162,10 @@ struct Settings {
     wchar_t shieldModel[520] = L"";
     float shieldModelMetal = 1.f;
     float meleeStrikeLead = 0.25f;
+    wchar_t meleeSfx[kMeleeSfx][512] = {};
+    float meleeSfxVolume[kMeleeSfx] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f,
+                                       -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
+    float meleeSfxMaster = 1.f;
 };
 struct WorldCam {
     float eye[3], right[3], up[3], fwd[3];
@@ -236,6 +241,7 @@ public:
     bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* depth, UINT w, UINT h,
               bool rtvEncodesSrgb, double now, const MuzzleFrame* f, const WorldCam* cam, const Settings& s);
     void SetScene(ID3D11ShaderResourceView* srv, bool gamma) { scene_ = srv; sceneGamma_ = gamma; }
+    bool HasDistortion() const;
     void Release();
     bool Loaded() const { return tex_[0] != nullptr; }
     bool GasLoaded() const { return tex_[5] && tex_[6]; }
@@ -488,6 +494,7 @@ public:
     ID3D11DepthStencilView* Depth(UINT w, UINT h) const { return dsv_ && depthW_ == w && depthH_ == h ? dsv_ : nullptr; }
     ID3D11ShaderResourceView* SceneSrv() const { return sceneFresh_ ? sceneSrv_ : nullptr; }
     bool SceneGamma() const { return sceneGammaEnc_; }
+    ID3D11ShaderResourceView* CopyForDistort(ID3D11DeviceContext* ctx, ID3D11Texture2D* backBuffer, UINT w, UINT h, bool* gamma);
 private:
     struct Submesh {
         uint32_t firstIndex, indexCount;
@@ -535,6 +542,11 @@ private:
     DXGI_FORMAT sceneFmt_ = DXGI_FORMAT_UNKNOWN;
     bool sceneBroken_ = false;
     bool sceneFresh_ = false, sceneGammaEnc_ = false;
+    ID3D11Texture2D* distTex_ = nullptr;
+    ID3D11ShaderResourceView* distSrv_ = nullptr;
+    UINT distW_ = 0, distH_ = 0;
+    DXGI_FORMAT distFmt_ = DXGI_FORMAT_UNKNOWN;
+    bool distBroken_ = false;
     static constexpr unsigned kMaxTextures = 64;
     ID3D11ShaderResourceView* srv_[kMaxTextures] = {};
     ID3D11ShaderResourceView* white_ = nullptr;

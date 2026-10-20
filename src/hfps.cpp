@@ -420,6 +420,7 @@ struct Config {
     bool hidePaths = true;
     bool hideEdgeArrows = true;
     bool hudEnabled = true;
+    bool hudCover = true;
     char hideNames[kMaxHideUi][48] = {};
     int hideCount = 0;
     float moveInterval = 0.2f;
@@ -638,6 +639,8 @@ void LoadConfig() {
     cfg.hidePaths = GetPrivateProfileIntW(L"ui", L"hide_paths", 1, ini) != 0;
     cfg.hideEdgeArrows = GetPrivateProfileIntW(L"ui", L"hide_edge_arrows", 1, ini) != 0;
     cfg.hudEnabled = GetPrivateProfileIntW(L"hud", L"enabled", 1, ini) != 0;
+    cfg.hudCover = GetPrivateProfileIntW(L"hud", L"cover_viewmodel", 1, ini) != 0;
+    if (!cfg.hudCover) vmgame::SetHudCover(0, 0, 0, 0);
     {
         wchar_t list[512];
         GetPrivateProfileStringW(L"ui", L"hide", L"info_parent,battle_orders,winds_of_magic", list, 512, ini);
@@ -1742,7 +1745,10 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
     static uintptr_t ents[1024];
     for (int ri = 0; ri < nr; ++ri) {
         const MeleeReq& rq = reqs[ri];
-        if (rq.hero != hero || Now() - rq.t > 0.6) continue;
+        if (rq.hero != hero || Now() - rq.t > 0.6) {
+            vmgame::MeleeHitFeedback(0);
+            continue;
+        }
         const MeleeArc& arc = kMeleeArcs[rq.kind];
         const bool heavy = rq.kind == vmgame::kStrikeHeavySweep || rq.kind == vmgame::kStrikeHeavy;
         const float splashR = heavy ? cfg.meleeHeavySplashRadius : cfg.meleeSplashRadius;
@@ -1864,6 +1870,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         InterlockedIncrement(&g_mq.strikes);
         InterlockedExchangeAdd(&g_mq.hits, hits + sHits);
         InterlockedExchangeAdd(&g_mq.kills, kills + sKills);
+        vmgame::MeleeHitFeedback(hits + sHits);
         if (g_mq.logs++ < 200)
             Log("melee-engine: kind %d %s (reach %.1f m, splash %.1f m x%d) (%.0f ms after queue) scanned %u, in arc %d, hit %d, killed %d, "
                 "damage [%s] | splash hit %d, killed %d [%s] (forced hits so far %ld, fallback damage so far %ld)",
@@ -4615,6 +4622,7 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
 #ifdef HFPS_LUA_MODULE
 namespace luaapi {
 constexpr int kTUserdata = 7;
+constexpr int kTNumber = 3;
 typedef int (*CFn)(void*);
 struct Fns {
     void (*createtable)(void*, int, int);
@@ -4625,6 +4633,7 @@ struct Fns {
     void (*pushstring)(void*, const char*);
     void (*pushnil)(void*);
     void* (*touserdata)(void*, int);
+    float (*tonumber)(void*, int);
     int (*type)(void*, int);
     size_t (*objlen)(void*, int);
 } f;
@@ -4637,7 +4646,8 @@ bool Resolve() {
     const struct { void* slot; const char* name; } t[] = {
         {&f.createtable, "lua_createtable"}, {&f.pushcclosure, "lua_pushcclosure"}, {&f.setfield, "lua_setfield"},
         {&f.pushboolean, "lua_pushboolean"}, {&f.pushnumber, "lua_pushnumber"}, {&f.pushstring, "lua_pushstring"},
-        {&f.pushnil, "lua_pushnil"}, {&f.touserdata, "lua_touserdata"}, {&f.type, "lua_type"}, {&f.objlen, "lua_objlen"}};
+        {&f.pushnil, "lua_pushnil"}, {&f.touserdata, "lua_touserdata"}, {&f.tonumber, "lua_tonumber"}, {&f.type, "lua_type"},
+        {&f.objlen, "lua_objlen"}};
     for (const auto& e : t) {
         FARPROC p = exe ? GetProcAddress(exe, e.name) : nullptr;
         if (!p) {
@@ -4651,7 +4661,7 @@ bool Resolve() {
     return true;
 }
 int Api(void* L) {
-    f.pushnumber(L, 1.f);
+    f.pushnumber(L, 2.f);
     return 1;
 }
 int Active(void* L) {
@@ -4681,12 +4691,22 @@ int IsHero(void* L) {
     f.pushboolean(L, how ? 1 : 0);
     return 1;
 }
-int HudAnchorFn(void* L) {
-    if (!cfg.hudEnabled)
-        f.pushnil(L);
-    else
-        f.pushstring(L, vmgame::HudAnchor() == 1 ? "center" : "left");
+int HudEnabled(void* L) {
+    f.pushboolean(L, cfg.hudEnabled ? 1 : 0);
     return 1;
+}
+int SetHudRect(void* L) {
+    float v[6] = {};
+    bool ok = cfg.hudEnabled && cfg.hudCover;
+    for (int i = 0; ok && i < 6; ++i) {
+        if (f.type(L, i + 1) != kTNumber) ok = false;
+        else v[i] = f.tonumber(L, i + 1);
+    }
+    if (ok && v[4] > 16.f && v[5] > 16.f && v[2] > 1.f && v[3] > 1.f)
+        vmgame::SetHudCover(v[0] / v[4], v[1] / v[5], (v[0] + v[2]) / v[4], (v[1] + v[3]) / v[5]);
+    else
+        vmgame::SetHudCover(0, 0, 0, 0);
+    return 0;
 }
 int PushTable(void* L) {
     LONG n = InterlockedIncrement(&g_opens);
@@ -4694,13 +4714,14 @@ int PushTable(void* L) {
         Log("lua-api: %s not exported by the game - no interface table (luaopen #%ld)", g_missing, n);
         return 0;
     }
-    f.createtable(L, 0, 4);
-    const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_anchor", HudAnchorFn}};
+    f.createtable(L, 0, 5);
+    const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_enabled", HudEnabled},
+                                                        {"set_hud_rect", SetHudRect}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);
     }
-    Log("lua-api: interface table v1 returned (luaopen #%ld, lua state %p)", n, L);
+    Log("lua-api: interface table v2 returned (luaopen #%ld, lua state %p)", n, L);
     return 1;
 }
 }

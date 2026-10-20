@@ -40,7 +40,7 @@ void CycleWeapon(int dir);
 bool Busy();
 void SetTrigger(bool held);
 int CurrentWeapon();
-int HudAnchor();
+void SetHudCover(float x0, float y0, float x1, float y1);
 void GetKick(kick::Params* out);
 const char* WeaponProjectile(int idx);
 void ToggleTestLayer();
@@ -67,4 +67,5 @@ enum MeleeStrikeKind { kStrikeStab, kStrikeSweep, kStrikeHeavySweep, kStrikeHeav
 bool MeleeActive();
 void MeleeInput(bool attack, bool block);
 int TakeMeleeStrike();
+void MeleeHitFeedback(int hits);
 }
