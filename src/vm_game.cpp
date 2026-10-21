@@ -10,7 +10,6 @@
 #include "vm_render.h"
 namespace vmgame {
 void MagApply();
-void RefillForNewBattle();
 namespace {
 RenderAddrs g_ra = {};
 const unsigned char kScCreateBytes[] = {0x4C, 0x8D, 0x83, 0x50, 0x13, 0x00, 0x00};
@@ -38,9 +37,7 @@ struct MagState {
     volatile LONG refillUs[3] = {};
     volatile LONG fireUs = 0;
     volatile LONG disposable = 0;
-    volatile LONG reserve = -1;
     LONG ammoByModel[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
-    LONG reserveByModel[8] = {-2, -2, -2, -2, -2, -2, -2, -2};
     int loadedModel = -1;
 } g_mag;
 struct SpinState {
@@ -1446,7 +1443,13 @@ void RosterStep(ID3D11Device* dev) {
     if (GetFileAttributesExW(path, GetFileExInfoStandard, &fa) &&
         CompareFileTime(&fa.ftLastWriteTime, &g_armoryTime) != 0) {
         g_armoryTime = fa.ftLastWriteTime;
-        RefillForNewBattle();
+        for (int i = 0; i < g_modelCount && i < kMaxModels; ++i) {
+            if (!g_w[i].set.magDisposable) continue;
+            InterlockedExchange(&g_spent[i], 0);
+            if (i < 8) g_mag.ammoByModel[i] = -1;
+            if (i == g_mag.loadedModel) InterlockedExchange(&g_mag.ammo, g_mag.size);
+            g_log("weapon: new battle -> %ls refilled", g_w[i].set.weaponId);
+        }
     }
     bool campaign = !strcmp(mode, "campaign");
     auto ownedHas = [&](const wchar_t* id) {
@@ -1828,49 +1831,22 @@ void MagTick() {
     if (r != 1 && r != 2) return;
     LONG64 t0 = g_mag.t0Us;
     if (static_cast<LONG64>(Now() * 1e6) - t0 < g_mag.refillUs[r]) return;
-    if (InterlockedCompareExchange(&g_mag.reload, 0, r) == r) {
-        LONG size = g_mag.size, have = g_mag.ammo, res = g_mag.reserve;
-        if (have < 0) have = 0;
-        if (res < 0) {
-            InterlockedExchange(&g_mag.ammo, size);
-        } else {
-            LONG take = size - have < res ? size - have : res;
-            if (take < 0) take = 0;
-            InterlockedExchange(&g_mag.reserve, res - take);
-            InterlockedExchange(&g_mag.ammo, have + take);
-        }
-    }
-}
-void RefillForNewBattle() {
-    for (int i = 0; i < g_modelCount && i < kMaxModels; ++i) {
-        const auto& s = g_w[i].set;
-        bool disp = s.magDisposable, total = s.ammoTotal > 0 && s.magSize > 0 && !s.magDisposable;
-        if (!disp && !total) continue;
-        if (disp) InterlockedExchange(&g_spent[i], 0);
-        if (i < 8) g_mag.ammoByModel[i] = -1, g_mag.reserveByModel[i] = -2;
-        if (i == g_mag.loadedModel) {
-            InterlockedExchange(&g_mag.ammo, g_mag.size);
-            if (total) InterlockedExchange(&g_mag.reserve, s.ammoTotal > g_mag.size ? s.ammoTotal - g_mag.size : 0);
-        }
-        g_log("weapon: new battle -> %ls refilled%s", s.weaponId, total ? " (magazine + reserve)" : "");
-    }
+    if (InterlockedCompareExchange(&g_mag.reload, 0, r) == r) InterlockedExchange(&g_mag.ammo, g_mag.size);
 }
 bool Reloading() {
     MagTick();
     return g_mag.reload != 0;
 }
-void AmmoInfo(int* ammo, int* size, bool* reloading, int* reserve) {
-    LONG s = g_mag.size, a = g_mag.ammo, r = g_mag.reserve;
+void AmmoInfo(int* ammo, int* size, bool* reloading) {
+    LONG s = g_mag.size, a = g_mag.ammo;
     *size = s > 0 ? static_cast<int>(s) : 0;
     *ammo = s > 0 ? static_cast<int>(a < 0 ? 0 : a > s ? s : a) : 0;
     *reloading = s > 0 && g_mag.reload != 0;
-    *reserve = s <= 0 ? -1 : g_mag.disposable ? 0 : r < 0 ? -1 : static_cast<int>(r);
 }
 bool StartMagReload() {
     if (!Enabled() || !g_fp || g_mag.disposable) return false;
     LONG size = g_mag.size;
     if (size <= 0 || g_mag.reload != 0 || g_mag.ammo >= size) return false;
-    if (g_mag.reserve == 0) return false;
     LONG kind = g_mag.ammo > 0 ? 1 : 2;
     InterlockedExchange64(&g_mag.t0Us, static_cast<LONG64>(Now() * 1e6));
     if (InterlockedCompareExchange(&g_mag.reload, kind, 0) != 0) return false;
@@ -1890,10 +1866,8 @@ bool CanFire() {
     return true;
 }
 void MagApply() {
-    if (g_mag.loadedModel >= 0 && g_mag.loadedModel < 8 && g_mag.size > 0) {
+    if (g_mag.loadedModel >= 0 && g_mag.loadedModel < 8 && g_mag.size > 0)
         g_mag.ammoByModel[g_mag.loadedModel] = g_mag.reload ? (g_mag.reload == 2 ? 0 : g_mag.ammo) : g_mag.ammo;
-        g_mag.reserveByModel[g_mag.loadedModel] = g_mag.reserve;
-    }
     InterlockedExchange(&g_mag.reload, 0);
     InterlockedExchange(&g_mag.reqAnim, 0);
     InterlockedExchange(&g_spin.mode, Wp().set.fireMode == 1 ? 1 : 0);
@@ -1921,17 +1895,6 @@ void MagApply() {
     InterlockedExchange(&g_mag.size, size);
     InterlockedExchange(&g_mag.ammo, ammo);
     InterlockedExchange(&g_mag.disposable, Wp().set.magDisposable && size > 0 ? 1 : 0);
-    {
-        LONG total = Wp().set.ammoTotal > 0 && size > 0 && !Wp().set.magDisposable ? Wp().set.ammoTotal : 0;
-        LONG res = -1;
-        if (total > 0) {
-            LONG kept = g_modelIdx < 8 ? g_mag.reserveByModel[g_modelIdx] : -2;
-            if (same && g_mag.reserve >= 0) kept = g_mag.reserve;
-            res = kept >= 0 ? kept : (total > ammo ? total - ammo : 0);
-            g_log("viewmodel: ammo total %ld per battle -> reserve %ld", total, res);
-        }
-        InterlockedExchange(&g_mag.reserve, res);
-    }
     g_log("viewmodel: weapon fire %s, magazine %ld (ammo %ld), reload refill %.2f / empty %.2f s",
           g_mag.fireUs ? "custom rpm" : "[fire] interval", size, ammo, g_mag.refillUs[1] * 1e-6, g_mag.refillUs[2] * 1e-6);
     if (g_mag.fireUs) g_log("viewmodel: fire rate %.0f rpm (%.4f s)", rpm, g_mag.fireUs * 1e-6);

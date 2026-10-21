@@ -988,10 +988,6 @@ void LogUnitLists(uintptr_t battle);
 bool FastFireInstall(uintptr_t battle);
 void FastFireUninstall(const char* why);
 bool EarlyFlightInstall(uintptr_t battle, uintptr_t heroEntity);
-namespace herofx {
-bool Install(uintptr_t battle, uintptr_t heroEntity, uintptr_t projRecord);
-void Uninstall(const char* why);
-}
 void EarlyFlightUninstall(const char* why);
 long EarlyFlightCalls();
 long EarlyFlightPromoted();
@@ -1003,7 +999,6 @@ void Exit(uintptr_t mgr, const char* why, bool release = true) {
     if (!S.active) return;
     FastFireUninstall(why);
     EarlyFlightUninstall(why);
-    herofx::Uninstall(why);
     int mode = S.lastMode >= 0 ? S.lastMode : MoveMode();
     if (!release) {
         Log("move: hero not released (%s)", why);
@@ -1211,10 +1206,6 @@ void Enter(uintptr_t mgr) {
         auto rva = [](uintptr_t a) { return (unsigned long long)(a > g_base ? a - g_base : 0); };
         Log("probe: launch-event receiver obj=%p (vt +%llx) member +0x3d8 vt +%llx, [+0x10] = +%llx, [+0x18] = +%llx, [+0x8] = +%llx",
             (void*)yf0, rva(yvt), rva(lvt), rva(l10), rva(lvt ? Ptr(lvt + 0x18) : 0), rva(lvt ? Ptr(lvt + 0x8) : 0));
-    }
-    if (cfg.fireShooter && entity && S.fpProj) {
-        uintptr_t sb3 = Ptr(g_base + kGlobalScript);
-        herofx::Install(sb3 ? Ptr(sb3 + oScriptBattle) : 0, entity, S.fpProj);
     }
     if (cfg.fireShooter && entity) {
         uintptr_t evt = Ptr(entity), f48 = evt ? Ptr(evt + 0x48) : 0;
@@ -1894,7 +1885,6 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
                 sKills, sl, g_mq.forced, g_mq.fallback);
     }
 }
-#include "hero_fire_fx.inc"
 #include "hit_probe.inc"
 struct HitFxLog {
     unsigned shots = 0, hits = 0, kills = 0, logs = 0;
@@ -4764,15 +4754,14 @@ int SetHudRect(void* L) {
     return 0;
 }
 int Ammo(void* L) {
-    int ammo = 0, size = 0, reserve = -1;
+    int ammo = 0, size = 0;
     bool reloading = false;
-    vmgame::AmmoInfo(&ammo, &size, &reloading, &reserve);
+    vmgame::AmmoInfo(&ammo, &size, &reloading);
     f.pushnumber(L, static_cast<float>(ammo));
     f.pushnumber(L, static_cast<float>(size));
     f.pushboolean(L, reloading ? 1 : 0);
     f.pushboolean(L, vmgame::MeleeActive() ? 1 : 0);
-    f.pushnumber(L, static_cast<float>(reserve));
-    return 5;
+    return 4;
 }
 int PushTable(void* L) {
     LONG n = InterlockedIncrement(&g_opens);

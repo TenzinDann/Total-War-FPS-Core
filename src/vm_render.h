@@ -63,7 +63,6 @@ struct Settings {
     float fireRpm = 0.f;
     int magSize = 0;
     bool magDisposable = false;
-    int ammoTotal = 0;
     float reloadRefill = 0.f;
     float reloadEmptyRefill = 0.f;
     wchar_t weaponId[64] = L"";
@@ -104,6 +103,12 @@ struct Settings {
     float flashLight = 1.0f;
     bool flashSmoke = true;
     bool flashFlame = true;
+    bool trailLine = false;
+    float trailLineLife = 1.0f;
+    float trailLineAlpha = 0.7f;
+    float trailLineWidth = 2.5f;
+    float trailLineNear = 0.5f;
+    float trailLineColor[3] = {0.86f, 0.92f, 1.0f};
     bool hitFx = true;
     float hitFxScale = 1.0f;
     float hitFxAlpha = 0.85f;
@@ -278,6 +283,7 @@ public:
     bool GasLoaded() const { return tex_[5] && tex_[6]; }
     int LiveTracers() const { return nTr_; }
     int LiveImpacts() const { return nImp_; }
+    int LiveLines() const { return nLines_; }
     int Live() const { return n_; }
     void Dump(double now) const;
     void Seed(unsigned seed) { rng_ = seed ? seed : 1u; }
@@ -349,6 +355,14 @@ private:
     static constexpr int kMaxTracers = 24;
     Tracer trs_[kMaxTracers];
     int nTr_ = 0;
+    struct Line {
+        float a[3], b[3];
+        double t0;
+        bool pending;
+    };
+    static constexpr int kMaxLines = 64;
+    Line lines_[kMaxLines];
+    int nLines_ = 0;
     struct Impact {
         float p[3], d[3];
         double t0;
@@ -359,6 +373,7 @@ private:
     static constexpr int kImpactQuads = 10;
     Impact imps_[kMaxImpacts];
     int nImp_ = 0;
+    ID3D11ShaderResourceView* lineTex_ = nullptr;
     static constexpr int kMax = 160;
     P parts_[kMax];
     int n_ = 0;

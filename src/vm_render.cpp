@@ -712,7 +712,6 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.fireRpm = IniFloat(ini, L"fire_rpm", s.fireRpm);
     s.magSize = static_cast<int>(IniFloat(ini, L"mag_size", static_cast<float>(s.magSize)));
     s.magDisposable = IniFloat(ini, L"mag_disposable", s.magDisposable ? 1.f : 0.f) != 0.f;
-    s.ammoTotal = static_cast<int>(IniFloat(ini, L"ammo_total", static_cast<float>(s.ammoTotal)));
     s.reloadRefill = IniFloat(ini, L"reload_refill", s.reloadRefill);
     s.reloadEmptyRefill = IniFloat(ini, L"reload_empty_refill", s.reloadEmptyRefill);
     GetPrivateProfileStringW(L"viewmodel", L"weapon_id", s.weaponId, s.weaponId, 64, ini);
@@ -811,6 +810,12 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.flashLight = IniFloat(ini, L"flash_light", s.flashLight);
     s.flashSmoke = IniFloat(ini, L"flash_smoke", s.flashSmoke ? 1.f : 0.f) != 0.f;
     s.flashFlame = IniFloat(ini, L"flash_flame", s.flashFlame ? 1.f : 0.f) != 0.f;
+    s.trailLine = IniFloat(ini, L"trail_line", s.trailLine ? 1.f : 0.f) != 0.f;
+    s.trailLineLife = IniFloat(ini, L"trail_line_life", s.trailLineLife);
+    s.trailLineAlpha = IniFloat(ini, L"trail_line_alpha", s.trailLineAlpha);
+    s.trailLineWidth = IniFloat(ini, L"trail_line_width", s.trailLineWidth);
+    s.trailLineNear = IniFloat(ini, L"trail_line_near", s.trailLineNear);
+    IniVec3(ini, L"trail_line_color", s.trailLineColor);
     s.hitFx = IniFloat(ini, L"hit_fx", s.hitFx ? 1.f : 0.f) != 0.f;
     s.hitFxScale = IniFloat(ini, L"hit_fx_scale", s.hitFxScale);
     s.hitFxAlpha = IniFloat(ini, L"hit_fx_alpha", s.hitFxAlpha);
@@ -939,6 +944,12 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (!(s.flashScale > 0.01f && s.flashScale <= 20.f)) s.flashScale = 1.f;
     if (!(s.flashIntensity >= 0.f && s.flashIntensity <= 10.f)) s.flashIntensity = 1.f;
     if (!(s.flashLight >= 0.f && s.flashLight <= 20.f)) s.flashLight = 1.f;
+    if (!(s.trailLineLife > 0.02f && s.trailLineLife <= 10.f)) s.trailLineLife = 1.f;
+    if (!(s.trailLineAlpha >= 0.f && s.trailLineAlpha <= 1.f)) s.trailLineAlpha = 0.7f;
+    if (!(s.trailLineWidth > 0.1f && s.trailLineWidth <= 20.f)) s.trailLineWidth = 2.5f;
+    if (!(s.trailLineNear >= 0.f && s.trailLineNear <= 50.f)) s.trailLineNear = 0.5f;
+    for (float& c : s.trailLineColor)
+        if (!(c >= 0.f && c <= 1.f)) c = 1.f;
     if (!(s.hitFxScale > 0.05f && s.hitFxScale <= 10.f)) s.hitFxScale = 1.f;
     if (!(s.hitFxAlpha >= 0.f && s.hitFxAlpha <= 1.f)) s.hitFxAlpha = 0.85f;
     for (float& c : s.hitFxColor)
@@ -2474,11 +2485,26 @@ bool MuzzleFlash::InitPipeline(ID3D11Device* dev) {
     SafeRelease(vsb);
     SafeRelease(psb);
     D3D11_BUFFER_DESC bd = {};
-    bd.ByteWidth = sizeof(FlashVertex) * 6 * (kMax + kMaxTracers + kMaxImpacts * kImpactQuads);
+    bd.ByteWidth = sizeof(FlashVertex) * 6 * (kMax + kMaxTracers + 2 * kMaxLines + kMaxImpacts * kImpactQuads);
     bd.Usage = D3D11_USAGE_DYNAMIC;
     bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     ok = ok && SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &vb_));
+    {
+        UINT px[32 * 2];
+        for (int x = 0; x < 32; ++x) {
+            float u = (static_cast<float>(x) + 0.5f) / 32.f - 0.5f;
+            UINT a = static_cast<UINT>(std::exp(-u * u / (2.f * 0.2f * 0.2f)) * 255.f + 0.5f);
+            px[x] = px[32 + x] = 0x00FFFFFFu | (a << 24);
+        }
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = 32, td.Height = 2, td.MipLevels = 1, td.ArraySize = 1, td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.SampleDesc.Count = 1, td.Usage = D3D11_USAGE_IMMUTABLE, td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA sd = {px, 32 * 4, 0};
+        ID3D11Texture2D* lt = nullptr;
+        ok = ok && SUCCEEDED(dev->CreateTexture2D(&td, &sd, &lt)) && SUCCEEDED(dev->CreateShaderResourceView(lt, nullptr, &lineTex_));
+        SafeRelease(lt);
+    }
     D3D11_BUFFER_DESC cd = {};
     cd.ByteWidth = sizeof(FlashCb);
     cd.Usage = D3D11_USAGE_DYNAMIC;
@@ -2517,6 +2543,17 @@ bool MuzzleFlash::InitPipeline(ID3D11Device* dev) {
     return ok;
 }
 void MuzzleFlash::AddTracer(const float* from, const float* to) {
+    {
+        if (nLines_ >= kMaxLines) {
+            memmove(&lines_[0], &lines_[1], sizeof(Line) * (kMaxLines - 1));
+            --nLines_;
+        }
+        Line& l = lines_[nLines_++];
+        memcpy(l.a, from, sizeof l.a);
+        memcpy(l.b, to, sizeof l.b);
+        l.t0 = -1.0;
+        l.pending = true;
+    }
     if (!tex_[kFlashTexSpark]) return;
     if (nTr_ >= kMaxTracers) {
         memmove(&trs_[0], &trs_[1], sizeof(Tracer) * (kMaxTracers - 1));
@@ -3007,6 +3044,11 @@ void MuzzleFlash::BeginFrame(double now, const Settings& s) {
             trs_[i].pending = false;
             trs_[i].t0 = now;
         }
+    for (int i = 0; i < nLines_; ++i)
+        if (lines_[i].pending) {
+            lines_[i].pending = false;
+            lines_[i].t0 = now;
+        }
     for (int i = 0; i < nImp_; ++i)
         if (imps_[i].pending) {
             imps_[i].pending = false;
@@ -3049,8 +3091,72 @@ float MuzzleFlash::LightLevel(double now) const {
 bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* depth, UINT w, UINT h,
                        bool rtvEncodesSrgb, double now, const MuzzleFrame* fp, const WorldCam* cam, const Settings& s) {
     if (!Loaded() || !ctx || !rtv || w < 16 || h < 16) return false;
-    static FlashVertex verts[(kMax + kMaxTracers + kMaxImpacts * kImpactQuads) * 6];
+    static FlashVertex verts[(kMax + kMaxTracers + 2 * kMaxLines + kMaxImpacts * kImpactQuads) * 6];
     int nv = 0;
+    int lnStart = nv, lnCount = 0;
+    if (cam && lineTex_ && s.trailLine) {
+        float ty = std::tan(cam->fovY * 0.5f), aspect = static_cast<float>(w) / static_cast<float>(h);
+        float hw = std::max(0.5f * s.trailLineWidth * static_cast<float>(h) / 1080.f, 0.5f);
+        auto toCam = [&](const float* p, float* o) {
+            float d[3] = {p[0] - cam->eye[0], p[1] - cam->eye[1], p[2] - cam->eye[2]};
+            o[0] = d[0] * cam->right[0] + d[1] * cam->right[1] + d[2] * cam->right[2];
+            o[1] = d[0] * cam->up[0] + d[1] * cam->up[1] + d[2] * cam->up[2];
+            o[2] = d[0] * cam->fwd[0] + d[1] * cam->fwd[1] + d[2] * cam->fwd[2];
+        };
+        auto seg = [&](const float* p0, const float* p1, float a0, float a1) {
+            float v0[3], v1[3];
+            toCam(p0, v0);
+            toCam(p1, v1);
+            const float zn = 0.05f;
+            if (v0[2] < zn && v1[2] < zn) return;
+            if (v0[2] < zn || v1[2] < zn) {
+                bool first = v0[2] < zn;
+                float* in = first ? v0 : v1;
+                const float* out = first ? v1 : v0;
+                float k = (zn - in[2]) / (out[2] - in[2]);
+                for (int c = 0; c < 3; ++c) in[c] += (out[c] - in[c]) * k;
+                if (first)
+                    a0 += (a1 - a0) * k;
+                else
+                    a1 += (a0 - a1) * k;
+            }
+            float x0 = v0[0] / (v0[2] * ty * aspect), y0 = v0[1] / (v0[2] * ty);
+            float x1 = v1[0] / (v1[2] * ty * aspect), y1 = v1[1] / (v1[2] * ty);
+            float sx = (x1 - x0) * w * 0.5f, sy = (y1 - y0) * h * 0.5f;
+            float sl = std::sqrt(sx * sx + sy * sy);
+            if (sl < 0.5f) return;
+            float px = -sy / sl, py = sx / sl;
+            auto vtx = [&](float x, float y, float off, float u, float a) {
+                return FlashVertex{x + px * off * 2.f / w, y + py * off * 2.f / h, u, 0.5f, s.trailLineColor[0], s.trailLineColor[1],
+                                   s.trailLineColor[2], a, 0.f, 1.f, 0.f};
+            };
+            FlashVertex q4[4] = {vtx(x0, y0, -hw, 0.f, a0), vtx(x0, y0, hw, 1.f, a0), vtx(x1, y1, -hw, 0.f, a1), vtx(x1, y1, hw, 1.f, a1)};
+            const int idx[6] = {0, 1, 2, 2, 1, 3};
+            for (int k = 0; k < 6; ++k) verts[nv++] = q4[idx[k]];
+        };
+        int keep = 0;
+        for (int i = 0; i < nLines_; ++i) {
+            Line l = lines_[i];
+            float age = l.pending || l.t0 < 0 ? 0.f : static_cast<float>(now - l.t0);
+            if (age > s.trailLineLife) continue;
+            lines_[keep++] = l;
+            float f = 1.f - age / s.trailLineLife;
+            float a = s.trailLineAlpha * f * f;
+            float d[3] = {l.b[0] - l.a[0], l.b[1] - l.a[1], l.b[2] - l.a[2]};
+            float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            if (a <= 0.002f || len < 0.05f) continue;
+            float nearD = std::min(s.trailLineNear, len * 0.5f);
+            if (nearD > 0.01f) {
+                float m[3] = {l.a[0] + d[0] / len * nearD, l.a[1] + d[1] / len * nearD, l.a[2] + d[2] / len * nearD};
+                seg(l.a, m, 0.f, a);
+                seg(m, l.b, a, a);
+            } else {
+                seg(l.a, l.b, a, a);
+            }
+        }
+        nLines_ = keep;
+        lnCount = nv - lnStart;
+    }
     int trStart = nv, trCount = 0;
     if (cam && tex_[kFlashTexSpark]) {
         float ty = std::tan(cam->fovY * 0.5f), aspect = static_cast<float>(w) / static_cast<float>(h);
@@ -3345,6 +3451,10 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
         ctx->PSSetShaderResources(0, 2, none);
         ctx->PSSetShader(ps_, nullptr, 0);
     }
+    if (lnCount) {
+        ctx->PSSetShaderResources(0, 1, &lineTex_);
+        ctx->Draw(static_cast<UINT>(lnCount), static_cast<UINT>(lnStart));
+    }
     if (trCount) {
         ctx->PSSetShaderResources(0, 1, &tex_[kFlashTexSpark]);
         ctx->Draw(static_cast<UINT>(trCount), static_cast<UINT>(trStart));
@@ -3387,6 +3497,8 @@ void MuzzleFlash::Release() {
     SafeRelease(dssDepth_);
     SafeRelease(samp_);
     for (int i = 0; i < kFlashTexCount; ++i) SafeRelease(tex_[i]);
+    SafeRelease(lineTex_);
+    nLines_ = 0;
     scene_ = nullptr;
     burst_ = 0;
     tLastShot_ = -1.0;
