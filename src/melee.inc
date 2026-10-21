@@ -242,7 +242,8 @@ void PlayHit(int hits, const ImpactRec& r, double now) {
     PlaySfx(kSfxHitL4);
     PlaySfx(kSfxHitGore);
     if (r.im.tail >= 0) PlaySfx(r.im.tail);
-    if (Swing* s = FindSwing(r.sw); s && r.act != kPush) {
+    if (!Wp().set.meleeSfxSwingCut) {
+    } else if (Swing* s = FindSwing(r.sw); s && r.act != kPush) {
         s->id = 0;
         if (g_swCur == r.sw) g_swCur = 0;
     } else if (r.sw && r.sw == g_swPlayed && r.act != kPush) {

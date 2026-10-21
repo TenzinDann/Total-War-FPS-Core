@@ -716,6 +716,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
             s.meleeSfxPitch[i][0] = lo, s.meleeSfxPitch[i][1] = hi;
     }
     s.meleeSfxMaster = IniFloat(ini, L"melee_sfx_volume", s.meleeSfxMaster);
+    s.meleeSfxSwingCut = IniFloat(ini, L"melee_sfx_swing_cut", s.meleeSfxSwingCut ? 1.f : 0.f) != 0.f;
     s.fireRpm = IniFloat(ini, L"fire_rpm", s.fireRpm);
     s.magSize = static_cast<int>(IniFloat(ini, L"mag_size", static_cast<float>(s.magSize)));
     s.magDisposable = IniFloat(ini, L"mag_disposable", s.magDisposable ? 1.f : 0.f) != 0.f;

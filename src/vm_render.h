@@ -185,6 +185,7 @@ struct Settings {
                                        -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
     float meleeSfxPitch[kMeleeSfx][2] = {};
     float meleeSfxMaster = 1.f;
+    bool meleeSfxSwingCut = false;
 };
 struct WorldCam {
     float eye[3], right[3], up[3], fwd[3];
