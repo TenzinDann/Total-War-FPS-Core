@@ -390,6 +390,7 @@ struct Config {
     float leadExtra = 0.f;
     float leadScale = 1.f;
     float displayLag = 0.5f;
+    bool hitProbe = true;
     bool moveEnabled = true;
     int moveMode = 0;
     bool moveOverride = true;
@@ -602,6 +603,7 @@ void LoadConfig() {
     if (!(cfg.leadScale >= 0.f && cfg.leadScale <= 10.f)) cfg.leadScale = 1.f;
     cfg.displayLag = IniF(L"fire", L"display_lag", cfg.displayLag, ini);
     if (!(cfg.displayLag >= 0.f && cfg.displayLag <= 1.0f)) cfg.displayLag = 0.5f;
+    cfg.hitProbe = GetPrivateProfileIntW(L"fire", L"hit_probe", 1, ini) != 0;
     if (cfg.tpShotGuard != 0.f && (cfg.tpShotGuard < 0.5f || cfg.tpShotGuard > 3.f)) cfg.tpShotGuard = 1.1f;
     cfg.tpLead = IniF(L"move", L"teleport_lead", cfg.tpLead, ini);
     if (cfg.tpLead < 0.f || cfg.tpLead > 0.6f) cfg.tpLead = 0.2f;
@@ -1488,7 +1490,11 @@ bool EarlyFlightInstall(uintptr_t battle, uintptr_t heroEntity) {
         (void*)(g_ef.vtCopy + 1), (void*)heroEntity);
     return true;
 }
+namespace hitprobe {
+void OnExit(const char* why);
+}
 void EarlyFlightUninstall(const char* why) {
+    hitprobe::OnExit(why);
     if (!g_ef.obj) return;
     if (g_ef.vtCopy && Ptr(g_ef.obj) == reinterpret_cast<uintptr_t>(g_ef.vtCopy + 1)) Wr(g_ef.obj, g_ef.origVt);
     g_ef.world = 0;
@@ -1879,6 +1885,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
                 sKills, sl, g_mq.forced, g_mq.fallback);
     }
 }
+#include "hit_probe.inc"
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
               int nBodies, float clearance) {
     uintptr_t sb = Ptr(g_base + kGlobalScript);
@@ -1998,6 +2005,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     S.lastShotFast = viaFast;
     if (ok) {
         vmgame::Tracer(vis, aim);
+        hitprobe::OnShot(hit, now);
         float tsp = std::sqrt(hit.vel[0] * hit.vel[0] + hit.vel[1] * hit.vel[1]), lsz = std::sqrt(lead[0] * lead[0] + lead[1] * lead[1]);
         ++S.aimShots;
         S.aimSelfSpeedSum += S.camSpeed;
@@ -4508,23 +4516,13 @@ bool LoadRealVersion() {
 #undef RESOLVE
     return true;
 }
-}
-extern "C" void hfps_post_step_begin(uintptr_t self, uintptr_t world) {
-    (void)self;
-    InterlockedIncrement(&g_ef.calls);
-    LARGE_INTEGER q;
-    QueryPerformanceCounter(&q);
-    g_ef.lastQpc = q.QuadPart;
-    if (!world || world != g_ef.world || !g_ef.hero) return;
-    ShieldHpStep();
-    MeleeEngineStep(world, g_ef.hero);
+unsigned PromoteHeroBullets(uintptr_t world, uintptr_t* ours) {
     uintptr_t pm = *reinterpret_cast<uintptr_t*>(world + 0x1c8);
-    if (!pm) return;
+    if (!pm) return 0;
     uint32_t pc = *reinterpret_cast<uint32_t*>(pm + 0x24);
     auto* pa = *reinterpret_cast<uintptr_t**>(pm + 0x28);
-    if (!pc || !pa || pc > 8192) return;
+    if (!pc || !pa || pc > 8192) return 0;
     if (static_cast<LONG>(pc) > g_ef.maxPending) g_ef.maxPending = static_cast<LONG>(pc);
-    uintptr_t ours[64];
     unsigned k = 0, w = 0;
     for (uint32_t i = 0; i < pc; ++i) {
         uintptr_t p = pa[i];
@@ -4533,13 +4531,29 @@ extern "C" void hfps_post_step_begin(uintptr_t self, uintptr_t world) {
         else
             pa[w++] = p;
     }
-    if (!k) return;
+    if (!k) return 0;
     *reinterpret_cast<uint32_t*>(pm + 0x24) = w;
     uint32_t ac = *reinterpret_cast<uint32_t*>(pm + 0x14);
     uintptr_t aa = *reinterpret_cast<uintptr_t*>(pm + 0x18);
     using FnInsert = void (*)(uintptr_t container, uintptr_t pos, const uintptr_t* first, const uintptr_t* last);
     reinterpret_cast<FnInsert>(g_base + kProjMerge904)(pm + 0x10, aa + static_cast<uintptr_t>(ac) * 8, ours, ours + k);
     InterlockedExchangeAdd(&g_ef.promoted, static_cast<LONG>(k));
+    return k;
+}
+}
+extern "C" void hfps_post_step_begin(uintptr_t self, uintptr_t world) {
+    (void)self;
+    InterlockedIncrement(&g_ef.calls);
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    g_ef.lastQpc = q.QuadPart;
+    if (!world || world != g_ef.world || !g_ef.hero) return;
+    hitprobe::Observe(world, g_ef.hero);
+    ShieldHpStep();
+    MeleeEngineStep(world, g_ef.hero);
+    uintptr_t ours[64];
+    unsigned k = PromoteHeroBullets(world, ours);
+    hitprobe::Arm(world, g_ef.hero, ours, k);
 }
 extern "C" void hfps_sim_tick(uintptr_t self, uintptr_t packet, uintptr_t battle) {
     (void)self;
@@ -4668,7 +4682,7 @@ bool Resolve() {
     return true;
 }
 int Api(void* L) {
-    f.pushnumber(L, 2.f);
+    f.pushnumber(L, 3.f);
     return 1;
 }
 int Active(void* L) {
@@ -4715,20 +4729,30 @@ int SetHudRect(void* L) {
         vmgame::SetHudCover(0, 0, 0, 0);
     return 0;
 }
+int Ammo(void* L) {
+    int ammo = 0, size = 0;
+    bool reloading = false;
+    vmgame::AmmoInfo(&ammo, &size, &reloading);
+    f.pushnumber(L, static_cast<float>(ammo));
+    f.pushnumber(L, static_cast<float>(size));
+    f.pushboolean(L, reloading ? 1 : 0);
+    f.pushboolean(L, vmgame::MeleeActive() ? 1 : 0);
+    return 4;
+}
 int PushTable(void* L) {
     LONG n = InterlockedIncrement(&g_opens);
     if (!Resolve()) {
         Log("lua-api: %s not exported by the game - no interface table (luaopen #%ld)", g_missing, n);
         return 0;
     }
-    f.createtable(L, 0, 5);
+    f.createtable(L, 0, 6);
     const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_enabled", HudEnabled},
-                                                        {"set_hud_rect", SetHudRect}};
+                                                        {"set_hud_rect", SetHudRect}, {"ammo", Ammo}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);
     }
-    Log("lua-api: interface table v2 returned (luaopen #%ld, lua state %p)", n, L);
+    Log("lua-api: interface table v3 returned (luaopen #%ld, lua state %p)", n, L);
     return 1;
 }
 }
