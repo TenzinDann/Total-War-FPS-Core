@@ -980,6 +980,9 @@ bool g_captured = false, g_hudOn = true, g_mute = false, g_scriptMode = false;
 bool g_scriptSealed = false;
 float g_cfS[32], g_cfA[32];
 int g_cfN = 0;
+struct CrossAdsShot { bool drew; float spread, alpha, gap, length; };
+CrossAdsShot g_caS[16];
+int g_caN = 0;
 wchar_t g_reloadNote[160] = L"（还没有）";
 int g_fps = 0;
 double g_workMs = 0;
@@ -2705,6 +2708,13 @@ const Ev kEvCrossFade[] = {
     {4.2, 9, 2, nullptr}, {5.6, 1, 25, nullptr}, {6.3, 2, 0, L"cf_mg_070.bmp"}, {6.8, 2, 0, L"cf_mg_120.bmp"}, {7.3, 2, 0, L"cf_mg_170.bmp"},
     {7.9, 2, 0, L"cf_mg_230.bmp"}, {8.4, 2, 0, L"cf_mg_rel_030.bmp"}, {8.9, 17, 1, nullptr}, {9.0, 5, 0, nullptr},
 };
+const Ev kEvCrossAds[] = {
+    {0.5, 9, 1, nullptr}, {0.6, 17, 0, nullptr}, {1.0, 2, 0, L"ca_m4_hip.bmp"}, {1.1, 3, 1, nullptr}, {1.9, 2, 0, L"ca_m4_ads.bmp"},
+    {2.0, 3, 0, nullptr}, {2.4, 9, 2, nullptr}, {3.9, 2, 0, L"ca_mg_hip.bmp"}, {4.0, 1, 15, nullptr}, {5.0, 2, 0, L"ca_mg_hip_fire.bmp"},
+    {5.8, 3, 1, nullptr}, {5.95, 2, 0, L"ca_mg_ads_015.bmp"}, {6.7, 2, 0, L"ca_mg_ads.bmp"}, {6.8, 1, 15, nullptr},
+    {7.8, 2, 0, L"ca_mg_ads_fire.bmp"}, {8.5, 3, 0, nullptr}, {8.6, 2, 0, L"ca_mg_rel_010.bmp"}, {9.3, 2, 0, L"ca_mg_rel_080.bmp"},
+    {9.4, 17, 1, nullptr}, {9.5, 5, 0, nullptr},
+};
 const Ev kEvGas[] = {
     {0.5, 9, 1, nullptr}, {0.6, 17, 0, nullptr}, {0.7, 16, 1, nullptr}, {1.5, 15, 0, nullptr}, GAS_SHOTS(1.5, L"new_hip"),
     {2.5, 16, 0, nullptr}, {3.0, 15, 0, nullptr}, GAS_SHOTS(3.0, L"old_hip"), {4.0, 3, 1, nullptr}, {4.1, 16, 1, nullptr},
@@ -2713,6 +2723,14 @@ const Ev kEvGas[] = {
     {10.5, 1, 6, nullptr}, {11.0, 2, 0, L"gas_old_burst.bmp"}, {11.7, 17, 1, nullptr}, {11.8, 5, 0, nullptr},
 };
 #undef GAS_SHOTS
+const Ev kEvHitFx[] = {
+    {0.5, 17, 0, nullptr}, {1.6, 60, 150, nullptr}, {1.62, 2, 0, L"hitfx_hit_000.bmp"}, {1.67, 2, 0, L"hitfx_hit_050.bmp"},
+    {1.72, 2, 0, L"hitfx_hit_100.bmp"}, {1.82, 2, 0, L"hitfx_hit_200.bmp"}, {1.92, 2, 0, L"hitfx_hit_300.bmp"},
+    {2.6, 60, 81, nullptr}, {2.62, 2, 0, L"hitfx_kill_000.bmp"}, {2.67, 2, 0, L"hitfx_kill_050.bmp"},
+    {2.72, 2, 0, L"hitfx_kill_100.bmp"}, {2.82, 2, 0, L"hitfx_kill_200.bmp"}, {2.92, 2, 0, L"hitfx_kill_300.bmp"},
+    {3.6, 60, 600, nullptr}, {3.62, 2, 0, L"hitfx_far_000.bmp"}, {3.72, 2, 0, L"hitfx_far_100.bmp"},
+    {4.5, 0, 0, nullptr}, {4.6, 17, 1, nullptr}, {4.7, 5, 0, nullptr},
+};
 const Ev kEvAdsGas[] = {
     {0.5, 17, 0, nullptr}, {0.8, 3, 1, nullptr}, {1.4, 1, 6, nullptr}, {2.0, 3, 0, nullptr},
     {2.05, 2, 0, L"adsgas_050.bmp"}, {2.1, 2, 0, L"adsgas_100.bmp"}, {2.15, 2, 0, L"adsgas_150.bmp"}, {2.2, 2, 0, L"adsgas_200.bmp"},
@@ -3832,7 +3850,7 @@ int wmain(int argc, wchar_t** argv) {
                                 !wcscmp(script, L"shellmove") || !wcscmp(script, L"shield") || !wcscmp(script, L"lastshot") || !wcscmp(script, L"onset") ||
                                 !wcscmp(script, L"shake") || !wcscmp(script, L"melee") || !wcscmp(script, L"rapid") || !wcscmp(script, L"crossfade") ||
                                 !wcscmp(script, L"meleeblock") || !wcscmp(script, L"meleerun") || !wcscmp(script, L"adsgas") || !wcscmp(script, L"shieldrest") ||
-                                !wcscmp(script, L"tacads"));
+                                !wcscmp(script, L"tacads") || !wcscmp(script, L"crossads") || !wcscmp(script, L"hitfx"));
     g_csvOn = !script || layersScript;
     using FnPeriod = UINT(WINAPI*)(UINT);
     FnPeriod timeBegin = nullptr, timeEnd = nullptr;
@@ -3956,6 +3974,8 @@ int wmain(int argc, wchar_t** argv) {
         else if (!wcscmp(script, L"shieldrest")) ev = kEvShieldRest, nev = sizeof kEvShieldRest / sizeof *kEvShieldRest;
         else if (!wcscmp(script, L"rapid")) ev = kEvRapid, nev = sizeof kEvRapid / sizeof *kEvRapid;
         else if (!wcscmp(script, L"crossfade")) ev = kEvCrossFade, nev = sizeof kEvCrossFade / sizeof *kEvCrossFade;
+        else if (!wcscmp(script, L"hitfx")) ev = kEvHitFx, nev = sizeof kEvHitFx / sizeof *kEvHitFx;
+        else if (!wcscmp(script, L"crossads")) ev = kEvCrossAds, nev = sizeof kEvCrossAds / sizeof *kEvCrossAds;
         else if (!layersScript) {
             BLog("bench: unknown script %ls (kick | idle | layers | stance | swap | sprintads | gas | shell | shellmove | shield | lastshot | onset | shake | "
                  "melee | rapid | crossfade | meleeblock | meleerun | shieldrest)", script);
@@ -4125,6 +4145,14 @@ int wmain(int argc, wchar_t** argv) {
                              vmgame::g_mo.crossMove, g_cfA[g_cfN]);
                         ++g_cfN;
                     }
+                    if (script && !wcscmp(script, L"crossads") && g_caN < 16) {
+                        vm::CrosshairSettings ccs;
+                        CrossAdsShot& c = g_caS[g_caN++];
+                        c.drew = vmgame::CrossFrame(ccs, c.spread, c.alpha);
+                        c.gap = ccs.gap, c.length = ccs.length;
+                        BLog("  crosshair %ls: drew %d alpha %.3f spread %.2f px gap %.1f length %.1f (adsW %.3f, scale %.2f)", e.shot, c.drew ? 1 : 0, c.alpha,
+                             c.spread, c.gap, c.length, vmgame::g_mo.adsW, vmgame::Wp().set.crossScale);
+                    }
                     if (tTap >= 0)
                         BLog("SHOT %ls %s (%.1f ms after tap, gas style %d, particles %d, shells %d)", e.shot, ok ? "ok" : "FAILED",
                              (now - tTap) * 1000.0, GasStyleNow(), vmgame::Wp().flash.Live(), vmgame::Wp().shells.Live());
@@ -4156,6 +4184,13 @@ int wmain(int argc, wchar_t** argv) {
                     BLog("GAS style %d", e.n);
                 }
                 if (e.what == 17) g_hudOn = e.n != 0;
+                if (e.what == 60) {
+                    float d = static_cast<float>(e.n / 10);
+                    bool kl = e.n % 10 == 1;
+                    float hp[3] = {g_vs.eye[0] + g_vs.kv.fwd[0] * d, g_vs.eye[1] + g_vs.kv.fwd[1] * d, g_vs.eye[2] + g_vs.kv.fwd[2] * d};
+                    vmgame::HitFx(hp, g_vs.kv.fwd, kl);
+                    BLog("HITFX %s at %.0f m", kl ? "kill" : "hit", d);
+                }
                 if (e.what == 32) g_onSeg0[e.n & 7] = g_onN;
                 if (e.what == 33) EvaluateOnset(e.n);
                 if (e.what == 40) g_shakeSeg0[e.n & 7] = g_shakeN;
@@ -4401,6 +4436,32 @@ int wmain(int argc, wchar_t** argv) {
              "release 0.25 s alpha %.2f, 0.5 s %.2f; minigun 0.7 s %.2f, 2.3 s %.2f; monotonic %d -> %s", fades ? "fades" : "no fade", g_cfA[0], g_cfA[2],
              g_cfA[4], g_cfA[7], g_cfS[0], g_cfS[4], g_cfS[7], cs.spreadMax, g_cfA[9], g_cfA[10], g_cfA[11], g_cfA[14], mono ? 1 : 0, ok ? "OK" : "FAIL");
         if (!ok) code = 16;
+    }
+    if (script && !wcscmp(script, L"crossads")) {
+        const vm::CrosshairSettings& cs = vmgame::g_crossSet;
+        float sc = 1.f;
+        for (int i = 0; i < vmgame::g_modelCount; ++i)
+            if (wcsstr(vmgame::g_models[i], L"minigun")) sc = vmgame::g_w[i].set.crossScale;
+        const CrossAdsShot* c = g_caS;
+        bool ok = !g_failed && shotsOk == shotsWanted && g_caN == 9;
+        ok = ok && c[0].drew && c[0].alpha > 0.99f && std::fabs(c[0].gap - cs.gap) < 1e-3f && !c[1].drew;
+        ok = ok && !c[2].drew && !c[3].drew;
+        ok = ok && c[5].drew && c[5].alpha > 0.95f && std::fabs(c[5].gap - cs.gap * sc) < 1e-3f && c[5].spread < 0.5f;
+        ok = ok && c[6].drew && c[6].alpha > 0.95f && c[6].spread < 0.5f && !c[8].drew;
+        BLog("BENCH CROSSADS m4 hip drew %d gap %.1f / ads drew %d; minigun hip %d / fire %d; ads 0.15 s alpha %.2f, full alpha %.2f gap %.1f (= %.1f x %.2f) "
+             "spread %.2f, firing spread %.2f; release 0.1 s alpha %.2f, 0.8 s drew %d -> %s", c[0].drew, c[0].gap, c[1].drew, c[2].drew, c[3].drew,
+             c[4].drew ? c[4].alpha : 0.f, c[5].alpha, c[5].gap, cs.gap, sc, c[5].spread, c[6].spread, c[7].drew ? c[7].alpha : 0.f, c[8].drew,
+             ok ? "OK" : "FAIL");
+        if (!ok) code = 19;
+    }
+    if (script && !wcscmp(script, L"hitfx")) {
+        int shown = 0, kills = 0;
+        vmgame::HitFxStats(&shown, &kills);
+        int live = vmgame::Wp().flash.LiveImpacts();
+        bool ok = !g_failed && shown == 3 && kills == 1 && live == 0 && shotsOk == shotsWanted;
+        BLog("BENCH HITFX %s: shown %d (want 3), kills %d (want 1), impacts still alive %d, screenshots %d/%d", ok ? "OK" : "FAIL", shown, kills,
+             live, shotsOk, shotsWanted);
+        if (!ok) code = 60;
     }
     if (script && !wcscmp(script, L"gas")) {
         bool ok = !g_failed && shotsOk == shotsWanted && taps == 4 && g_holeN >= taps + 8;

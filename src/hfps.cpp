@@ -390,7 +390,7 @@ struct Config {
     float leadExtra = 0.f;
     float leadScale = 1.f;
     float displayLag = 0.5f;
-    bool hitProbe = true;
+    bool hitProbe = false;
     bool moveEnabled = true;
     int moveMode = 0;
     bool moveOverride = true;
@@ -603,7 +603,7 @@ void LoadConfig() {
     if (!(cfg.leadScale >= 0.f && cfg.leadScale <= 10.f)) cfg.leadScale = 1.f;
     cfg.displayLag = IniF(L"fire", L"display_lag", cfg.displayLag, ini);
     if (!(cfg.displayLag >= 0.f && cfg.displayLag <= 1.0f)) cfg.displayLag = 0.5f;
-    cfg.hitProbe = GetPrivateProfileIntW(L"fire", L"hit_probe", 1, ini) != 0;
+    cfg.hitProbe = GetPrivateProfileIntW(L"fire", L"hit_probe", 0, ini) != 0;
     if (cfg.tpShotGuard != 0.f && (cfg.tpShotGuard < 0.5f || cfg.tpShotGuard > 3.f)) cfg.tpShotGuard = 1.1f;
     cfg.tpLead = IniF(L"move", L"teleport_lead", cfg.tpLead, ini);
     if (cfg.tpLead < 0.f || cfg.tpLead > 0.6f) cfg.tpLead = 0.2f;
@@ -988,6 +988,10 @@ void LogUnitLists(uintptr_t battle);
 bool FastFireInstall(uintptr_t battle);
 void FastFireUninstall(const char* why);
 bool EarlyFlightInstall(uintptr_t battle, uintptr_t heroEntity);
+namespace herofx {
+bool Install(uintptr_t battle, uintptr_t heroEntity, uintptr_t projRecord);
+void Uninstall(const char* why);
+}
 void EarlyFlightUninstall(const char* why);
 long EarlyFlightCalls();
 long EarlyFlightPromoted();
@@ -999,6 +1003,7 @@ void Exit(uintptr_t mgr, const char* why, bool release = true) {
     if (!S.active) return;
     FastFireUninstall(why);
     EarlyFlightUninstall(why);
+    herofx::Uninstall(why);
     int mode = S.lastMode >= 0 ? S.lastMode : MoveMode();
     if (!release) {
         Log("move: hero not released (%s)", why);
@@ -1206,6 +1211,10 @@ void Enter(uintptr_t mgr) {
         auto rva = [](uintptr_t a) { return (unsigned long long)(a > g_base ? a - g_base : 0); };
         Log("probe: launch-event receiver obj=%p (vt +%llx) member +0x3d8 vt +%llx, [+0x10] = +%llx, [+0x18] = +%llx, [+0x8] = +%llx",
             (void*)yf0, rva(yvt), rva(lvt), rva(l10), rva(lvt ? Ptr(lvt + 0x18) : 0), rva(lvt ? Ptr(lvt + 0x8) : 0));
+    }
+    if (cfg.fireShooter && entity && S.fpProj) {
+        uintptr_t sb3 = Ptr(g_base + kGlobalScript);
+        herofx::Install(sb3 ? Ptr(sb3 + oScriptBattle) : 0, entity, S.fpProj);
     }
     if (cfg.fireShooter && entity) {
         uintptr_t evt = Ptr(entity), f48 = evt ? Ptr(evt + 0x48) : 0;
@@ -1885,7 +1894,31 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
                 sKills, sl, g_mq.forced, g_mq.fallback);
     }
 }
+#include "hero_fire_fx.inc"
 #include "hit_probe.inc"
+struct HitFxLog {
+    unsigned shots = 0, hits = 0, kills = 0, logs = 0;
+} g_hfx;
+void HitFeedback(const AimHit& hit, const float eye[3], const float fwd[3]) {
+    ++g_hfx.shots;
+    uint32_t hp = 0;
+    if (!hit.ent || !Rd(hit.ent + 0xb1c, hp) || !hp) return;
+    uintptr_t side = Ptr(hit.ent + 0x80);
+    if (!side || side == Ptr(S.entity + 0x80)) return;
+    int32_t dmg = 0, ap = 0;
+    if (S.fpProj) {
+        Rd(S.fpProj + 0x70, dmg);
+        Rd(S.fpProj + 0x74, ap);
+    }
+    bool kill = dmg >= 0 && ap >= 0 && static_cast<int64_t>(dmg) + ap >= static_cast<int64_t>(hp);
+    float p[3] = {eye[0] + fwd[0] * hit.dist, eye[1] + fwd[1] * hit.dist, eye[2] + fwd[2] * hit.dist};
+    vmgame::HitFx(p, fwd, kill);
+    ++g_hfx.hits;
+    if (kill) ++g_hfx.kills;
+    if (g_hfx.logs++ < 30)
+        Log("hit-fx: shot on enemy %p at %.1f m, hp %u vs damage %d + ap %d -> %s (so far %u hits / %u kills of %u shots)", (void*)hit.ent,
+            hit.dist, hp, dmg, ap, kill ? "kill marker" : "hit marker", g_hfx.hits, g_hfx.kills, g_hfx.shots);
+}
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
               int nBodies, float clearance) {
     uintptr_t sb = Ptr(g_base + kGlobalScript);
@@ -2006,6 +2039,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     if (ok) {
         vmgame::Tracer(vis, aim);
         hitprobe::OnShot(hit, now);
+        HitFeedback(hit, eye, fwd);
         float tsp = std::sqrt(hit.vel[0] * hit.vel[0] + hit.vel[1] * hit.vel[1]), lsz = std::sqrt(lead[0] * lead[0] + lead[1] * lead[1]);
         ++S.aimShots;
         S.aimSelfSpeedSum += S.camSpeed;
@@ -4730,14 +4764,15 @@ int SetHudRect(void* L) {
     return 0;
 }
 int Ammo(void* L) {
-    int ammo = 0, size = 0;
+    int ammo = 0, size = 0, reserve = -1;
     bool reloading = false;
-    vmgame::AmmoInfo(&ammo, &size, &reloading);
+    vmgame::AmmoInfo(&ammo, &size, &reloading, &reserve);
     f.pushnumber(L, static_cast<float>(ammo));
     f.pushnumber(L, static_cast<float>(size));
     f.pushboolean(L, reloading ? 1 : 0);
     f.pushboolean(L, vmgame::MeleeActive() ? 1 : 0);
-    return 4;
+    f.pushnumber(L, static_cast<float>(reserve));
+    return 5;
 }
 int PushTable(void* L) {
     LONG n = InterlockedIncrement(&g_opens);
