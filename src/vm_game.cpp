@@ -121,7 +121,53 @@ void ModelDir(int idx, wchar_t* out) {
     wchar_t* slash = wcsrchr(out, L'\\');
     if (slash) *slash = 0;
 }
+struct IniStamp {
+    bool valid = false;
+    ULONGLONG size[3] = {};
+    FILETIME time[3] = {};
+};
+IniStamp g_setStamp[kMaxModels];
+void StampFile(const wchar_t* path, ULONGLONG* size, FILETIME* time) {
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (path[0] && GetFileAttributesExW(path, GetFileExInfoStandard, &fa)) {
+        *size = (static_cast<ULONGLONG>(fa.nFileSizeHigh) << 32) | fa.nFileSizeLow;
+        *time = fa.ftLastWriteTime;
+    } else {
+        *size = ~0ull;
+        *time = FILETIME{};
+    }
+}
+void ShieldIniOf(const vm::Settings& s, wchar_t* out) {
+    out[0] = 0;
+    if (!s.shieldModel[0]) return;
+    wcsncpy(out, s.shieldModel, MAX_PATH * 2 - 16);
+    out[MAX_PATH * 2 - 16] = 0;
+    if (wchar_t* sl = wcsrchr(out, L'\\')) wcscpy(sl, L"\\shield.ini");
+}
+bool SettingsUnchanged(int idx, const vm::Settings& s) {
+    const IniStamp& o = g_setStamp[idx];
+    if (!o.valid) return false;
+    wchar_t side[MAX_PATH * 2], sh[MAX_PATH * 2];
+    SidecarIni(idx, side);
+    ShieldIniOf(s, sh);
+    const wchar_t* files[3] = {g_ini, sh, side};
+    for (int k = 0; k < 3; ++k) {
+        ULONGLONG size;
+        FILETIME time;
+        StampFile(files[k], &size, &time);
+        if (size != o.size[k] || CompareFileTime(&time, &o.time[k])) return false;
+    }
+    return true;
+}
 void LoadAllSettings(int idx, vm::Settings& s) {
+    IniStamp st;
+    StampFile(g_ini, &st.size[0], &st.time[0]);
+    StampFile(L"", &st.size[1], &st.time[1]);
+    {
+        wchar_t side[MAX_PATH * 2];
+        SidecarIni(idx, side);
+        StampFile(side, &st.size[2], &st.time[2]);
+    }
     vm::CrosshairSettings cs;
     vm::LoadCrosshair(g_ini, cs);
     g_crossSet = cs;
@@ -144,6 +190,7 @@ void LoadAllSettings(int idx, vm::Settings& s) {
         wcsncpy(shIni, full, MAX_PATH * 2 - 16);
         shIni[MAX_PATH * 2 - 16] = 0;
         if (wchar_t* sl = wcsrchr(shIni, L'\\')) wcscpy(sl, L"\\shield.ini");
+        StampFile(shIni, &st.size[1], &st.time[1]);
         vm::LoadSettings(shIni, s);
         wcsncpy(s.shieldModel, full, 519);
     }
@@ -156,6 +203,8 @@ void LoadAllSettings(int idx, vm::Settings& s) {
     AcquireSRWLockExclusive(&g_kickLock);
     g_kickP[idx] = kp;
     ReleaseSRWLockExclusive(&g_kickLock);
+    st.valid = true;
+    g_setStamp[idx] = st;
     if (g_log)
         g_log("kick[%d]: %s cam x%.2f gun x%.2f | hip climb %.2f-%.2f punch %.2f gun back %.3f pitch %.2f | ads climb %.2f-%.2f punch %.2f "
               "gun back %.3f pitch %.2f | recover %.2f after %.2fs at %.0f deg/s | sustain x%.2f back %.3f pitch %.2f rise %.2fs | "
@@ -1396,15 +1445,216 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
     }
     g_log("viewmodel: [%d] sounds + muzzle fx loaded in %.1f ms", idx, (Now() - tFx) * 1000.0);
 }
+constexpr int kPrefetchAhead = 2;
+constexpr int kPrefetchPcmCap = 1024;
+struct PrefetchJob {
+    int state = 0;
+    bool cancel = false;
+    vm::Settings* set = nullptr;
+    void** pcm = nullptr;
+    int nPcm = 0;
+};
+PrefetchJob g_pfJob[kMaxModels];
+int g_pfOrder[kMaxModels];
+int g_pfOrderN = 0;
+SRWLOCK g_pfLock = SRWLOCK_INIT;
+HANDLE g_pfWake = nullptr;
+volatile LONG g_pfRunning = 0;
+volatile LONG64 g_pfProgressUs = 0;
+bool g_pfStallLogged = false;
+bool g_preloadOnBattle = true;
+volatile LONG g_warm = 0;
+double g_warmT0 = 0;
+wchar_t g_armoryPath[MAX_PATH];
+FILETIME g_armorySeen = {};
+void ArmoryWatch() {
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!g_preloadOnBattle || !GetFileAttributesExW(g_armoryPath, GetFileExInfoStandard, &fa) ||
+        !CompareFileTime(&fa.ftLastWriteTime, &g_armorySeen))
+        return;
+    g_armorySeen = fa.ftLastWriteTime;
+    if (g_fp || g_warm) return;
+    double t0 = Now();
+    char err[128] = {};
+    bool audio = vm::GunSound::WarmEngine(err, sizeof err);
+    g_log("warm: audio engine %s in %.1f ms", audio ? "ready" : err, (Now() - t0) * 1000.0);
+    InterlockedExchange(&g_reqRoster, 1);
+    InterlockedExchange(&g_warm, 1);
+    bool hooked = InstallPresentHook();
+    g_log("warm: new battle (hero_fps_armory.txt rewritten) - %s",
+          hooked ? "loading weapons before first person" : "Present not hooked; weapons load at F6 as before");
+}
+int SoundListsOf(const vm::Settings& s, const wchar_t** out, int cap) {
+    const wchar_t* const all[] = {s.fireSound, s.fireSoundAds, s.fireMech, s.fireMechAds, s.fireLfe, s.fireAtmo,
+                                  s.fireTail, s.fireLastSound, s.fireCasing, s.fireCasingAds, s.shellLandSound, s.stepFoot,
+                                  s.stepClothRun, s.stepClothSprint, s.stepRattle, s.spinUpSound, s.spinLoopSound, s.spinDownSound};
+    int n = 0;
+    for (const wchar_t* l : all)
+        if (l[0] && n < cap) out[n++] = l;
+    for (int i = 0; i < vm::kMeleeSfx && n < cap; ++i)
+        if (s.meleeSfx[i][0]) out[n++] = s.meleeSfx[i];
+    return n;
+}
+void PrefetchWork(int idx, const vm::Settings& s, void** pcm, int* nPcm) {
+    double t0 = Now();
+    char err[256] = {};
+    int files = 0;
+    size_t bytes = 0;
+    bool ok = vm::prefetch::Model(idx, g_models[idx], &files, &bytes, err, sizeof err);
+    double t1 = Now();
+    wchar_t dir[MAX_PATH * 2];
+    ModelDir(idx, dir);
+    const wchar_t* lists[64];
+    int nl = SoundListsOf(s, lists, 64);
+    *nPcm = 0;
+    for (int k = 0; k < nl; ++k) *nPcm += vm::GunSound::Prefetch(dir, lists[k], pcm + *nPcm, kPrefetchPcmCap - *nPcm);
+    if (s.animSounds[0]) {
+        wchar_t path[MAX_PATH * 2];
+        swprintf(path, MAX_PATH * 2, L"%ls\\%ls", dir, s.animSounds);
+        if (FILE* f = _wfopen(path, L"r")) {
+            char line[512];
+            while (fgets(line, sizeof line, f) && *nPcm < kPrefetchPcmCap) {
+                char clip[64], file[256];
+                float t = 0, v = 1;
+                if (line[0] == '#' || sscanf(line, "%63s %f %255s %f", clip, &t, file, &v) < 3) continue;
+                wchar_t wf[256];
+                MultiByteToWideChar(CP_UTF8, 0, file, -1, wf, 256);
+                *nPcm += vm::GunSound::Prefetch(dir, wf, pcm + *nPcm, kPrefetchPcmCap - *nPcm);
+            }
+            fclose(f);
+        }
+    }
+    g_log("prefetch: [%d] model %s (%d files, %.1f MB) %.1f ms, %d sounds %.1f ms", idx, ok ? "ok" : err, files, bytes / 1048576.0,
+          (t1 - t0) * 1000.0, *nPcm, (Now() - t1) * 1000.0);
+}
+DWORD WINAPI PrefetchThread(void*) {
+    double t0 = Now();
+    int sh = vm::prefetch::WarmShaders();
+    g_log("prefetch: background thread up; %d shaders compiled in %.1f ms", sh, (Now() - t0) * 1000.0);
+    for (;;) {
+        int idx = -1;
+        vm::Settings* set = nullptr;
+        AcquireSRWLockExclusive(&g_pfLock);
+        int ready = 0;
+        for (int k = 0; k < g_pfOrderN; ++k) ready += g_pfJob[g_pfOrder[k]].state == 3;
+        for (int k = 0; k < g_pfOrderN && ready < kPrefetchAhead; ++k) {
+            PrefetchJob& j = g_pfJob[g_pfOrder[k]];
+            if (j.state != 1) continue;
+            idx = g_pfOrder[k];
+            j.state = 2;
+            j.cancel = false;
+            set = j.set;
+            j.set = nullptr;
+            break;
+        }
+        ReleaseSRWLockExclusive(&g_pfLock);
+        if (idx < 0) {
+            WaitForSingleObject(g_pfWake, 500);
+            ArmoryWatch();
+            continue;
+        }
+        void** pcm = new void*[kPrefetchPcmCap];
+        int nPcm = 0;
+        PrefetchWork(idx, *set, pcm, &nPcm);
+        delete set;
+        AcquireSRWLockExclusive(&g_pfLock);
+        PrefetchJob& j = g_pfJob[idx];
+        bool drop = j.cancel;
+        if (drop) {
+            j.state = 0;
+        } else {
+            j.state = 3;
+            j.pcm = pcm;
+            j.nPcm = nPcm;
+        }
+        ReleaseSRWLockExclusive(&g_pfLock);
+        InterlockedExchange64(&g_pfProgressUs, static_cast<LONG64>(Now() * 1e6));
+        if (drop) {
+            for (int k = 0; k < nPcm; ++k) vm::GunSound::Unprefetch(pcm[k]);
+            delete[] pcm;
+            vm::prefetch::Drop(idx);
+        }
+    }
+}
+void PrefetchDiscard(int i) {
+    if (!g_pfRunning || i < 0 || i >= kMaxModels) return;
+    vm::Settings* set = nullptr;
+    void** pcm = nullptr;
+    int nPcm = 0;
+    bool drop = false;
+    AcquireSRWLockExclusive(&g_pfLock);
+    PrefetchJob& j = g_pfJob[i];
+    if (j.state == 1) {
+        set = j.set;
+        j.set = nullptr;
+        j.state = 0;
+    } else if (j.state == 2) {
+        j.cancel = true;
+    } else if (j.state == 3) {
+        pcm = j.pcm;
+        nPcm = j.nPcm;
+        j.pcm = nullptr;
+        j.nPcm = 0;
+        j.state = 0;
+        drop = true;
+    }
+    ReleaseSRWLockExclusive(&g_pfLock);
+    delete set;
+    if (!drop) return;
+    for (int k = 0; k < nPcm; ++k) vm::GunSound::Unprefetch(pcm[k]);
+    delete[] pcm;
+    vm::prefetch::Drop(i);
+    SetEvent(g_pfWake);
+}
+void PrefetchQueue(const volatile LONG* order, LONG n) {
+    if (!g_pfRunning) return;
+    bool in[kMaxModels] = {};
+    int next[kMaxModels], nn = 0;
+    for (LONG k = 0; k < n; ++k) {
+        int i = order[k];
+        if (i < 0 || i >= g_modelCount || in[i] || (g_w[i].rend.Ready() && !g_w[i].fxDirty)) continue;
+        in[i] = true;
+        next[nn++] = i;
+    }
+    for (int i = 0; i < g_modelCount; ++i)
+        if (!in[i]) PrefetchDiscard(i);
+    AcquireSRWLockExclusive(&g_pfLock);
+    memcpy(g_pfOrder, next, sizeof(int) * nn);
+    g_pfOrderN = nn;
+    for (int k = 0; k < nn; ++k) {
+        PrefetchJob& j = g_pfJob[next[k]];
+        if (j.state == 0) {
+            j.set = new vm::Settings(g_w[next[k]].set);
+            j.state = 1;
+        } else if (j.state == 2) {
+            j.cancel = false;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_pfLock);
+    InterlockedExchange64(&g_pfProgressUs, static_cast<LONG64>(Now() * 1e6));
+    SetEvent(g_pfWake);
+}
+bool PrefetchReady(int i) {
+    if (!g_pfRunning) return true;
+    AcquireSRWLockShared(&g_pfLock);
+    int st = g_pfJob[i].state;
+    ReleaseSRWLockShared(&g_pfLock);
+    if (st == 0 || st == 3) return true;
+    if (static_cast<LONG64>(Now() * 1e6) - g_pfProgressUs < 5000000) return false;
+    if (!g_pfStallLogged) g_log("prefetch: no progress for 5 s at model %d - loading on the render thread", i);
+    g_pfStallLogged = true;
+    return true;
+}
 bool EnsureWeapon(int idx, ID3D11Device* dev) {
     if (idx < 0 || idx >= g_modelCount) return false;
     Weapon& w = g_w[idx];
     if (!w.rend.Ready()) {
         double t0 = Now();
-        LoadAllSettings(idx, w.set);
+        if (!SettingsUnchanged(idx, w.set)) LoadAllSettings(idx, w.set);
         char err[512] = {};
         if (!w.rend.Init(dev, g_models[idx], err, sizeof err)) {
             g_log("viewmodel: init failed (%ls): %s", g_models[idx], err);
+            PrefetchDiscard(idx);
             return false;
         }
         g_log("viewmodel: [%d] ready on device %p: %u triangles, %u bones, %u clips, model %ls (init %.1f ms)", idx, (void*)dev,
@@ -1415,7 +1665,10 @@ bool EnsureWeapon(int idx, ID3D11Device* dev) {
             MagApply();
         }
     }
-    if (w.fxDirty) LoadWeaponFx(idx, dev);
+    if (w.fxDirty) {
+        LoadWeaponFx(idx, dev);
+        PrefetchDiscard(idx);
+    }
     return true;
 }
 void RosterStep(ID3D11Device* dev) {
@@ -1472,6 +1725,7 @@ void RosterStep(ID3D11Device* dev) {
         if (i == g_modelIdx) curOk = true;
     }
     g_preloadNext = 0;
+    PrefetchQueue(g_roster, n);
     if (!curOk && g_sw.phase == 0 && EnsureWeapon(g_roster[0], dev)) {
         g_modelIdx = g_roster[0];
         InterlockedExchange(&g_wantIdx, g_modelIdx);
@@ -1483,11 +1737,14 @@ void RosterStep(ID3D11Device* dev) {
 void PreloadStep(ID3D11Device* dev) {
     if (g_preloadNext < 0 || g_sw.phase) return;
     while (g_preloadNext < g_rosterN) {
-        int i = g_roster[g_preloadNext++];
+        int i = g_roster[g_preloadNext];
         if (!g_w[i].rend.Ready() || g_w[i].fxDirty) {
+            if (!PrefetchReady(i)) return;
+            ++g_preloadNext;
             EnsureWeapon(i, dev);
             return;
         }
+        ++g_preloadNext;
     }
     g_preloadNext = -1;
 }
@@ -1536,8 +1793,43 @@ void SwitchStep(ID3D11Device* dev) {
         InterlockedExchange(&g_switching, 0);
     }
 }
+void CheckDevice(ID3D11Device* dev) {
+    if (!Wp().rend.Ready() || Wp().rend.Device() == dev) return;
+    g_log("viewmodel: device changed (%p -> %p); reloading", (void*)Wp().rend.Device(), (void*)dev);
+    for (int i = 0; i < g_modelCount; ++i) {
+        g_w[i].rend.Release();
+        g_w[i].fxDirty = true;
+    }
+    g_shieldR.Release();
+    InterlockedExchange(&g_reqRoster, 1);
+}
+void WarmStep(IDXGISwapChain* sc) {
+    ID3D11Device* dev = nullptr;
+    if (FAILED(sc->GetDevice(IID_ID3D11Device, reinterpret_cast<void**>(&dev))) || !dev) {
+        InterlockedExchange(&g_warm, 0);
+        return;
+    }
+    if (InterlockedCompareExchange(&g_warm, 2, 1) == 1) g_warmT0 = Now();
+    CheckDevice(dev);
+    bool ok = EnsureWeapon(g_modelIdx, dev);
+    if (ok) {
+        RosterStep(dev);
+        PreloadStep(dev);
+    }
+    if (!ok || (g_preloadNext < 0 && !g_reqRoster)) {
+        int ready = 0;
+        for (LONG k = 0; k < g_rosterN; ++k) ready += g_w[g_roster[k]].rend.Ready();
+        g_log("warm: %s in %.2f s before first person (%d of %ld weapons ready)", ok ? "preload done" : "stopped (current weapon failed)",
+              Now() - g_warmT0, ready, static_cast<long>(g_rosterN));
+        InterlockedExchange(&g_warm, 0);
+    }
+    dev->Release();
+}
 void DrawLayer(IDXGISwapChain* sc, int part) {
-    if (g_failed || !(g_testLayer || g_fp)) return;
+    if (g_failed || !(g_testLayer || g_fp)) {
+        if (!g_failed && g_warm && part == kPartAll) WarmStep(sc);
+        return;
+    }
     double t0 = Now();
     if (part != kPartCross && InterlockedExchange(&g_reqModelNext, 0) && g_modelCount > 1) {
         int next = ((g_sw.phase == 1 ? g_sw.target : g_modelIdx) + 1) % g_modelCount;
@@ -1561,15 +1853,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
         return;
     }
     if (part != kPartCross) {
-        if (Wp().rend.Ready() && Wp().rend.Device() != dev) {
-            g_log("viewmodel: device changed (%p -> %p); reloading", (void*)Wp().rend.Device(), (void*)dev);
-            for (int i = 0; i < g_modelCount; ++i) {
-                g_w[i].rend.Release();
-                g_w[i].fxDirty = true;
-            }
-            g_shieldR.Release();
-            InterlockedExchange(&g_reqRoster, 1);
-        }
+        CheckDevice(dev);
         if (!EnsureWeapon(g_modelIdx, dev)) {
             g_failed = true;
             dev->Release();
@@ -1775,6 +2059,25 @@ void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
         "fov=%.1f offset=%.3f,%.3f,%.3f rot=%.1f,%.1f,%.1f",
         g_enabled, g_staticOk, g_testKey, g_reloadKey, g_animKey, g_modelKey, g_modelCount, g_models[0], Wp().set.fovDeg,
         Wp().set.offset[0], Wp().set.offset[1], Wp().set.offset[2], Wp().set.rotDeg[0], Wp().set.rotDeg[1], Wp().set.rotDeg[2]);
+    if (g_enabled && (g_staticOk || !exeBase)) {
+        g_preloadOnBattle = GetPrivateProfileIntW(L"viewmodel", L"preload_on_battle", 1, g_ini) != 0;
+        wcsncpy(g_armoryPath, g_ini, MAX_PATH - 1);
+        g_armoryPath[MAX_PATH - 1] = 0;
+        if (wchar_t* slash = wcsrchr(g_armoryPath, L'\\')) wcscpy(slash + 1, L"hero_fps_armory.txt");
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        if (GetFileAttributesExW(g_armoryPath, GetFileExInfoStandard, &fa)) g_armorySeen = fa.ftLastWriteTime;
+        g_pfWake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        HANDLE th = g_pfWake ? CreateThread(nullptr, 0, PrefetchThread, nullptr, 0, nullptr) : nullptr;
+        if (th) {
+            SetThreadPriority(th, THREAD_PRIORITY_BELOW_NORMAL);
+            CloseHandle(th);
+            InterlockedExchange(&g_pfRunning, 1);
+            const volatile LONG cur = g_modelIdx;
+            PrefetchQueue(&cur, 1);
+        } else {
+            log("prefetch: background thread not started (%lu) - weapons load on the render thread as before", GetLastError());
+        }
+    }
 }
 bool Enabled() { return g_enabled && g_staticOk; }
 bool LayerActive() { return Enabled() && (g_testLayer || g_fp); }

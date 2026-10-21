@@ -51,6 +51,60 @@ bool ReadFileAll(const wchar_t* path, unsigned char** out, size_t* outLen) {
     *outLen = n;
     return true;
 }
+struct PreEntry {
+    int tag;
+    bool hvm;
+    wchar_t path[MAX_PATH * 2];
+    unsigned char* data;
+    size_t len;
+    ULONGLONG size;
+    FILETIME stamp;
+};
+constexpr int kMaxPre = 256;
+PreEntry g_pre[kMaxPre];
+int g_preN = 0;
+SRWLOCK g_preLock = SRWLOCK_INIT;
+bool FileStamp(const wchar_t* path, ULONGLONG* size, FILETIME* stamp) {
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fa)) return false;
+    *size = (static_cast<ULONGLONG>(fa.nFileSizeHigh) << 32) | fa.nFileSizeLow;
+    *stamp = fa.ftLastWriteTime;
+    return true;
+}
+void PutPrefetched(int tag, bool hvm, const wchar_t* path, unsigned char* data, size_t len, ULONGLONG size, FILETIME stamp) {
+    AcquireSRWLockExclusive(&g_preLock);
+    if (g_preN < kMaxPre && wcslen(path) < MAX_PATH * 2) {
+        PreEntry& e = g_pre[g_preN++];
+        e.tag = tag, e.hvm = hvm, e.data = data, e.len = len, e.size = size, e.stamp = stamp;
+        wcscpy(e.path, path);
+        data = nullptr;
+    }
+    ReleaseSRWLockExclusive(&g_preLock);
+    delete[] data;
+}
+bool TakePrefetched(const wchar_t* path, bool hvm, unsigned char** out, size_t* outLen) {
+    PreEntry got = {};
+    bool found = false;
+    AcquireSRWLockExclusive(&g_preLock);
+    for (int i = 0; i < g_preN; ++i) {
+        if (g_pre[i].hvm != hvm || _wcsicmp(g_pre[i].path, path)) continue;
+        got = g_pre[i];
+        g_pre[i] = g_pre[--g_preN];
+        found = true;
+        break;
+    }
+    ReleaseSRWLockExclusive(&g_preLock);
+    if (!found) return false;
+    ULONGLONG size = 0;
+    FILETIME stamp = {};
+    if (!FileStamp(path, &size, &stamp) || size != got.size || CompareFileTime(&stamp, &got.stamp)) {
+        delete[] got.data;
+        return false;
+    }
+    *out = got.data;
+    *outLen = got.len;
+    return true;
+}
 #pragma pack(push, 1)
 struct DdsPixelFormat {
     DWORD size, flags, fourCC, rgbBitCount, rMask, gMask, bMask, aMask;
@@ -93,7 +147,7 @@ bool LoadDds(ID3D11Device* dev, const wchar_t* path, bool srgb, ID3D11ShaderReso
              size_t errLen) {
     unsigned char* data = nullptr;
     size_t len = 0;
-    if (!ReadFileAll(path, &data, &len)) {
+    if (!TakePrefetched(path, false, &data, &len) && !ReadFileAll(path, &data, &len)) {
         SetErr(err, errLen, "texture missing: %ls", path);
         return false;
     }
@@ -462,11 +516,57 @@ float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
 )HLSL";
 typedef HRESULT(WINAPI* FnD3DCompile)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*, LPCSTR, LPCSTR,
                                      UINT, UINT, ID3DBlob**, ID3DBlob**);
-FnD3DCompile GetCompiler() {
+FnD3DCompile RealCompiler() {
     HMODULE m = GetModuleHandleW(L"d3dcompiler_47.dll");
     if (!m) m = LoadLibraryW(L"d3dcompiler_47.dll");
     return m ? reinterpret_cast<FnD3DCompile>(GetProcAddress(m, "D3DCompile")) : nullptr;
 }
+struct ShaderCacheEntry {
+    uint64_t hash;
+    SIZE_T len;
+    char entry[16], target[16];
+    UINT f1, f2;
+    ID3DBlob* blob;
+};
+ShaderCacheEntry g_shc[32];
+int g_shcN = 0;
+SRWLOCK g_shcLock = SRWLOCK_INIT;
+uint64_t Fnv64(const void* p, size_t n) {
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; ++i) h = (h ^ static_cast<const unsigned char*>(p)[i]) * 1099511628211ull;
+    return h;
+}
+HRESULT WINAPI CachedCompile(LPCVOID src, SIZE_T len, LPCSTR name, const D3D_SHADER_MACRO* defs, ID3DInclude* inc, LPCSTR entry,
+                             LPCSTR target, UINT f1, UINT f2, ID3DBlob** code, ID3DBlob** msgs) {
+    FnD3DCompile real = RealCompiler();
+    if (!real) return E_FAIL;
+    if (defs || inc || !src || !entry || !target || !code || strlen(entry) >= 16 || strlen(target) >= 16)
+        return real(src, len, name, defs, inc, entry, target, f1, f2, code, msgs);
+    uint64_t h = Fnv64(src, len);
+    AcquireSRWLockExclusive(&g_shcLock);
+    for (int i = 0; i < g_shcN; ++i) {
+        const ShaderCacheEntry& e = g_shc[i];
+        if (e.hash == h && e.len == len && e.f1 == f1 && e.f2 == f2 && !strcmp(e.entry, entry) && !strcmp(e.target, target)) {
+            e.blob->AddRef();
+            *code = e.blob;
+            if (msgs) *msgs = nullptr;
+            ReleaseSRWLockExclusive(&g_shcLock);
+            return S_OK;
+        }
+    }
+    HRESULT hr = real(src, len, name, defs, inc, entry, target, f1, f2, code, msgs);
+    if (SUCCEEDED(hr) && *code && g_shcN < static_cast<int>(sizeof g_shc / sizeof *g_shc)) {
+        ShaderCacheEntry& e = g_shc[g_shcN++];
+        e.hash = h, e.len = len, e.f1 = f1, e.f2 = f2;
+        strcpy(e.entry, entry);
+        strcpy(e.target, target);
+        e.blob = *code;
+        e.blob->AddRef();
+    }
+    ReleaseSRWLockExclusive(&g_shcLock);
+    return hr;
+}
+FnD3DCompile GetCompiler() { return RealCompiler() ? &CachedCompile : nullptr; }
 struct StateBackup {
     UINT scissorCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     UINT viewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
@@ -958,7 +1058,8 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (!(s.scale > 0.001f && s.scale < 1000)) s.scale = 1;
     return true;
 }
-bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
+namespace {
+bool ReadHvmV1(const wchar_t* path, unsigned char** out, size_t* outLen, char* err, size_t errLen) {
     unsigned char* data = nullptr;
     size_t len = 0;
     if (!ReadFileAll(path, &data, &len)) {
@@ -1004,6 +1105,15 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
         data = v1;
         len = v1Len;
     }
+    *out = data;
+    *outLen = len;
+    return true;
+}
+}
+bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
+    unsigned char* data = nullptr;
+    size_t len = 0;
+    if (!TakePrefetched(path, true, &data, &len) && !ReadHvmV1(path, &data, &len, err, errLen)) return false;
     bool ok = false;
     ID3D11Buffer* vb = nullptr;
     ID3D11Buffer* ib = nullptr;
@@ -4944,5 +5054,96 @@ void Shield::Release() {
     builtModel_[0] = 0;
     n_ = hitPending_ = 0;
     for (UINT& c : kindCount_) c = 0;
+}
+namespace prefetch {
+bool Model(int tag, const wchar_t* hvmPath, int* files, size_t* bytes, char* err, size_t errLen) {
+    *files = 0;
+    *bytes = 0;
+    ULONGLONG size = 0;
+    FILETIME stamp = {};
+    if (!FileStamp(hvmPath, &size, &stamp)) {
+        SetErr(err, errLen, "model file missing: %ls", hvmPath);
+        return false;
+    }
+    unsigned char* data = nullptr;
+    size_t len = 0;
+    if (!ReadHvmV1(hvmPath, &data, &len, err, errLen)) return false;
+    HvmHeader h = {};
+    constexpr uint32_t kTexCap = 64;
+    HvmTexture tex[kTexCap];
+    uint32_t texN = 0;
+    if (len >= sizeof h) {
+        memcpy(&h, data, sizeof h);
+        if (!memcmp(h.magic, "HVM1", 4) && h.version == 1 && h.textureCount <= kTexCap &&
+            sizeof h + h.textureCount * sizeof(HvmTexture) <= len)
+            texN = h.textureCount;
+    }
+    memcpy(tex, data + sizeof h, texN * sizeof(HvmTexture));
+    *files = 1;
+    *bytes = len;
+    PutPrefetched(tag, true, hvmPath, data, len, size, stamp);
+    wchar_t dir[MAX_PATH];
+    wcsncpy(dir, hvmPath, MAX_PATH - 1);
+    dir[MAX_PATH - 1] = 0;
+    wchar_t* slash = wcsrchr(dir, L'\\');
+    if (!slash) slash = wcsrchr(dir, L'/');
+    if (slash) slash[1] = 0;
+    for (uint32_t t = 0; t < texN; ++t) {
+        tex[t].file[75] = 0;
+        wchar_t rel[128];
+        MultiByteToWideChar(CP_UTF8, 0, tex[t].file, -1, rel, 128);
+        wchar_t full[MAX_PATH * 2];
+        swprintf(full, MAX_PATH * 2, L"%ls%ls", dir, rel);
+        unsigned char* d = nullptr;
+        size_t l = 0;
+        if (!FileStamp(full, &size, &stamp) || !ReadFileAll(full, &d, &l)) continue;
+        ++*files;
+        *bytes += l;
+        PutPrefetched(tag, false, full, d, l, size, stamp);
+    }
+    return true;
+}
+void Drop(int tag) {
+    unsigned char* del[kMaxPre];
+    int n = 0;
+    AcquireSRWLockExclusive(&g_preLock);
+    for (int i = 0; i < g_preN;) {
+        if (g_pre[i].tag != tag) {
+            ++i;
+            continue;
+        }
+        del[n++] = g_pre[i].data;
+        g_pre[i] = g_pre[--g_preN];
+    }
+    ReleaseSRWLockExclusive(&g_preLock);
+    for (int k = 0; k < n; ++k) delete[] del[k];
+}
+int WarmShaders() {
+    FnD3DCompile compile = GetCompiler();
+    if (!compile) return 0;
+    struct One {
+        const char* src;
+        size_t len;
+        const char *name, *entry, *target;
+    } const list[] = {{kShader, sizeof kShader - 1, "hero_fps_vm", "VS", "vs_5_0"},
+                      {kShader, sizeof kShader - 1, "hero_fps_vm", "PS", "ps_5_0"},
+                      {kFlashShader, sizeof kFlashShader - 1, "hero_fps_flash", "VS", "vs_5_0"},
+                      {kFlashShader, sizeof kFlashShader - 1, "hero_fps_flash", "PS", "ps_5_0"},
+                      {kFlashShader, sizeof kFlashShader - 1, "hero_fps_flash", "PSD", "ps_5_0"},
+                      {kShellShader, sizeof kShellShader - 1, "hero_fps_shell", "VS", "vs_5_0"},
+                      {kShellShader, sizeof kShellShader - 1, "hero_fps_shell", "PS", "ps_5_0"},
+                      {kCrossShader, sizeof kCrossShader - 1, "hero_fps_cross", "VS", "vs_5_0"},
+                      {kCrossShader, sizeof kCrossShader - 1, "hero_fps_cross", "PS", "ps_5_0"},
+                      {kShieldShader, sizeof kShieldShader - 1, "hero_fps_shield", "VS", "vs_5_0"},
+                      {kShieldShader, sizeof kShieldShader - 1, "hero_fps_shield", "PS", "ps_5_0"}};
+    int ok = 0;
+    for (const One& o : list) {
+        ID3DBlob *b = nullptr, *m = nullptr;
+        if (SUCCEEDED(compile(o.src, o.len, o.name, nullptr, nullptr, o.entry, o.target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &b, &m))) ++ok;
+        SafeRelease(b);
+        SafeRelease(m);
+    }
+    return ok;
+}
 }
 }
