@@ -1,6 +1,7 @@
 volatile LONG g_meleeIn = 0;
 bool MeleeWeapon() {
-    return Wp().rend.Clips() && (Wp().rend.FindClip("m_light_stab") >= 0 || Wp().rend.FindClip("m_gs_light_left") >= 0);
+    return Wp().rend.Clips() && (Wp().rend.FindClip("m_light_stab") >= 0 || Wp().rend.FindClip("m_gs_light_left") >= 0 ||
+                                 Wp().rend.FindClip("m_gh_light_left") >= 0);
 }
 volatile LONG g_meleeOn = 0, g_meleeStrike = 0;
 volatile LONG g_meleeHitQ[32] = {};
@@ -64,6 +65,7 @@ struct State {
     double pressAt = -1;
     int model = -1;
     bool struck = false;
+    bool blkFree = false;
 } g;
 int g_trace[256];
 int g_traceN = 0;
@@ -180,6 +182,10 @@ struct Moveset {
     float heldHeavy;
     const char* blockEnd;
     float blockEndFade;
+    float lightUntil = 0.3f;
+    const char* pushToBlock = nullptr;
+    float pushToBlockFade = 0.2f;
+    int finishVariants = 1;
 };
 const Moveset kSpear = {"m_light_stab", kDef, kExit, static_cast<int>(sizeof kExit / sizeof *kExit), kImpact, 0.2f, 0.8f, 1.0f, nullptr, 0.2f};
 const Def kGsDef[kActs] = {
@@ -215,7 +221,46 @@ const Impact kGsImpact[kActs] = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1
                                  {kSfxHitBash, -1}, {kSfxHitSlash, kSfxTailSlash}, {-1, -1}};
 const Moveset kGreatsword = {"m_gs_light_left", kGsDef, kGsExit, static_cast<int>(sizeof kGsExit / sizeof *kGsExit), kGsImpact,
                              0.4f, 0.8f, 1.2f, "m_gs_parry_end", 0.0f};
-const Moveset& Ms() { return Wp().rend.FindClip(kGreatsword.detect) >= 0 ? kGreatsword : kSpear; }
+const Def kGhDef[kActs] = {
+    {"idle", "idle", 0.2f, 1.f, 0.f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
+    {"draw", "draw", 0.1f, 1.f, 0.8f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
+    {"default", "m_gh_charge", 0.3f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.5f, -1, 0, 0},
+    {"default_left", "m_gh_charge_left", 0.2f, 1.f, 0.f, 0, 0, -1, 0, kLight2, kHeavy2, 0.5f, -1, 0, 0},
+    {"default_right", "m_gh_charge_right", 0.2f, 1.f, 0.f, 0, 0, -1, 0, kLight3, kHeavy1, 0.5f, -1, 0, 0},
+    {"(unused)", "m_gh_charge_left", 0.2f, 1.f, 0.f, 0, 0, -1, 0, kLight2, kHeavy2, 0.5f, -1, 0, 0},
+    {"(unused)", "m_gh_charge", 0.3f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.5f, -1, 0, 0},
+    {"light_attack_left", "m_gh_light_left", 0.2f, 0.9f, 2.5f, 0.7f, 1.8f, kDefaultLeft, 0.7f, -1, -1, 0, kStrikeStab, 0.3f, 0.2333f, 0.3f},
+    {"light_attack_right", "m_gh_light_right", 0.2f, 0.9f, 2.5f, 0.7f, 1.8f, kDefaultRight, 0.7f, -1, -1, 0, kStrikeStab, 0.35f, 0.3333f, 0.3f},
+    {"light_attack_left_up", "m_gh_light_left_up", 0.15f, 0.9f, 2.5f, 0.75f, 1.8f, kDefault, 0.7f, -1, -1, 0, kStrikeStab, 0.3f, 0.1667f, 0.3f},
+    {"heavy_attack_left", "m_gh_heavy_left", 0.2f, 1.f, 2.25f, 0.65f, kInf, kDefaultLeft, 0.7f, -1, -1, 0, kStrikeHeavySweep, 0.3f, 0.2f, 0.3f},
+    {"heavy_attack_right", "m_gh_heavy_right", 0.2f, 1.f, 2.25f, 0.65f, kInf, kDefault, 0.7f, -1, -1, 0, kStrikeHeavySweep, 0.35f, 0.2333f, 0.3f},
+    {"(unused)", "m_gh_heavy_left", 0.2f, 1.f, 2.25f, 0.65f, kInf, kDefaultLeft, 0.7f, -1, -1, 0, kStrikeHeavySweep, 0.3f, 0.2f, 0.3f},
+    {"push", "m_gh_push", 0.0f, 1.f, 0.8f, 0.3f, kInf, kDefault, 0.45f, -1, -1, 0, kStrikeBash, 0.05f, 0.0333f},
+    {"light_attack_push_left_up", "m_gh_push_left_up", 0.15f, 0.9f, 2.5f, 0.55f, 1.8f, kDefaultLeft, 0.7f, -1, -1, 0, kStrikeSweep, 0.33f, 0.2667f, 0.3f},
+    {"block", "m_gh_parry_pose", 0.1f, 1.f, 0.f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
+};
+const Exit kGhExit[] = {{"draw", "idle", 0.2f},
+                        {"m_gh_light_left", "m_gh_swing_finished", 0.3f},
+                        {"m_gh_light_right", "m_gh_swing_finished", 0.3f},
+                        {"m_gh_light_left_up", "m_gh_swing_finished", 0.3f},
+                        {"m_gh_heavy_left", "m_gh_swing_finished", 0.3f},
+                        {"m_gh_heavy_right", "m_gh_swing_finished", 0.3f},
+                        {"m_gh_push_left_up", "m_gh_swing_finished", 0.3f},
+                        {"m_gh_swing_finished", "idle", 0.3f},
+                        {"m_gh_swing_finished_02", "idle", 0.3f},
+                        {"m_gh_swing_finished_03", "idle", 0.3f},
+                        {"m_gh_push", "idle", 0.3f},
+                        {"m_gh_push_to_parry", "m_gh_parry_pose", 0.1f}};
+const Impact kGhImpact[kActs] = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
+                                 {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash},
+                                 {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash},
+                                 {kSfxHitBash, -1}, {kSfxHitSlash, kSfxTailSlash}, {-1, -1}};
+const Moveset kGreathammer = {"m_gh_light_left", kGhDef, kGhExit, static_cast<int>(sizeof kGhExit / sizeof *kGhExit), kGhImpact,
+                              0.35f, 0.8f, 1.5f, nullptr, 0.2f, 0.35f, "m_gh_push_to_parry", 0.2f, 3};
+const Moveset& Ms() {
+    if (Wp().rend.FindClip(kGreathammer.detect) >= 0) return kGreathammer;
+    return Wp().rend.FindClip(kGreatsword.detect) >= 0 ? kGreatsword : kSpear;
+}
 struct ImpactRec {
     Impact im;
     double t, contact;
@@ -265,6 +310,9 @@ struct HitRec {
 };
 HitRec g_hitQ[8];
 unsigned g_pitchRng = 0x2f6b9e1du;
+unsigned g_finishRng = 0x6d2b79f5u;
+int g_finishTrace[64];
+int g_finishTraceN = 0;
 void PlaySfx(int i, float gain = 1.f) {
     vm::GunSound& s = Wp().meleeSfx[i];
     if (!s.Loaded()) return;
@@ -335,7 +383,7 @@ void HitResult(int hits, const ImpactRec& r, double now) {
     if (slot->on && g_fp) PlayHit(slot->hits, slot->r, now);
     *slot = {true, r.contact > now ? r.contact : now, hits, r};
 }
-void Go(int next, double now, const char* why) {
+void Go(int next, double now, const char* why, const char* clip = nullptr, float fade = -1.f) {
     if (g_log) g_log("melee: %.3f %s -> %s (%s)", now - g.start, Ms().def[g.act].name, Ms().def[next].name, why);
     if (g_traceN < 256) g_trace[g_traceN++] = next;
     if (Swing* s = FindSwing(g_swCur); s && now < s->due) s->id = 0;
@@ -344,9 +392,15 @@ void Go(int next, double now, const char* why) {
     g.start = now;
     g.released = false;
     g.struck = false;
+    g.blkFree = false;
     const Def& nd = Ms().def[next];
-    int c = Wp().rend.FindClip(nd.clip);
-    MPlay(c >= 0 ? c : g_an.idle, now, nd.enter, nd.scale);
+    int c = clip ? Wp().rend.FindClip(clip) : -1;
+    if (c >= 0) {
+        MPlay(c, now, fade >= 0.f ? fade : nd.enter, nd.scale);
+    } else {
+        c = Wp().rend.FindClip(nd.clip);
+        MPlay(c >= 0 ? c : g_an.idle, now, nd.enter, nd.scale);
+    }
     if (IsAttack(next) || next == kPush) {
         Swing* s = &g_sw[0];
         for (Swing& x : g_sw)
@@ -400,6 +454,7 @@ void MeleeStep(vm::Look& l, double now) {
     g.prevAtk = atk;
     if (g.pending && now - g.pressAt > 0.5) g.pending = false;
     bool press = g.pending;
+    if (!blk) g.blkFree = true;
     TryStrike(now);
     const Def& d = Ms().def[g.act];
     const Moveset& ms = Ms();
@@ -415,13 +470,13 @@ void MeleeStep(vm::Look& l, double now) {
             Go(kBlock, now, "block during charge");
         } else {
             if (!atk && !g.released) g.released = true, g.relAt = t;
-            if (g.released && g.relAt <= 0.3) Go(d.lightTo, now, "released <= 0.3 s");
+            if (g.released && g.relAt <= ms.lightUntil) Go(d.lightTo, now, "released early");
             else if (g.released && t >= d.heavyStart) Go(d.heavyTo, now, "released late");
             else if (!g.released && t >= ms.heldHeavy) Go(d.heavyTo, now, "held");
         }
     } else if (g.act == kPush) {
         if (atk && blk && t >= ms.pushStabFrom && t <= ms.pushStabTo) Go(kPushStab, now, "attack + block held");
-        else if (blk && t >= d.blockFrom) Go(kBlock, now, "back to block");
+        else if (blk && t >= d.blockFrom) Go(kBlock, now, "back to block", ms.pushToBlock, ms.pushToBlockFade);
         else if (!blk && press && t >= d.chainStart) g.pending = false, Go(kDefault, now, "press after push");
         else if (t >= d.total) g.act = kIdle, g.start = now;
     } else if (g.act == kBlock) {
@@ -438,7 +493,7 @@ void MeleeStep(vm::Look& l, double now) {
             Go(kPush, now, "press while blocking");
         }
     } else if (IsAttack(g.act)) {
-        if (blk && (t >= d.blockFrom / s || t < d.blockEarly / s)) {
+        if (blk && (t >= d.blockFrom / s || (t < d.blockEarly / s && g.blkFree))) {
             Go(kBlock, now, "block");
         } else if (press && !blk && t >= d.chainStart / s) {
             g.pending = false;
@@ -461,6 +516,17 @@ void MeleeStep(vm::Look& l, double now) {
                     PlayRest(now, e.blend);
                 } else {
                     int to = Wp().rend.FindClip(e.to);
+                    if (ms.finishVariants > 1 && to >= 0 && strstr(e.to, "swing_finished")) {
+                        g_finishRng = g_finishRng * 1664525u + 1013904223u;
+                        int k = static_cast<int>((g_finishRng >> 8) % static_cast<unsigned>(ms.finishVariants));
+                        if (k > 0) {
+                            char nm[64];
+                            snprintf(nm, sizeof nm, "%s_%02d", e.to, k + 1);
+                            int v = Wp().rend.FindClip(nm);
+                            if (v >= 0) to = v;
+                        }
+                        if (g_finishTraceN < 64) g_finishTrace[g_finishTraceN++] = k;
+                    }
                     MPlay(to >= 0 ? to : g_an.idle, now, e.blend);
                 }
                 break;
