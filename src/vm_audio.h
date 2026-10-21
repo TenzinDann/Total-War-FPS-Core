@@ -11,7 +11,6 @@ public:
     void FadeAll();
     void Update();
     void Release();
-    static bool ReadPcm(const wchar_t* path, WAVEFORMATEX* fmt, unsigned char** pcm, unsigned* bytes, char* err, size_t errLen);
     bool Loaded() const { return nPcm_ > 0; }
     int Variants() const { return nPcm_; }
     float Seconds() const;
@@ -19,8 +18,6 @@ private:
     static constexpr int kVoices = 24;
     static constexpr int kMaxVariants = 24;
     bool LoadOne(const wchar_t* wavPath, char* err, size_t errLen);
-    static bool AcquirePcm(const wchar_t* path, WAVEFORMATEX* fmt, unsigned char** pcm, unsigned* bytes, char* err, size_t errLen);
-    static void ReleasePcm(unsigned char* pcm);
     WAVEFORMATEX fmt_ = {};
     unsigned char* pcmV_[kMaxVariants] = {};
     unsigned bytesV_[kMaxVariants] = {};

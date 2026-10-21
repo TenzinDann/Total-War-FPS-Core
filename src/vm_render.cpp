@@ -1,5 +1,4 @@
 #include "vm_render.h"
-#include "hvm_slim.h"
 #include <d3dcompiler.h>
 #include <cmath>
 #include <cstdarg>
@@ -961,15 +960,6 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
     if (!ReadFileAll(path, &data, &len)) {
         SetErr(err, errLen, "model file missing: %ls", path);
         return false;
-    }
-    if (hvmslim::IsV2(data, len)) {
-        unsigned char* v1 = nullptr;
-        size_t v1Len = 0;
-        bool conv = hvmslim::ToV1(data, len, &v1, &v1Len, err, errLen);
-        delete[] data;
-        if (!conv) return false;
-        data = v1;
-        len = v1Len;
     }
     bool ok = false;
     ID3D11Buffer* vb = nullptr;
