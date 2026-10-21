@@ -727,6 +727,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.reloadRefill = IniFloat(ini, L"reload_refill", s.reloadRefill);
     s.reloadEmptyRefill = IniFloat(ini, L"reload_empty_refill", s.reloadEmptyRefill);
     GetPrivateProfileStringW(L"viewmodel", L"weapon_id", s.weaponId, s.weaponId, 64, ini);
+    GetPrivateProfileStringW(L"viewmodel", L"weapon_owner", s.weaponOwner, s.weaponOwner, 160, ini);
     GetPrivateProfileStringW(L"viewmodel", L"anim_sounds", s.animSounds, s.animSounds, 128, ini);
     s.animSoundVolume = IniFloat(ini, L"anim_sound_volume", s.animSoundVolume);
     GetPrivateProfileStringW(L"viewmodel", L"step_foot", s.stepFoot, s.stepFoot, 512, ini);
@@ -964,36 +965,6 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
     if (!ReadFileAll(path, &data, &len)) {
         SetErr(err, errLen, "model file missing: %ls", path);
         return false;
-    }
-    if (hvmslim::IsV3(data, len)) {
-        char relU8[260];
-        bool conv = hvmslim::V3BaseRel(data, len, relU8, sizeof relU8, err, errLen);
-        unsigned char* base = nullptr;
-        size_t baseLen = 0;
-        if (conv) {
-            wchar_t basePath[MAX_PATH * 2];
-            wcsncpy(basePath, path, MAX_PATH - 1);
-            basePath[MAX_PATH - 1] = 0;
-            wchar_t* slash = wcsrchr(basePath, L'\\');
-            if (!slash) slash = wcsrchr(basePath, L'/');
-            if (slash) slash[1] = 0;
-            else basePath[0] = 0;
-            wchar_t relW[260];
-            MultiByteToWideChar(CP_UTF8, 0, relU8, -1, relW, 260);
-            wcsncat(basePath, relW, MAX_PATH * 2 - wcslen(basePath) - 1);
-            if (!ReadFileAll(basePath, &base, &baseLen)) {
-                SetErr(err, errLen, "hvm3: base model missing: %ls", basePath);
-                conv = false;
-            }
-        }
-        unsigned char* v2 = nullptr;
-        size_t v2Len = 0;
-        if (conv) conv = hvmslim::V3ToV2(data, len, base, baseLen, &v2, &v2Len, err, errLen);
-        delete[] base;
-        delete[] data;
-        if (!conv) return false;
-        data = v2;
-        len = v2Len;
     }
     if (hvmslim::IsV2(data, len)) {
         unsigned char* v1 = nullptr;
