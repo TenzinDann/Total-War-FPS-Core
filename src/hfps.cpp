@@ -4754,14 +4754,15 @@ int SetHudRect(void* L) {
     return 0;
 }
 int Ammo(void* L) {
-    int ammo = 0, size = 0;
+    int ammo = 0, size = 0, reserve = -1;
     bool reloading = false;
-    vmgame::AmmoInfo(&ammo, &size, &reloading);
+    vmgame::AmmoInfo(&ammo, &size, &reloading, &reserve);
     f.pushnumber(L, static_cast<float>(ammo));
     f.pushnumber(L, static_cast<float>(size));
     f.pushboolean(L, reloading ? 1 : 0);
     f.pushboolean(L, vmgame::MeleeActive() ? 1 : 0);
-    return 4;
+    f.pushnumber(L, static_cast<float>(reserve));
+    return 5;
 }
 int PushTable(void* L) {
     LONG n = InterlockedIncrement(&g_opens);
