@@ -718,13 +718,6 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     }
     s.meleeSfxMaster = IniFloat(ini, L"melee_sfx_volume", s.meleeSfxMaster);
     s.meleeSfxSwingCut = IniFloat(ini, L"melee_sfx_swing_cut", s.meleeSfxSwingCut ? 1.f : 0.f) != 0.f;
-    {
-        wchar_t rv[64] = L"";
-        GetPrivateProfileStringW(L"viewmodel", L"melee_sfx_swing_rate", L"", rv, 64, ini);
-        float lt = 0.f, hv = 0.f;
-        if (rv[0] && swscanf(rv, L"%f , %f", &lt, &hv) == 2 && lt >= 0.5f && lt <= 1.8f && hv >= 0.5f && hv <= 1.8f)
-            s.meleeSfxSwingRate[0] = lt, s.meleeSfxSwingRate[1] = hv;
-    }
     s.meleeSfxSwingPre = IniFloat(ini, L"melee_sfx_swing_pre", s.meleeSfxSwingPre);
     if (!(s.meleeSfxSwingPre <= 1.f)) s.meleeSfxSwingPre = -1.f;
     s.fireRpm = IniFloat(ini, L"fire_rpm", s.fireRpm);

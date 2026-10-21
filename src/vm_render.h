@@ -186,7 +186,6 @@ struct Settings {
     float meleeSfxPitch[kMeleeSfx][2] = {};
     float meleeSfxMaster = 1.f;
     bool meleeSfxSwingCut = false;
-    float meleeSfxSwingRate[2] = {1.f, 1.f};
     float meleeSfxSwingPre = -1.f;
 };
 struct WorldCam {
