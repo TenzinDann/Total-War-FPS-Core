@@ -1,4 +1,5 @@
 #include "vm_render.h"
+#include "hvm_slim.h"
 #include <d3dcompiler.h>
 #include <cmath>
 #include <cstdarg>
@@ -634,7 +635,8 @@ void IniVec3(const wchar_t* ini, const wchar_t* key, float* v) {
 }
 const wchar_t* const kMeleeSfxNames[kMeleeSfx] = {L"swing", L"swing_layer", L"push", L"hit_stab", L"hit_stab_heavy",
                                                   L"hit_slash", L"hit_slash_heavy", L"hit_bash", L"hit_body", L"hit_gore",
-                                                  L"hit_tail_stab", L"hit_tail_slash", L"block", L"block_tail"};
+                                                  L"hit_tail_stab", L"hit_tail_slash", L"block", L"block_tail",
+                                                  L"hit_slash_light", L"hit_l4", L"hit_heavy"};
 bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (GetFileAttributesW(ini) == INVALID_FILE_ATTRIBUTES) return false;
     s.fovDeg = IniFloat(ini, L"fov", s.fovDeg);
@@ -707,6 +709,12 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
         GetPrivateProfileStringW(L"viewmodel", key, s.meleeSfx[i], s.meleeSfx[i], 512, ini);
         swprintf(key, 64, L"melee_sfx_%ls_volume", kMeleeSfxNames[i]);
         s.meleeSfxVolume[i] = IniFloat(ini, key, s.meleeSfxVolume[i]);
+        swprintf(key, 64, L"melee_sfx_%ls_pitch", kMeleeSfxNames[i]);
+        wchar_t pv[64] = L"";
+        GetPrivateProfileStringW(L"viewmodel", key, L"", pv, 64, ini);
+        float lo = 0.f, hi = 0.f;
+        if (pv[0] && swscanf(pv, L"%f , %f", &lo, &hi) == 2 && lo >= -1200.f && hi <= 1200.f && lo <= hi)
+            s.meleeSfxPitch[i][0] = lo, s.meleeSfxPitch[i][1] = hi;
     }
     s.meleeSfxMaster = IniFloat(ini, L"melee_sfx_volume", s.meleeSfxMaster);
     s.fireRpm = IniFloat(ini, L"fire_rpm", s.fireRpm);
@@ -743,6 +751,10 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
         }
     };
     fracList(L"sprint_steps", s.sprintSteps, s.sprintStepN);
+    s.sprintStepTime = IniFloat(ini, L"sprint_step_time", s.sprintStepTime);
+    s.tacSprintStepTime = IniFloat(ini, L"tac_sprint_step_time", s.tacSprintStepTime);
+    if (!(s.sprintStepTime >= 0.f && s.sprintStepTime <= 2.f)) s.sprintStepTime = 0.f;
+    if (!(s.tacSprintStepTime >= 0.f && s.tacSprintStepTime <= 2.f)) s.tacSprintStepTime = 0.f;
     {
         wchar_t fm[32] = L"";
         GetPrivateProfileStringW(L"viewmodel", L"fire_mode", L"", fm, 32, ini);
@@ -811,20 +823,10 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.flashLight = IniFloat(ini, L"flash_light", s.flashLight);
     s.flashSmoke = IniFloat(ini, L"flash_smoke", s.flashSmoke ? 1.f : 0.f) != 0.f;
     s.flashFlame = IniFloat(ini, L"flash_flame", s.flashFlame ? 1.f : 0.f) != 0.f;
-    s.trailLine = IniFloat(ini, L"trail_line", s.trailLine ? 1.f : 0.f) != 0.f;
-    s.trailLineLife = IniFloat(ini, L"trail_line_life", s.trailLineLife);
-    s.trailLineAlpha = IniFloat(ini, L"trail_line_alpha", s.trailLineAlpha);
-    s.trailLineWidth = IniFloat(ini, L"trail_line_width", s.trailLineWidth);
-    s.trailLineNear = IniFloat(ini, L"trail_line_near", s.trailLineNear);
-    IniVec3(ini, L"trail_line_color", s.trailLineColor);
     s.hitFx = IniFloat(ini, L"hit_fx", s.hitFx ? 1.f : 0.f) != 0.f;
     s.hitFxScale = IniFloat(ini, L"hit_fx_scale", s.hitFxScale);
     s.hitFxAlpha = IniFloat(ini, L"hit_fx_alpha", s.hitFxAlpha);
     IniVec3(ini, L"hit_fx_color", s.hitFxColor);
-    GetPrivateProfileStringW(L"viewmodel", L"hit_sound", s.hitSound, s.hitSound, 512, ini);
-    GetPrivateProfileStringW(L"viewmodel", L"kill_sound", s.killSound, s.killSound, 512, ini);
-    s.hitSoundVolume = IniFloat(ini, L"hit_sound_volume", s.hitSoundVolume);
-    s.killSoundVolume = IniFloat(ini, L"kill_sound_volume", s.killSoundVolume);
     s.flashGas =IniFloat(ini, L"flash_gas", s.flashGas ? 1.f : 0.f) != 0.f;
     GetPrivateProfileStringW(L"viewmodel", L"flash_gas_fx", s.flashGasFx, s.flashGasFx, 128, ini);
     s.flashGasScale = IniFloat(ini, L"flash_gas_scale", s.flashGasScale);
@@ -945,18 +947,10 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (!(s.flashScale > 0.01f && s.flashScale <= 20.f)) s.flashScale = 1.f;
     if (!(s.flashIntensity >= 0.f && s.flashIntensity <= 10.f)) s.flashIntensity = 1.f;
     if (!(s.flashLight >= 0.f && s.flashLight <= 20.f)) s.flashLight = 1.f;
-    if (!(s.trailLineLife > 0.02f && s.trailLineLife <= 10.f)) s.trailLineLife = 1.f;
-    if (!(s.trailLineAlpha >= 0.f && s.trailLineAlpha <= 1.f)) s.trailLineAlpha = 0.7f;
-    if (!(s.trailLineWidth > 0.1f && s.trailLineWidth <= 20.f)) s.trailLineWidth = 2.5f;
-    if (!(s.trailLineNear >= 0.f && s.trailLineNear <= 50.f)) s.trailLineNear = 0.5f;
-    for (float& c : s.trailLineColor)
-        if (!(c >= 0.f && c <= 1.f)) c = 1.f;
     if (!(s.hitFxScale > 0.05f && s.hitFxScale <= 10.f)) s.hitFxScale = 1.f;
     if (!(s.hitFxAlpha >= 0.f && s.hitFxAlpha <= 1.f)) s.hitFxAlpha = 0.85f;
     for (float& c : s.hitFxColor)
         if (!(c >= 0.f && c <= 1.f)) c = 0.f;
-    if (!(s.hitSoundVolume >= 0.f && s.hitSoundVolume <= 2.f)) s.hitSoundVolume = 0.6f;
-    if (!(s.killSoundVolume >= 0.f && s.killSoundVolume <= 2.f)) s.killSoundVolume = 0.4f;
     if (!(s.fovDeg > 10 && s.fovDeg < 150)) s.fovDeg = 55;
     if (!(s.scale > 0.001f && s.scale < 1000)) s.scale = 1;
     return true;
@@ -967,6 +961,15 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
     if (!ReadFileAll(path, &data, &len)) {
         SetErr(err, errLen, "model file missing: %ls", path);
         return false;
+    }
+    if (hvmslim::IsV2(data, len)) {
+        unsigned char* v1 = nullptr;
+        size_t v1Len = 0;
+        bool conv = hvmslim::ToV1(data, len, &v1, &v1Len, err, errLen);
+        delete[] data;
+        if (!conv) return false;
+        data = v1;
+        len = v1Len;
     }
     bool ok = false;
     ID3D11Buffer* vb = nullptr;
@@ -2266,13 +2269,6 @@ void ReadCrossSection(const wchar_t* ini, const wchar_t* sec, CrosshairSettings&
     float oa = IniCross(ini, sec, L"outline_alpha", s.outlineAlpha < 0.f ? -1.f : s.outlineAlpha * 255.f);
     s.outlineAlpha = oa < 0.f ? -1.f : std::fmin(oa / 255.f, 1.f);
     IniCrossColor(ini, sec, L"color", s.color);
-    s.hitMarker = IniCross(ini, sec, L"hit_marker", s.hitMarker ? 1.f : 0.f) != 0.f;
-    s.hitMarkerGap = IniCross(ini, sec, L"hit_marker_gap", s.hitMarkerGap);
-    s.hitMarkerLength = IniCross(ini, sec, L"hit_marker_length", s.hitMarkerLength);
-    s.hitMarkerWidth = IniCross(ini, sec, L"hit_marker_width", s.hitMarkerWidth);
-    s.hitMarkerTime = IniCross(ini, sec, L"hit_marker_time", s.hitMarkerTime);
-    IniCrossColor(ini, sec, L"hit_marker_color", s.hitMarkerColor);
-    IniCrossColor(ini, sec, L"kill_marker_color", s.killMarkerColor);
 }
 }
 bool LoadCrosshair(const wchar_t* ini, CrosshairSettings& s) {
@@ -2296,10 +2292,6 @@ bool LoadCrosshair(const wchar_t* ini, CrosshairSettings& s) {
     if (!(s.spreadHold >= 0.f && s.spreadHold <= 2.f)) s.spreadHold = 0.f;
     if (!(s.fadeStart >= 0.f && s.fadeStart <= 200.f)) s.fadeStart = 0.f;
     if (!(s.fadeEnd >= 0.f && s.fadeEnd <= 200.f)) s.fadeEnd = 0.f;
-    if (!(s.hitMarkerGap >= 0.f && s.hitMarkerGap <= 200.f)) s.hitMarkerGap = 7.f;
-    if (!(s.hitMarkerLength > 0.f && s.hitMarkerLength <= 200.f)) s.hitMarkerLength = 7.f;
-    if (!(s.hitMarkerWidth > 0.f && s.hitMarkerWidth <= 50.f)) s.hitMarkerWidth = 2.f;
-    if (!(s.hitMarkerTime > 0.01f && s.hitMarkerTime <= 3.f)) s.hitMarkerTime = 0.22f;
     return true;
 }
 namespace {
@@ -2486,26 +2478,11 @@ bool MuzzleFlash::InitPipeline(ID3D11Device* dev) {
     SafeRelease(vsb);
     SafeRelease(psb);
     D3D11_BUFFER_DESC bd = {};
-    bd.ByteWidth = sizeof(FlashVertex) * 6 * (kMax + kMaxTracers + 2 * kMaxLines + kMaxImpacts * kImpactQuads);
+    bd.ByteWidth = sizeof(FlashVertex) * 6 * (kMax + kMaxTracers + kMaxImpacts * kImpactQuads);
     bd.Usage = D3D11_USAGE_DYNAMIC;
     bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     ok = ok && SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &vb_));
-    {
-        UINT px[32 * 2];
-        for (int x = 0; x < 32; ++x) {
-            float u = (static_cast<float>(x) + 0.5f) / 32.f - 0.5f;
-            UINT a = static_cast<UINT>(std::exp(-u * u / (2.f * 0.2f * 0.2f)) * 255.f + 0.5f);
-            px[x] = px[32 + x] = 0x00FFFFFFu | (a << 24);
-        }
-        D3D11_TEXTURE2D_DESC td = {};
-        td.Width = 32, td.Height = 2, td.MipLevels = 1, td.ArraySize = 1, td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        td.SampleDesc.Count = 1, td.Usage = D3D11_USAGE_IMMUTABLE, td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        D3D11_SUBRESOURCE_DATA sd = {px, 32 * 4, 0};
-        ID3D11Texture2D* lt = nullptr;
-        ok = ok && SUCCEEDED(dev->CreateTexture2D(&td, &sd, &lt)) && SUCCEEDED(dev->CreateShaderResourceView(lt, nullptr, &lineTex_));
-        SafeRelease(lt);
-    }
     D3D11_BUFFER_DESC cd = {};
     cd.ByteWidth = sizeof(FlashCb);
     cd.Usage = D3D11_USAGE_DYNAMIC;
@@ -2544,17 +2521,6 @@ bool MuzzleFlash::InitPipeline(ID3D11Device* dev) {
     return ok;
 }
 void MuzzleFlash::AddTracer(const float* from, const float* to) {
-    {
-        if (nLines_ >= kMaxLines) {
-            memmove(&lines_[0], &lines_[1], sizeof(Line) * (kMaxLines - 1));
-            --nLines_;
-        }
-        Line& l = lines_[nLines_++];
-        memcpy(l.a, from, sizeof l.a);
-        memcpy(l.b, to, sizeof l.b);
-        l.t0 = -1.0;
-        l.pending = true;
-    }
     if (!tex_[kFlashTexSpark]) return;
     if (nTr_ >= kMaxTracers) {
         memmove(&trs_[0], &trs_[1], sizeof(Tracer) * (kMaxTracers - 1));
@@ -3045,11 +3011,6 @@ void MuzzleFlash::BeginFrame(double now, const Settings& s) {
             trs_[i].pending = false;
             trs_[i].t0 = now;
         }
-    for (int i = 0; i < nLines_; ++i)
-        if (lines_[i].pending) {
-            lines_[i].pending = false;
-            lines_[i].t0 = now;
-        }
     for (int i = 0; i < nImp_; ++i)
         if (imps_[i].pending) {
             imps_[i].pending = false;
@@ -3092,72 +3053,8 @@ float MuzzleFlash::LightLevel(double now) const {
 bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* depth, UINT w, UINT h,
                        bool rtvEncodesSrgb, double now, const MuzzleFrame* fp, const WorldCam* cam, const Settings& s) {
     if (!Loaded() || !ctx || !rtv || w < 16 || h < 16) return false;
-    static FlashVertex verts[(kMax + kMaxTracers + 2 * kMaxLines + kMaxImpacts * kImpactQuads) * 6];
+    static FlashVertex verts[(kMax + kMaxTracers + kMaxImpacts * kImpactQuads) * 6];
     int nv = 0;
-    int lnStart = nv, lnCount = 0;
-    if (cam && lineTex_ && s.trailLine) {
-        float ty = std::tan(cam->fovY * 0.5f), aspect = static_cast<float>(w) / static_cast<float>(h);
-        float hw = std::max(0.5f * s.trailLineWidth * static_cast<float>(h) / 1080.f, 0.5f);
-        auto toCam = [&](const float* p, float* o) {
-            float d[3] = {p[0] - cam->eye[0], p[1] - cam->eye[1], p[2] - cam->eye[2]};
-            o[0] = d[0] * cam->right[0] + d[1] * cam->right[1] + d[2] * cam->right[2];
-            o[1] = d[0] * cam->up[0] + d[1] * cam->up[1] + d[2] * cam->up[2];
-            o[2] = d[0] * cam->fwd[0] + d[1] * cam->fwd[1] + d[2] * cam->fwd[2];
-        };
-        auto seg = [&](const float* p0, const float* p1, float a0, float a1) {
-            float v0[3], v1[3];
-            toCam(p0, v0);
-            toCam(p1, v1);
-            const float zn = 0.05f;
-            if (v0[2] < zn && v1[2] < zn) return;
-            if (v0[2] < zn || v1[2] < zn) {
-                bool first = v0[2] < zn;
-                float* in = first ? v0 : v1;
-                const float* out = first ? v1 : v0;
-                float k = (zn - in[2]) / (out[2] - in[2]);
-                for (int c = 0; c < 3; ++c) in[c] += (out[c] - in[c]) * k;
-                if (first)
-                    a0 += (a1 - a0) * k;
-                else
-                    a1 += (a0 - a1) * k;
-            }
-            float x0 = v0[0] / (v0[2] * ty * aspect), y0 = v0[1] / (v0[2] * ty);
-            float x1 = v1[0] / (v1[2] * ty * aspect), y1 = v1[1] / (v1[2] * ty);
-            float sx = (x1 - x0) * w * 0.5f, sy = (y1 - y0) * h * 0.5f;
-            float sl = std::sqrt(sx * sx + sy * sy);
-            if (sl < 0.5f) return;
-            float px = -sy / sl, py = sx / sl;
-            auto vtx = [&](float x, float y, float off, float u, float a) {
-                return FlashVertex{x + px * off * 2.f / w, y + py * off * 2.f / h, u, 0.5f, s.trailLineColor[0], s.trailLineColor[1],
-                                   s.trailLineColor[2], a, 0.f, 1.f, 0.f};
-            };
-            FlashVertex q4[4] = {vtx(x0, y0, -hw, 0.f, a0), vtx(x0, y0, hw, 1.f, a0), vtx(x1, y1, -hw, 0.f, a1), vtx(x1, y1, hw, 1.f, a1)};
-            const int idx[6] = {0, 1, 2, 2, 1, 3};
-            for (int k = 0; k < 6; ++k) verts[nv++] = q4[idx[k]];
-        };
-        int keep = 0;
-        for (int i = 0; i < nLines_; ++i) {
-            Line l = lines_[i];
-            float age = l.pending || l.t0 < 0 ? 0.f : static_cast<float>(now - l.t0);
-            if (age > s.trailLineLife) continue;
-            lines_[keep++] = l;
-            float f = 1.f - age / s.trailLineLife;
-            float a = s.trailLineAlpha * f * f;
-            float d[3] = {l.b[0] - l.a[0], l.b[1] - l.a[1], l.b[2] - l.a[2]};
-            float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-            if (a <= 0.002f || len < 0.05f) continue;
-            float nearD = std::min(s.trailLineNear, len * 0.5f);
-            if (nearD > 0.01f) {
-                float m[3] = {l.a[0] + d[0] / len * nearD, l.a[1] + d[1] / len * nearD, l.a[2] + d[2] / len * nearD};
-                seg(l.a, m, 0.f, a);
-                seg(m, l.b, a, a);
-            } else {
-                seg(l.a, l.b, a, a);
-            }
-        }
-        nLines_ = keep;
-        lnCount = nv - lnStart;
-    }
     int trStart = nv, trCount = 0;
     if (cam && tex_[kFlashTexSpark]) {
         float ty = std::tan(cam->fovY * 0.5f), aspect = static_cast<float>(w) / static_cast<float>(h);
@@ -3452,10 +3349,6 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
         ctx->PSSetShaderResources(0, 2, none);
         ctx->PSSetShader(ps_, nullptr, 0);
     }
-    if (lnCount) {
-        ctx->PSSetShaderResources(0, 1, &lineTex_);
-        ctx->Draw(static_cast<UINT>(lnCount), static_cast<UINT>(lnStart));
-    }
     if (trCount) {
         ctx->PSSetShaderResources(0, 1, &tex_[kFlashTexSpark]);
         ctx->Draw(static_cast<UINT>(trCount), static_cast<UINT>(trStart));
@@ -3498,8 +3391,6 @@ void MuzzleFlash::Release() {
     SafeRelease(dssDepth_);
     SafeRelease(samp_);
     for (int i = 0; i < kFlashTexCount; ++i) SafeRelease(tex_[i]);
-    SafeRelease(lineTex_);
-    nLines_ = 0;
     scene_ = nullptr;
     burst_ = 0;
     tLastShot_ = -1.0;
@@ -3645,72 +3536,6 @@ bool Crosshair::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT
     if (roundDot && dotOl > 0.f) disc(dotR + dotOl, black);
     for (int i = 0; i < n; ++i) quad(rects[i], 0.f, col);
     if (roundDot) disc(dotR, col);
-    D3D11_MAPPED_SUBRESOURCE m;
-    if (FAILED(ctx->Map(vb_, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
-    memcpy(m.pData, v, sizeof(CrossVertex) * nv);
-    ctx->Unmap(vb_, 0);
-    StateBackup bk;
-    bk.Save(ctx);
-    D3D11_VIEWPORT vp = {0.f, 0.f, static_cast<float>(w), static_cast<float>(h), 0.f, 1.f};
-    ctx->RSSetViewports(1, &vp);
-    ctx->RSSetState(rs_);
-    ctx->OMSetRenderTargets(1, &rtv, nullptr);
-    const float bf[4] = {0, 0, 0, 0};
-    ctx->OMSetBlendState(bs_, bf, 0xffffffff);
-    ctx->OMSetDepthStencilState(dss_, 0);
-    UINT stride = sizeof(CrossVertex), off = 0;
-    ctx->IASetVertexBuffers(0, 1, &vb_, &stride, &off);
-    ctx->IASetInputLayout(layout_);
-    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx->VSSetShader(vs_, nullptr, 0);
-    ctx->PSSetShader(ps_, nullptr, 0);
-    ctx->GSSetShader(nullptr, nullptr, 0);
-    ctx->HSSetShader(nullptr, nullptr, 0);
-    ctx->DSSetShader(nullptr, nullptr, 0);
-    ctx->Draw(static_cast<UINT>(nv), 0);
-    bk.Restore(ctx);
-    return true;
-}
-bool Crosshair::DrawHitMarker(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool rtvEncodesSrgb,
-                              const CrosshairSettings& s, float age, bool kill) {
-    if (!s.hitMarker || !ctx || !rtv || w < 16 || h < 16 || failed_ || !(age >= 0.f) || age >= s.hitMarkerTime) return false;
-    ID3D11Device* dev = nullptr;
-    ctx->GetDevice(&dev);
-    if (!dev) return false;
-    if (dev != dev_ || !vs_) {
-        if (!Init(dev)) {
-            failed_ = true;
-            dev->Release();
-            return false;
-        }
-    }
-    dev->Release();
-    float fade = age < s.hitMarkerTime * 0.5f ? 1.f : 1.f - (age - s.hitMarkerTime * 0.5f) / (s.hitMarkerTime * 0.5f);
-    const float* src = kill ? s.killMarkerColor : s.hitMarkerColor;
-    float col[4] = {src[0], src[1], src[2], src[3] * fade};
-    if (rtvEncodesSrgb)
-        for (int c = 0; c < 3; ++c) col[c] = SrgbToLinear(col[c]);
-    const float black[4] = {0.f, 0.f, 0.f, (s.outlineAlpha >= 0.f ? s.outlineAlpha : src[3]) * fade * 0.8f};
-    float k = static_cast<float>(h) / 1080.f;
-    float g0 = s.hitMarkerGap * k, g1 = (s.hitMarkerGap + s.hitMarkerLength) * k, hw = std::fmax(0.5f, s.hitMarkerWidth * k * 0.5f);
-    float cx = w * 0.5f, cy = h * 0.5f;
-    CrossVertex v[48];
-    int nv = 0;
-    auto line = [&](float dx, float dy, float e, const float* c4) {
-        float ax = cx + dx * (g0 - e), ay = cy + dy * (g0 - e), bx = cx + dx * (g1 + e), by = cy + dy * (g1 + e);
-        float nx = -dy * (hw + e), ny = dx * (hw + e);
-        float p[4][2] = {{ax + nx, ay + ny}, {ax - nx, ay - ny}, {bx + nx, by + ny}, {bx - nx, by - ny}};
-        CrossVertex q[4];
-        for (int i = 0; i < 4; ++i) q[i] = {p[i][0] / w * 2.f - 1.f, 1.f - p[i][1] / h * 2.f, c4[0], c4[1], c4[2], c4[3], 0, 0, 0};
-        const int idx[6] = {0, 1, 2, 2, 1, 3};
-        for (int i = 0; i < 6; ++i) v[nv++] = q[idx[i]];
-    };
-    const float d = 0.70710678f;
-    const float dirs[4][2] = {{d, d}, {-d, d}, {d, -d}, {-d, -d}};
-    float ol = s.outline > 0.f ? std::fmax(1.f, std::round(s.outline * k)) : 0.f;
-    if (ol > 0.f)
-        for (const auto& q : dirs) line(q[0], q[1], ol, black);
-    for (const auto& q : dirs) line(q[0], q[1], 0.f, col);
     D3D11_MAPPED_SUBRESOURCE m;
     if (FAILED(ctx->Map(vb_, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
     memcpy(m.pData, v, sizeof(CrossVertex) * nv);

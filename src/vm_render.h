@@ -4,7 +4,7 @@
 #include <d3d11.h>
 #include <cstdint>
 namespace vm {
-constexpr int kMeleeSfx = 14;
+constexpr int kMeleeSfx = 17;
 extern const wchar_t* const kMeleeSfxNames[kMeleeSfx];
 struct Settings {
     float fovDeg = 55.0f;
@@ -83,6 +83,7 @@ struct Settings {
     int sprintStepN = 0;
     float tacSprintSteps[16] = {};
     int tacSprintStepN = 0;
+    float sprintStepTime = 0.f, tacSprintStepTime = 0.f;
     int fireMode = 0;
     float spinUpTime = 0.5f;
     float spinKeep = 0.8f;
@@ -104,22 +105,10 @@ struct Settings {
     float flashLight = 1.0f;
     bool flashSmoke = true;
     bool flashFlame = true;
-    bool trailLine = false;
-    float trailLineLife = 1.0f;
-    float trailLineAlpha = 0.7f;
-    float trailLineWidth = 2.5f;
-    float trailLineNear = 0.5f;
-    float trailLineColor[3] = {0.86f, 0.92f, 1.0f};
     bool hitFx = true;
     float hitFxScale = 1.0f;
     float hitFxAlpha = 0.85f;
     float hitFxColor[3] = {0.42f, 0.03f, 0.02f};
-    wchar_t hitSound[512] = L"..\\_ref_sfx\\body01.wav;..\\_ref_sfx\\body02.wav;..\\_ref_sfx\\body03.wav;..\\_ref_sfx\\body04.wav;"
-                            L"..\\_ref_sfx\\body05.wav;..\\_ref_sfx\\body06.wav;..\\_ref_sfx\\body07.wav;..\\_ref_sfx\\body08.wav";
-    wchar_t killSound[512] = L"..\\_ref_sfx\\gore01.wav;..\\_ref_sfx\\gore02.wav;..\\_ref_sfx\\gore03.wav;..\\_ref_sfx\\gore04.wav;"
-                             L"..\\_ref_sfx\\gore05.wav;..\\_ref_sfx\\gore06.wav";
-    float hitSoundVolume = 0.6f;
-    float killSoundVolume = 0.4f;
     bool flashGas = false;
     wchar_t flashGasFx[128] = L"";
     float flashGasScale = 1.0f;
@@ -192,8 +181,9 @@ struct Settings {
     float shieldModelMetal = 1.f;
     float meleeStrikeLead = 0.25f;
     wchar_t meleeSfx[kMeleeSfx][512] = {};
-    float meleeSfxVolume[kMeleeSfx] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f,
-                                       -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
+    float meleeSfxVolume[kMeleeSfx] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f,
+                                       -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
+    float meleeSfxPitch[kMeleeSfx][2] = {};
     float meleeSfxMaster = 1.f;
 };
 struct WorldCam {
@@ -258,13 +248,6 @@ struct CrosshairSettings {
     float fadeStart = 0.0f;
     float fadeEnd = 0.0f;
     float color[4] = {0.0f, 1.0f, 0.0f, 0.9f};
-    bool hitMarker = true;
-    float hitMarkerGap = 7.0f;
-    float hitMarkerLength = 7.0f;
-    float hitMarkerWidth = 2.0f;
-    float hitMarkerTime = 0.22f;
-    float hitMarkerColor[4] = {1.0f, 1.0f, 1.0f, 0.95f};
-    float killMarkerColor[4] = {1.0f, 0.22f, 0.18f, 0.95f};
 };
 bool LoadCrosshair(const wchar_t* ini, CrosshairSettings& s);
 class MuzzleFlash {
@@ -284,7 +267,6 @@ public:
     bool GasLoaded() const { return tex_[5] && tex_[6]; }
     int LiveTracers() const { return nTr_; }
     int LiveImpacts() const { return nImp_; }
-    int LiveLines() const { return nLines_; }
     int Live() const { return n_; }
     void Dump(double now) const;
     void Seed(unsigned seed) { rng_ = seed ? seed : 1u; }
@@ -356,14 +338,6 @@ private:
     static constexpr int kMaxTracers = 24;
     Tracer trs_[kMaxTracers];
     int nTr_ = 0;
-    struct Line {
-        float a[3], b[3];
-        double t0;
-        bool pending;
-    };
-    static constexpr int kMaxLines = 64;
-    Line lines_[kMaxLines];
-    int nLines_ = 0;
     struct Impact {
         float p[3], d[3];
         double t0;
@@ -374,7 +348,6 @@ private:
     static constexpr int kImpactQuads = 10;
     Impact imps_[kMaxImpacts];
     int nImp_ = 0;
-    ID3D11ShaderResourceView* lineTex_ = nullptr;
     static constexpr int kMax = 160;
     P parts_[kMax];
     int n_ = 0;
@@ -494,8 +467,6 @@ class Crosshair {
 public:
     bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool rtvEncodesSrgb,
               const CrosshairSettings& s, float spread = 0.f, float alpha = 1.f);
-    bool DrawHitMarker(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool rtvEncodesSrgb,
-                       const CrosshairSettings& s, float age, bool kill);
     void Release();
 private:
     bool Init(ID3D11Device* dev);
