@@ -100,6 +100,7 @@ struct Settings {
     bool crossHip = true, crossAds = false;
     float crossScale = 1.f;
     wchar_t flashFx[128] = L"";
+    wchar_t effectFx[128] = L"..\\_fx";
     float flashScale = 1.0f;
     float flashIntensity = 1.0f;
     float flashLight = 1.0f;
@@ -254,7 +255,7 @@ struct CrosshairSettings {
 bool LoadCrosshair(const wchar_t* ini, CrosshairSettings& s);
 class MuzzleFlash {
 public:
-    bool Load(ID3D11Device* dev, const wchar_t* fxDir, const wchar_t* gasDir, char* err, size_t errLen);
+    bool Load(ID3D11Device* dev, const wchar_t* fxDir, const wchar_t* effectDir, const wchar_t* gasDir, char* err, size_t errLen);
     void Trigger(float ads = 0.f);
     void AddTracer(const float* from, const float* to);
     void AddImpact(const float* pos, const float* dir, bool kill);
@@ -265,7 +266,7 @@ public:
     void SetScene(ID3D11ShaderResourceView* srv, bool gamma) { scene_ = srv; sceneGamma_ = gamma; }
     bool HasDistortion() const;
     void Release();
-    bool Loaded() const { return tex_[0] != nullptr; }
+    bool Loaded() const { return vs_ != nullptr; }
     bool GasLoaded() const { return tex_[5] && tex_[6]; }
     int LiveTracers() const { return nTr_; }
     int LiveImpacts() const { return nImp_; }

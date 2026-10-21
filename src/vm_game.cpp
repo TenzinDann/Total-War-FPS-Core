@@ -295,6 +295,12 @@ Weapon g_w[kMaxModels];
 inline Weapon& Wp() { return g_w[g_modelIdx]; }
 volatile LONG g_roster[kMaxModels] = {};
 volatile LONG g_rosterN = 0;
+constexpr int kSlots = 4;
+volatile LONG g_slot[kSlots] = {-1, -1, -1, -1};
+bool g_loadoutAll = false;
+constexpr double kUnloadDelay = 3.0;
+double g_unloadAt[kMaxModels] = {};
+int g_unloadPending = 0;
 volatile LONG g_spent[kMaxModels] = {};
 FILETIME g_armoryTime = {};
 volatile LONG g_reqRoster = 0;
@@ -1419,18 +1425,20 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
         }
     }
     w.flash.Release();
-    if (w.set.flashFx[0]) {
+    if (w.set.flashFx[0] || w.set.effectFx[0] || (w.set.flashGas && w.set.flashGasFx[0])) {
         err[0] = 0;
-        swprintf(path, MAX_PATH * 2, L"%ls\\%ls", dir, w.set.flashFx);
-        wchar_t gas[MAX_PATH * 2] = L"";
+        wchar_t eff[MAX_PATH * 2] = L"", gas[MAX_PATH * 2] = L"";
+        path[0] = 0;
+        if (w.set.flashFx[0]) swprintf(path, MAX_PATH * 2, L"%ls\\%ls", dir, w.set.flashFx);
+        if (w.set.effectFx[0]) swprintf(eff, MAX_PATH * 2, L"%ls\\%ls", dir, w.set.effectFx);
         if (w.set.flashGas && w.set.flashGasFx[0]) swprintf(gas, MAX_PATH * 2, L"%ls\\%ls", dir, w.set.flashGasFx);
-        if (w.flash.Load(dev, path, gas, err, sizeof err))
-            g_log("viewmodel: [%d] muzzle flash = ref AK first-person layers from %ls (scale %.2f, intensity %.2f, light %.2f, "
-                  "smoke %d, flame %d); ref gas %d from %ls (scale %.2f, alpha %.2f)",
+        if (w.flash.Load(dev, path, eff, gas, err, sizeof err))
+            g_log("viewmodel: [%d] muzzle fx: flame from %ls (scale %.2f, intensity %.2f, light %.2f, smoke %d, flame %d); "
+                  "tracer / hit mist from %ls; gas %d from %ls (scale %.2f, alpha %.2f)",
                   idx, w.set.flashFx, w.set.flashScale, w.set.flashIntensity, w.set.flashLight, w.set.flashSmoke, w.set.flashFlame,
-                  w.flash.GasLoaded(), w.set.flashGasFx, w.set.flashGasScale, w.set.flashGasAlpha);
+                  w.set.effectFx, w.flash.GasLoaded(), w.set.flashGasFx, w.set.flashGasScale, w.set.flashGasAlpha);
         else
-            g_log("viewmodel: [%d] muzzle flash %ls failed: %s", idx, w.set.flashFx, err);
+            g_log("viewmodel: [%d] muzzle fx failed: %s", idx, err);
     }
     w.shells.Release();
     if (w.set.shellEject) {
@@ -1671,6 +1679,29 @@ bool EnsureWeapon(int idx, ID3D11Device* dev) {
     }
     return true;
 }
+bool Carried(int i) {
+    for (LONG k = 0; k < g_rosterN; ++k)
+        if (g_roster[k] == i) return true;
+    return false;
+}
+void UnloadWeapon(int i) {
+    Weapon& w = g_w[i];
+    bool had = w.rend.Ready();
+    w.rend.Release();
+    vm::GunSound* all[18] = {&w.gun, &w.gunAds, &w.mech, &w.mechAds, &w.lfe, &w.atmo, &w.tail,
+                             &w.stepFoot, &w.stepRun, &w.stepSprint, &w.stepRattle, &w.spinUp, &w.spinLoop, &w.spinDown,
+                             &w.lastShot, &w.casing, &w.casingAds, &w.shellLand};
+    for (vm::GunSound* gs : all) gs->Release();
+    for (int k = 0; k < w.nAnim; ++k) w.anim[k].snd.Release();
+    w.nAnim = 0;
+    for (vm::GunSound& m : w.meleeSfx) m.Release();
+    w.flash.Release();
+    w.shells.Release();
+    w.fxDirty = true;
+    w.tailPending = false;
+    PrefetchDiscard(i);
+    if (had) g_log("weapon: unloaded model %d %ls (not carried)", i, w.set.weaponId);
+}
 void RosterStep(ID3D11Device* dev) {
     if (!InterlockedExchange(&g_reqRoster, 0)) return;
     wchar_t path[MAX_PATH * 2];
@@ -1679,7 +1710,7 @@ void RosterStep(ID3D11Device* dev) {
     wchar_t* slash = wcsrchr(path, L'\\');
     wcscpy(slash ? slash + 1 : path, L"hero_fps_armory.txt");
     static char owned[kMaxModels * 64];
-    char mode[32] = "";
+    char mode[32] = "", loadout[kSlots * 64 + 8] = "";
     owned[0] = 0;
     if (FILE* f = _wfopen(path, L"r")) {
         static char line[kMaxModels * 64 + 64];
@@ -1688,6 +1719,7 @@ void RosterStep(ID3D11Device* dev) {
             while (n && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' ')) line[--n] = 0;
             if (!strncmp(line, "mode=", 5)) snprintf(mode, sizeof mode, "%s", line + 5);
             if (!strncmp(line, "owned=", 6)) snprintf(owned, sizeof owned, "%s", line + 6);
+            if (!strncmp(line, "loadout=", 8)) snprintf(loadout, sizeof loadout, "%s", line + 8);
         }
         fclose(f);
     }
@@ -1710,20 +1742,73 @@ void RosterStep(ID3D11Device* dev) {
         }
         return false;
     };
-    LONG n = 0;
-    for (int i = 0; i < g_modelCount; ++i) {
+    auto usable = [&](int i) {
         const vm::Settings& s = g_w[i].set;
-        if (s.weaponId[0] && (!campaign || s.weaponDefault || ownedHas(s.weaponId))) g_roster[n++] = i;
+        return s.weaponId[0] && (!campaign || s.weaponDefault || ownedHas(s.weaponId));
+    };
+    LONG n = 0;
+    LONG slot[kSlots] = {-1, -1, -1, -1};
+    const char* from = "all usable";
+    if (g_loadoutAll) {
+        for (int i = 0; i < g_modelCount; ++i)
+            if (usable(i)) g_roster[n++] = i;
+    } else {
+        if (!(campaign && loadout[0])) {
+            wchar_t w[kSlots * 64 + 8] = L"";
+            from = "ini loadout_default";
+            if (!campaign) {
+                GetPrivateProfileStringW(L"viewmodel", L"loadout_custom", L"", w, kSlots * 64 + 8, g_ini);
+                if (w[0]) from = "ini loadout_custom";
+            }
+            if (!w[0]) GetPrivateProfileStringW(L"viewmodel", L"loadout_default", L"", w, kSlots * 64 + 8, g_ini);
+            snprintf(loadout, sizeof loadout, "%ls", w);
+        } else {
+            from = "armory file";
+        }
+        const char* p = loadout;
+        for (int k = 0; k < kSlots; ++k) {
+            const char* e = p;
+            while (*e && *e != ',') ++e;
+            char id[64];
+            size_t len = static_cast<size_t>(e - p) < sizeof id - 1 ? static_cast<size_t>(e - p) : sizeof id - 1;
+            memcpy(id, p, len);
+            id[len] = 0;
+            while (len && id[len - 1] == ' ') id[--len] = 0;
+            const char* idp = id;
+            while (*idp == ' ') ++idp;
+            if (*idp) {
+                wchar_t wid[64];
+                MultiByteToWideChar(CP_UTF8, 0, idp, -1, wid, 64);
+                for (int i = 0; i < g_modelCount && slot[k] < 0; ++i) {
+                    bool dup = false;
+                    for (int j = 0; j < k; ++j) dup |= slot[j] == i;
+                    if (!dup && !wcscmp(g_w[i].set.weaponId, wid) && usable(i)) slot[k] = i;
+                }
+                if (slot[k] < 0) g_log("weapon: slot %d '%s' not usable here (not owned / not in models= / duplicate) - left empty", k + 1, idp);
+            }
+            p = *e ? e + 1 : e;
+        }
+        for (int k = 0; k < kSlots; ++k)
+            if (slot[k] >= 0) g_roster[n++] = slot[k];
+        if (!n) {
+            from = "first usable (no loadout resolved)";
+            for (int i = 0; i < g_modelCount && n < kSlots; ++i)
+                if (usable(i)) slot[n] = i, g_roster[n++] = i;
+        }
     }
     if (!n) g_roster[n++] = g_modelIdx;
+    for (int k = 0; k < kSlots; ++k) InterlockedExchange(&g_slot[k], slot[k]);
     InterlockedExchange(&g_rosterN, n);
-    g_log("weapon: roster %ld (armory file %s, mode '%s', owned '%s')", n, mode[0] || owned[0] ? "found" : "missing", mode, owned);
+    g_log("weapon: roster %ld from %s (armory file %s, mode '%s', owned '%s', loadout '%s')", n, from, mode[0] || owned[0] ? "found" : "missing",
+          mode, owned, loadout);
     bool curOk = false;
     for (LONG k = 0; k < n; ++k) {
         int i = g_roster[k];
         g_log("weapon:   %ld = model %d %ls (%ls)", k + 1, i, g_models[i], g_w[i].set.weaponId);
         if (i == g_modelIdx) curOk = true;
     }
+    if (!g_loadoutAll)
+        g_log("weapon: slots 1 primary %d / 2 primary %d / 3 pistol %d / 4 melee %d (model index, -1 = empty)", slot[0], slot[1], slot[2], slot[3]);
     g_preloadNext = 0;
     PrefetchQueue(g_roster, n);
     if (!curOk && g_sw.phase == 0 && EnsureWeapon(g_roster[0], dev)) {
@@ -1733,8 +1818,30 @@ void RosterStep(ID3D11Device* dev) {
         MagApply();
         g_log("weapon: current model not usable here -> %ls", g_models[g_modelIdx]);
     }
+    int keep = g_sw.phase ? g_sw.target : -1;
+    for (int i = 0; i < g_modelCount; ++i) {
+        if (i == g_modelIdx || i == keep || Carried(i)) continue;
+        g_unloadAt[i] = 0;
+        if (g_w[i].rend.Ready()) UnloadWeapon(i);
+    }
+}
+void UnloadStep() {
+    if (!g_unloadPending) return;
+    double now = Now();
+    int left = 0;
+    for (int i = 0; i < g_modelCount; ++i) {
+        if (g_unloadAt[i] <= 0) continue;
+        if (now < g_unloadAt[i]) {
+            ++left;
+            continue;
+        }
+        g_unloadAt[i] = 0;
+        if (i != g_modelIdx && !(g_sw.phase && g_sw.target == i) && !Carried(i)) UnloadWeapon(i);
+    }
+    g_unloadPending = left;
 }
 void PreloadStep(ID3D11Device* dev) {
+    UnloadStep();
     if (g_preloadNext < 0 || g_sw.phase) return;
     while (g_preloadNext < g_rosterN) {
         int i = g_roster[g_preloadNext];
@@ -1775,7 +1882,12 @@ void SwitchStep(ID3D11Device* dev) {
     if (g_sw.phase == 1 && now >= g_sw.until) {
         int k = g_sw.target;
         if (EnsureWeapon(k, dev)) {
+            int old = g_modelIdx;
             g_modelIdx = k;
+            if (old != k && !Carried(old)) {
+                g_unloadAt[old] = now + kUnloadDelay;
+                ++g_unloadPending;
+            }
             AnimReset(now);
             MagApply();
             int c = Wp().rend.FindClip("draw");
@@ -2322,9 +2434,16 @@ void Tracer(const float from[3], const float to[3]) {
 }
 void SelectWeapon(int n) {
     if (!Enabled() || !g_fp) return;
-    LONG cnt = g_rosterN;
-    if (n < 1 || n > cnt) return;
-    LONG idx = g_roster[n - 1];
+    LONG idx;
+    if (g_loadoutAll) {
+        LONG cnt = g_rosterN;
+        if (n < 1 || n > cnt) return;
+        idx = g_roster[n - 1];
+    } else {
+        if (n < 1 || n > kSlots) return;
+        idx = g_slot[n - 1];
+        if (idx < 0) return;
+    }
     if (g_spent[idx]) return;
     InterlockedExchange(&g_wantIdx, idx);
     InterlockedExchange(&g_reqWeapon, idx + 1);
@@ -2332,10 +2451,11 @@ void SelectWeapon(int n) {
 void CycleWeapon(int dir) {
     if (!Enabled() || !g_fp) return;
     LONG cnt = g_rosterN;
-    if (cnt < 2) return;
-    LONG want = g_wantIdx, pos = 0;
+    if (cnt < 1) return;
+    LONG want = g_wantIdx, pos = -1;
     for (LONG k = 0; k < cnt; ++k)
         if (g_roster[k] == want) pos = k;
+    if (pos < 0) pos = dir > 0 ? cnt - 1 : 0;
     LONG idx = want;
     for (LONG step = 0; step < cnt; ++step) {
         pos = (pos + (dir > 0 ? 1 : cnt - 1)) % cnt;

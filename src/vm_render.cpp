@@ -880,7 +880,8 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
         if (!(*v == 0.f || (*v >= 0.01f && *v <= 2.f))) *v = 0.f;
     {
         wchar_t buf[128];
-        GetPrivateProfileStringW(L"viewmodel", L"ads_curve_time", L"", buf, 128, ini);
+        GetPrivateProfileStringW(L"viewmodel", L"ads_timing", L"", buf, 128, ini);
+        if (!buf[0]) GetPrivateProfileStringW(L"viewmodel", L"ads_curve_time", L"", buf, 128, ini);
         float t[4];
         if (buf[0]) {
             bool ok = swscanf(buf, L"%f , %f , %f , %f", &t[0], &t[1], &t[2], &t[3]) == 4;
@@ -921,6 +922,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     IniVec3(ini, L"muzzle_axis", s.muzzleAxis);
     IniVec3(ini, L"muzzle_up", s.muzzleUp);
     GetPrivateProfileStringW(L"viewmodel", L"flash_fx", s.flashFx, s.flashFx, 128, ini);
+    GetPrivateProfileStringW(L"viewmodel", L"effect_fx", s.effectFx, s.effectFx, 128, ini);
     s.flashScale = IniFloat(ini, L"flash_scale", s.flashScale);
     s.flashIntensity = IniFloat(ini, L"flash_intensity", s.flashIntensity);
     s.flashLight = IniFloat(ini, L"flash_light", s.flashLight);
@@ -2479,9 +2481,9 @@ struct FlashCb {
 constexpr int kFlashTexVent = 0, kFlashTexFire = 1, kFlashTexGlow = 2, kFlashTexSmoke = 3, kFlashTexSpark = 4;
 constexpr int kFlashTexGasJet = 5, kFlashTexGasPuff = 6;
 constexpr int kFlashTexDistRing = 7, kFlashTexDistHaze = 8, kFlashTexGasBall = 9, kFlashTexGasWisp = 10, kFlashTexCount = 11;
-const wchar_t* const kFlashTexNames[kFlashTexCount] = {L"ref_flash", L"fire_particle_4", L"particle_flare_004", L"ref_mist",
-                                                       L"spark", L"ref_gas_jet", L"ref_gas_puff", L"ref_dist_ring", L"ref_dist_haze",
-                                                       L"ref_gas_ball", L"ref_gas_wisp"};
+const wchar_t* const kFlashTexNames[kFlashTexCount] = {L"flash_vent", L"flash_fire", L"flash_glow", L"hit_mist",
+                                                       L"tracer", L"gas_jet", L"gas_puff", L"dist_ring", L"dist_haze",
+                                                       L"gas_ball", L"gas_wisp"};
 constexpr float kTracerSpeed = 13000.f * 0.0254f, kTracerMaxLen = 500.f * 0.0254f, kTracerHalfWidth = 3.f * 0.0254f;
 ID3D11ShaderResourceView* LoadDdsBc(ID3D11Device* dev, const wchar_t* path, char* err, size_t errLen) {
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -2695,9 +2697,9 @@ void MuzzleFlash::AddImpact(const float* pos, const float* dir, bool kill) {
     rng_ = rng_ * 1664525u + 1013904223u;
     m.seed = rng_ ? rng_ : 1u;
 }
-bool MuzzleFlash::Load(ID3D11Device* dev, const wchar_t* fxDir, const wchar_t* gasDir, char* err, size_t errLen) {
+bool MuzzleFlash::Load(ID3D11Device* dev, const wchar_t* fxDir, const wchar_t* effectDir, const wchar_t* gasDir, char* err, size_t errLen) {
     Release();
-    if (!dev || !fxDir || !fxDir[0]) return false;
+    if (!dev) return false;
     dev_ = dev;
     if (!InitPipeline(dev)) {
         snprintf(err, errLen, "flash pipeline init failed");
@@ -2705,16 +2707,13 @@ bool MuzzleFlash::Load(ID3D11Device* dev, const wchar_t* fxDir, const wchar_t* g
         return false;
     }
     for (int i = 0; i < 5; ++i) {
+        const wchar_t* d = i == kFlashTexSmoke || i == kFlashTexSpark ? effectDir : fxDir;
+        if (!d || !d[0]) continue;
         wchar_t path[MAX_PATH * 2];
-        swprintf(path, MAX_PATH * 2, L"%ls\\%ls.dds", fxDir, kFlashTexNames[i]);
+        swprintf(path, MAX_PATH * 2, L"%ls\\%ls.dds", d, kFlashTexNames[i]);
         char e[256] = {};
         tex_[i] = LoadDdsBc(dev, path, e, sizeof e);
-        if (!tex_[i] && i != kFlashTexSmoke && i != kFlashTexSpark) {
-            snprintf(err, errLen, "%s", e);
-            Release();
-            return false;
-        }
-        swprintf(path, MAX_PATH * 2, L"%ls\\%ls.sheet", fxDir, kFlashTexNames[i]);
+        swprintf(path, MAX_PATH * 2, L"%ls\\%ls.sheet", d, kFlashTexNames[i]);
         LoadSheet(path, sheet_[i]);
     }
     for (int i = kFlashTexGasJet; gasDir && gasDir[0] && i < kFlashTexCount; ++i) {
