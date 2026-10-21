@@ -1,4 +1,5 @@
 #include "vm_audio.h"
+#include "flac_decode.h"
 #include <xaudio2.h>
 #include <cstdio>
 #include <cstdlib>
@@ -50,6 +51,85 @@ double NowS() {
     QueryPerformanceCounter(&c);
     return static_cast<double>(c.QuadPart) / static_cast<double>(f.QuadPart);
 }
+struct PcmEntry {
+    wchar_t path[MAX_PATH * 2];
+    DWORD sizeLo;
+    FILETIME stamp;
+    WAVEFORMATEX fmt;
+    unsigned char* pcm;
+    unsigned bytes;
+    int refs;
+};
+PcmEntry* g_pcm = nullptr;
+int g_pcmN = 0, g_pcmCap = 0;
+SRWLOCK g_pcmLock = SRWLOCK_INIT;
+int FindPcm(const wchar_t* full, const WIN32_FILE_ATTRIBUTE_DATA& fa) {
+    for (int i = 0; i < g_pcmN; ++i)
+        if (g_pcm[i].sizeLo == fa.nFileSizeLow && !CompareFileTime(&g_pcm[i].stamp, &fa.ftLastWriteTime) && !_wcsicmp(g_pcm[i].path, full))
+            return i;
+    return -1;
+}
+}
+bool GunSound::AcquirePcm(const wchar_t* path, WAVEFORMATEX* fmt, unsigned char** pcm, unsigned* bytes, char* err, size_t errLen) {
+    wchar_t full[MAX_PATH * 2];
+    WIN32_FILE_ATTRIBUTE_DATA fa = {};
+    DWORD n = GetFullPathNameW(path, MAX_PATH * 2, full, nullptr);
+    if (!n || n >= MAX_PATH * 2 || !GetFileAttributesExW(full, GetFileExInfoStandard, &fa))
+        return ReadPcm(path, fmt, pcm, bytes, err, errLen);
+    AcquireSRWLockExclusive(&g_pcmLock);
+    int i = FindPcm(full, fa);
+    if (i >= 0) {
+        ++g_pcm[i].refs;
+        *fmt = g_pcm[i].fmt;
+        *pcm = g_pcm[i].pcm;
+        *bytes = g_pcm[i].bytes;
+        ReleaseSRWLockExclusive(&g_pcmLock);
+        return true;
+    }
+    ReleaseSRWLockExclusive(&g_pcmLock);
+    if (!ReadPcm(full, fmt, pcm, bytes, err, errLen)) return false;
+    AcquireSRWLockExclusive(&g_pcmLock);
+    i = FindPcm(full, fa);
+    if (i >= 0) {
+        free(*pcm);
+        ++g_pcm[i].refs;
+        *fmt = g_pcm[i].fmt;
+        *pcm = g_pcm[i].pcm;
+        *bytes = g_pcm[i].bytes;
+    } else {
+        if (g_pcmN == g_pcmCap) {
+            int cap = g_pcmCap ? g_pcmCap * 2 : 256;
+            PcmEntry* grown = static_cast<PcmEntry*>(realloc(g_pcm, sizeof(PcmEntry) * cap));
+            if (grown) g_pcm = grown, g_pcmCap = cap;
+        }
+        if (g_pcmN < g_pcmCap) {
+            PcmEntry& e = g_pcm[g_pcmN++];
+            wcscpy(e.path, full);
+            e.sizeLo = fa.nFileSizeLow;
+            e.stamp = fa.ftLastWriteTime;
+            e.fmt = *fmt;
+            e.pcm = *pcm;
+            e.bytes = *bytes;
+            e.refs = 1;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_pcmLock);
+    return true;
+}
+void GunSound::ReleasePcm(unsigned char* pcm) {
+    if (!pcm) return;
+    AcquireSRWLockExclusive(&g_pcmLock);
+    for (int i = 0; i < g_pcmN; ++i) {
+        if (g_pcm[i].pcm != pcm) continue;
+        if (--g_pcm[i].refs <= 0) {
+            free(pcm);
+            g_pcm[i] = g_pcm[--g_pcmN];
+        }
+        ReleaseSRWLockExclusive(&g_pcmLock);
+        return;
+    }
+    ReleaseSRWLockExclusive(&g_pcmLock);
+    free(pcm);
 }
 bool GunSound::Load(const wchar_t* dir, const wchar_t* list, int maxVoices, char* err, size_t errLen) {
     Release();
@@ -94,8 +174,8 @@ bool GunSound::Load(const wchar_t* dir, const wchar_t* list, int maxVoices, char
     }
     return true;
 }
-bool GunSound::LoadOne(const wchar_t* wavPath, char* err, size_t errLen) {
-    HANDLE h = CreateFileW(wavPath, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+bool GunSound::ReadPcm(const wchar_t* path, WAVEFORMATEX* fmtOut, unsigned char** pcmOut, unsigned* bytesOut, char* err, size_t errLen) {
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
         snprintf(err, errLen, "cannot open sound file (%lu)", GetLastError());
         return false;
@@ -104,6 +184,30 @@ bool GunSound::LoadOne(const wchar_t* wavPath, char* err, size_t errLen) {
     unsigned char* b = (size > 44 && size < (64u << 20)) ? static_cast<unsigned char*>(malloc(size)) : nullptr;
     bool rd = b && ReadFile(h, b, size, &got, nullptr) && got == size;
     CloseHandle(h);
+    if (rd && !memcmp(b, "fLaC", 4)) {
+        unsigned ch = 0, rate = 0;
+        unsigned char* pcm = nullptr;
+        size_t pcmBytes = 0;
+        bool dec = flac::Decode16(b, size, &ch, &rate, &pcm, &pcmBytes, err, errLen);
+        free(b);
+        if (!dec) return false;
+        if (rate < 8000 || rate > 192000 || pcmBytes > 0xFFFFFFFFu) {
+            free(pcm);
+            snprintf(err, errLen, "flac: unsupported rate %u", rate);
+            return false;
+        }
+        WAVEFORMATEX f = {};
+        f.wFormatTag = WAVE_FORMAT_PCM;
+        f.nChannels = static_cast<WORD>(ch);
+        f.nSamplesPerSec = rate;
+        f.wBitsPerSample = 16;
+        f.nBlockAlign = static_cast<WORD>(ch * 2);
+        f.nAvgBytesPerSec = rate * f.nBlockAlign;
+        *fmtOut = f;
+        *pcmOut = pcm;
+        *bytesOut = static_cast<unsigned>(pcmBytes);
+        return true;
+    }
     if (!rd || memcmp(b, "RIFF", 4) || memcmp(b + 8, "WAVE", 4)) {
         free(b);
         snprintf(err, errLen, "not a RIFF/WAVE file");
@@ -132,12 +236,6 @@ bool GunSound::LoadOne(const wchar_t* wavPath, char* err, size_t errLen) {
     f.nBlockAlign = static_cast<WORD>(f.nChannels * 2);
     f.nAvgBytesPerSec = f.nSamplesPerSec * f.nBlockAlign;
     dataLen -= dataLen % f.nBlockAlign;
-    if (nPcm_ > 0 && (f.nChannels != fmt_.nChannels || f.nSamplesPerSec != fmt_.nSamplesPerSec)) {
-        free(b);
-        snprintf(err, errLen, "variant format differs (%u ch %lu Hz vs %u ch %lu Hz)", f.nChannels,
-                 static_cast<unsigned long>(f.nSamplesPerSec), fmt_.nChannels, static_cast<unsigned long>(fmt_.nSamplesPerSec));
-        return false;
-    }
     unsigned char* pcm = static_cast<unsigned char*>(malloc(dataLen));
     if (!pcm) {
         free(b);
@@ -146,8 +244,24 @@ bool GunSound::LoadOne(const wchar_t* wavPath, char* err, size_t errLen) {
     }
     memcpy(pcm, data, dataLen);
     free(b);
+    *fmtOut = f;
+    *pcmOut = pcm;
+    *bytesOut = dataLen;
+    return true;
+}
+bool GunSound::LoadOne(const wchar_t* wavPath, char* err, size_t errLen) {
+    WAVEFORMATEX f = {};
+    unsigned char* pcm = nullptr;
+    unsigned bytes = 0;
+    if (!AcquirePcm(wavPath, &f, &pcm, &bytes, err, errLen)) return false;
+    if (nPcm_ > 0 && (f.nChannels != fmt_.nChannels || f.nSamplesPerSec != fmt_.nSamplesPerSec)) {
+        ReleasePcm(pcm);
+        snprintf(err, errLen, "variant format differs (%u ch %lu Hz vs %u ch %lu Hz)", f.nChannels,
+                 static_cast<unsigned long>(f.nSamplesPerSec), fmt_.nChannels, static_cast<unsigned long>(fmt_.nSamplesPerSec));
+        return false;
+    }
     pcmV_[nPcm_] = pcm;
-    bytesV_[nPcm_] = dataLen;
+    bytesV_[nPcm_] = bytes;
     ++nPcm_;
     fmt_ = f;
     return true;
@@ -234,7 +348,7 @@ void GunSound::Release() {
     }
     nVoices_ = 0;
     for (int k = 0; k < nPcm_; ++k) {
-        free(pcmV_[k]);
+        ReleasePcm(pcmV_[k]);
         pcmV_[k] = nullptr;
         bytesV_[k] = 0;
     }
