@@ -25,6 +25,7 @@ struct Def {
     float hitAt;
     float swingAt;
     float blockEarly = 0;
+    float swingPeak = 0;
 };
 const Def kDef[kActs] = {
     {"idle", "idle", 0.2f, 1.f, 0.f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
@@ -196,14 +197,14 @@ const Def kGsDef[kActs] = {
     {"default_right", "m_gs_charge_right", 0.2f, 1.f, 0.f, 0, 0, -1, 0, kLight2, kHeavy2, 0.65f, -1, 0, 0},
     {"(unused)", "m_gs_charge_left", 0.2f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.65f, -1, 0, 0},
     {"(unused)", "m_gs_charge", 0.3f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.65f, -1, 0, 0},
-    {"light_attack_left", "m_gs_light_left", 0.15f, 1.215f, 1.8f, 0.85f, 1.3f, kDefaultRight, 0.65f, -1, -1, 0, kStrikeSweep, 0.53f, 0.5f, 0.3f},
-    {"light_attack_right", "m_gs_light_right", 0.15f, 1.215f, 1.86f, 0.85f, 1.15f, kDefaultLeft, 0.7f, -1, -1, 0, kStrikeSweep, 0.5f, 0.5f, 0.3f},
-    {"(unused)", "m_gs_light_left", 0.15f, 1.215f, 1.8f, 0.85f, 1.3f, kDefaultRight, 0.65f, -1, -1, 0, kStrikeSweep, 0.53f, 0.5f, 0.3f},
-    {"heavy_attack_left", "m_gs_heavy_left", 0.1f, 1.f, 2.33f, 0.65f, kInf, kDefaultRight, 0.5f, -1, -1, 0, kStrikeHeavySweep, 0.18f, 0.f},
-    {"heavy_attack_right", "m_gs_heavy_right", 0.1f, 1.f, 2.33f, 0.65f, kInf, kDefaultLeft, 0.5f, -1, -1, 0, kStrikeHeavySweep, 0.18f, 0.f},
-    {"(unused)", "m_gs_heavy_left", 0.1f, 1.f, 2.33f, 0.65f, kInf, kDefaultRight, 0.5f, -1, -1, 0, kStrikeHeavySweep, 0.18f, 0.f},
+    {"light_attack_left", "m_gs_light_left", 0.15f, 1.215f, 1.8f, 0.85f, 1.3f, kDefaultRight, 0.65f, -1, -1, 0, kStrikeSweep, 0.53f, 0.5f, 0.3f, 0.65f},
+    {"light_attack_right", "m_gs_light_right", 0.15f, 1.215f, 1.86f, 0.85f, 1.15f, kDefaultLeft, 0.7f, -1, -1, 0, kStrikeSweep, 0.5f, 0.5f, 0.3f, 0.6333f},
+    {"(unused)", "m_gs_light_left", 0.15f, 1.215f, 1.8f, 0.85f, 1.3f, kDefaultRight, 0.65f, -1, -1, 0, kStrikeSweep, 0.53f, 0.5f, 0.3f, 0.65f},
+    {"heavy_attack_left", "m_gs_heavy_left", 0.1f, 1.f, 2.33f, 0.65f, kInf, kDefaultRight, 0.5f, -1, -1, 0, kStrikeHeavySweep, 0.18f, 0.f, 0.f, 0.2167f},
+    {"heavy_attack_right", "m_gs_heavy_right", 0.1f, 1.f, 2.33f, 0.65f, kInf, kDefaultLeft, 0.5f, -1, -1, 0, kStrikeHeavySweep, 0.18f, 0.f, 0.f, 0.2167f},
+    {"(unused)", "m_gs_heavy_left", 0.1f, 1.f, 2.33f, 0.65f, kInf, kDefaultRight, 0.5f, -1, -1, 0, kStrikeHeavySweep, 0.18f, 0.f, 0.f, 0.2167f},
     {"push", "m_gs_push", 0.0f, 1.f, 0.8f, 0.4f, kInf, kDefault, 0.4f, -1, -1, 0, kStrikeBash, 0.05f, 0.0333f},
-    {"light_attack_bopp", "m_gs_bopp", 0.2f, 1.215f, 1.86f, 0.85f, kInf, kDefault, 0.75f, -1, -1, 0, kStrikeSweep, 0.32f, 0.2333f},
+    {"light_attack_bopp", "m_gs_bopp", 0.2f, 1.215f, 1.86f, 0.85f, kInf, kDefault, 0.75f, -1, -1, 0, kStrikeSweep, 0.32f, 0.2333f, 0.f, 0.35f},
     {"block", "m_gs_parry_pose", 0.1f, 1.f, 0.f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
 };
 const Exit kGsExit[] = {{"draw", "idle", 0.2f},
@@ -283,6 +284,7 @@ struct Swing {
     unsigned id = 0;
     int act = 0;
     double start = 0, due = 0;
+    float rate = 1.f;
 };
 Swing g_sw[4];
 unsigned g_swNext = 1, g_swCur = 0;
@@ -313,19 +315,19 @@ unsigned g_pitchRng = 0x2f6b9e1du;
 unsigned g_finishRng = 0x6d2b79f5u;
 int g_finishTrace[64];
 int g_finishTraceN = 0;
-void PlaySfx(int i, float gain = 1.f) {
+void PlaySfx(int i, float gain = 1.f, float rate = 1.f) {
     vm::GunSound& s = Wp().meleeSfx[i];
     if (!s.Loaded()) return;
     const vm::Settings& st = Wp().set;
     float v = st.meleeSfxVolume[i];
-    float pitch = 1.f;
+    float pitch = rate;
     const float lo = st.meleeSfxPitch[i][0], hi = st.meleeSfxPitch[i][1];
     if (hi > lo) {
         g_pitchRng = g_pitchRng * 1664525u + 1013904223u;
         float c = lo + (hi - lo) * static_cast<float>(g_pitchRng >> 8) / 16777216.f;
-        pitch = std::exp2(c / 1200.f);
+        pitch *= std::exp2(c / 1200.f);
     } else if (lo != 0.f) {
-        pitch = std::exp2(lo / 1200.f);
+        pitch *= std::exp2(lo / 1200.f);
     }
     s.Play((v >= 0.f ? v : kSfxDefVol[i]) * st.meleeSfxMaster * gain, false, pitch);
     ++g_sfxCount[i];
@@ -361,8 +363,8 @@ void SwingStep(double now) {
         if (s.act == kPush) {
             PlaySfx(kSfxPush);
         } else {
-            PlaySfx(kSfxSwing);
-            PlaySfx(kSfxSwingLayer);
+            PlaySfx(kSfxSwing, 1.f, s.rate);
+            PlaySfx(kSfxSwingLayer, 1.f, s.rate);
             g_swPlayed = s.id;
         }
         if (g_swTraceN < 64) g_swTrace[g_swTraceN++] = {s.act, static_cast<float>(now - s.start), static_cast<float>(s.due - s.start)};
@@ -405,7 +407,12 @@ void Go(int next, double now, const char* why, const char* clip = nullptr, float
         Swing* s = &g_sw[0];
         for (Swing& x : g_sw)
             if (!x.id || (s->id && x.start < s->start)) s = &x;
-        *s = {g_swNext++, next, now, now + nd.swingAt / nd.scale};
+        const vm::Settings& st = Wp().set;
+        const bool heavy = next == kHeavy1 || next == kHeavy2 || next == kHeavy3;
+        const float rate = next == kPush ? 1.f : st.meleeSfxSwingRate[heavy ? 1 : 0];
+        float due = nd.swingAt / nd.scale;
+        if (next != kPush && st.meleeSfxSwingPre >= 0.f && nd.swingPeak > 0.f) due = std::max(0.f, nd.swingPeak / nd.scale - st.meleeSfxSwingPre / rate);
+        *s = {g_swNext++, next, now, now + due, rate};
         if (!g_swNext) g_swNext = 1;
         g_swCur = s->id;
     }
