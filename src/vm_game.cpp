@@ -22,7 +22,7 @@ bool g_enabled = false;
 UINT g_testKey = VK_F7, g_reloadKey = VK_F8, g_animKey = VK_F9, g_modelKey = VK_F10;
 UINT g_shieldKey = 'Q', g_shieldHitKey = 0;
 wchar_t g_ini[MAX_PATH];
-constexpr int kMaxModels = 50;
+constexpr int kMaxModels = 200;
 wchar_t g_models[kMaxModels][MAX_PATH * 2];
 int g_modelCount = 0;
 int g_modelIdx = 0;
