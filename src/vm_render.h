@@ -4,7 +4,7 @@
 #include <d3d11.h>
 #include <cstdint>
 namespace vm {
-constexpr int kMeleeSfx = 18;
+constexpr int kMeleeSfx = 17;
 extern const wchar_t* const kMeleeSfxNames[kMeleeSfx];
 struct Settings {
     float fovDeg = 55.0f;
@@ -35,6 +35,8 @@ struct Settings {
     int scopeBone = -1;
     float scopeLensRadius = 0.0178f;
     float scopeReticle = 1.0f;
+    float scopeSharpen = 0.5f;
+    bool scopeCubic = true;
     bool handIk = true;
     float ikGripRi[3] = {0.0f, 0.0f, 0.0f};
     float ikGripLe[3] = {0.0f, 0.0f, 0.0f};
@@ -69,13 +71,11 @@ struct Settings {
     int magSize = 0;
     bool magDisposable = false;
     int ammoTotal = 0;
-    int ammoUpgrade = 0;
     float reloadRefill = 0.f;
     float reloadEmptyRefill = 0.f;
     wchar_t weaponId[64] = L"";
     bool weaponDefault = false;
     char projectile[64] = "";
-    float fireRange = 0.f;
     wchar_t animSounds[128] = L"";
     float animSoundVolume = 0.7f;
     wchar_t stepFoot[512] = L"";
@@ -107,7 +107,6 @@ struct Settings {
     bool crossHip = true, crossAds = false;
     float crossScale = 1.f;
     wchar_t flashFx[128] = L"";
-    wchar_t effectFx[128] = L"..\\_fx";
     float flashScale = 1.0f;
     float flashIntensity = 1.0f;
     float flashLight = 1.0f;
@@ -127,6 +126,7 @@ struct Settings {
     float flashGasBarrelSmokeFade = 0.9f;
     float flashGasLinger = 1.0f;
     bool shellEject = true;
+    bool shellEjectAnim = false;
     float shellScale = 1.0f;
     float shellSpeed = 1.0f;
     float shellLife = 1.0f;
@@ -190,7 +190,7 @@ struct Settings {
     float meleeStrikeLead = 0.25f;
     wchar_t meleeSfx[kMeleeSfx][512] = {};
     float meleeSfxVolume[kMeleeSfx] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f,
-                                       -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
+                                       -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
     float meleeSfxPitch[kMeleeSfx][2] = {};
     float meleeSfxMaster = 1.f;
     bool meleeSfxSwingCut = false;
@@ -262,7 +262,7 @@ struct CrosshairSettings {
 bool LoadCrosshair(const wchar_t* ini, CrosshairSettings& s);
 class MuzzleFlash {
 public:
-    bool Load(ID3D11Device* dev, const wchar_t* fxDir, const wchar_t* effectDir, const wchar_t* gasDir, char* err, size_t errLen);
+    bool Load(ID3D11Device* dev, const wchar_t* fxDir, const wchar_t* gasDir, char* err, size_t errLen);
     void Trigger(float ads = 0.f);
     void AddTracer(const float* from, const float* to);
     void AddImpact(const float* pos, const float* dir, bool kill);
@@ -273,7 +273,7 @@ public:
     void SetScene(ID3D11ShaderResourceView* srv, bool gamma) { scene_ = srv; sceneGamma_ = gamma; }
     bool HasDistortion() const;
     void Release();
-    bool Loaded() const { return vs_ != nullptr; }
+    bool Loaded() const { return tex_[0] != nullptr; }
     bool GasLoaded() const { return tex_[5] && tex_[6]; }
     int LiveTracers() const { return nTr_; }
     int LiveImpacts() const { return nImp_; }
@@ -628,11 +628,4 @@ private:
     bool muzzleFrameValid_ = false;
     MuzzleFrame muzzleFrame_ = {};
 };
-void AnimStatePush();
-void AnimStatePop();
-namespace prefetch {
-bool Model(int tag, const wchar_t* hvmPath, int* files, size_t* bytes, char* err, size_t errLen);
-void Drop(int tag);
-int WarmShaders();
-}
 }
