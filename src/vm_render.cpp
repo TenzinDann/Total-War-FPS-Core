@@ -1736,6 +1736,31 @@ bool DebugBoneWorld(unsigned b, float m12[12]) {
     memcpy(m12, g_world[b].m, sizeof(float) * 12);
     return true;
 }
+namespace {
+struct AnimStateCopy {
+    Aff world[kMaxBones], local[kMaxBones];
+    float lastTrs[kMaxBones][10], snapTrs[kMaxBones][10];
+    unsigned lastCount;
+    signed char fadeSign[kMaxBones];
+    float lastNew[kMaxBones][4], lastOld[kMaxBones][4];
+    int fadeClip, fadePrev;
+    float fadeBlend;
+} g_animSaved;
+}
+void AnimStatePush() {
+    AnimStateCopy& c = g_animSaved;
+    memcpy(c.world, g_world, sizeof g_world), memcpy(c.local, g_local, sizeof g_local);
+    memcpy(c.lastTrs, g_lastTrs, sizeof g_lastTrs), memcpy(c.snapTrs, g_snapTrs, sizeof g_snapTrs);
+    memcpy(c.fadeSign, g_fadeSign, sizeof g_fadeSign), memcpy(c.lastNew, g_lastNew, sizeof g_lastNew), memcpy(c.lastOld, g_lastOld, sizeof g_lastOld);
+    c.lastCount = g_lastCount, c.fadeClip = g_fadeClip, c.fadePrev = g_fadePrev, c.fadeBlend = g_fadeBlend;
+}
+void AnimStatePop() {
+    const AnimStateCopy& c = g_animSaved;
+    memcpy(g_world, c.world, sizeof g_world), memcpy(g_local, c.local, sizeof g_local);
+    memcpy(g_lastTrs, c.lastTrs, sizeof g_lastTrs), memcpy(g_snapTrs, c.snapTrs, sizeof g_snapTrs);
+    memcpy(g_fadeSign, c.fadeSign, sizeof g_fadeSign), memcpy(g_lastNew, c.lastNew, sizeof g_lastNew), memcpy(g_lastOld, c.lastOld, sizeof g_lastOld);
+    g_lastCount = c.lastCount, g_fadeClip = c.fadeClip, g_fadePrev = c.fadePrev, g_fadeBlend = c.fadeBlend;
+}
 void Renderer::ArmIk(const Settings& s, const float* k12) {
     Aff K;
     memcpy(K.m, k12, sizeof K.m);

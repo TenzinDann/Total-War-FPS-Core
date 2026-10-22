@@ -879,6 +879,7 @@ int FindLastClip() {
 }
 #include "melee.inc"
 #include "ui_layer.inc"
+#include "launcher.inc"
 void AnimStep(vm::Look& l, double now) {
     bool fired = InterlockedExchange(&g_reqFire, 0) != 0;
     const bool lastFired = fired && InterlockedExchange(&g_reqFireLast, 0) != 0;
@@ -1953,6 +1954,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
         Wp().fxDirty = true;
         InterlockedExchange(&g_reqRoster, 1);
         if (Wp().rend.Ready()) MagApply();
+        LauncherReadTimes(), LauncherRelease();
         g_log("viewmodel: settings reloaded (fov %.1f offset %.3f,%.3f,%.3f rot %.1f,%.1f,%.1f scale %.3f mirror %d)",
               Wp().set.fovDeg, Wp().set.offset[0], Wp().set.offset[1], Wp().set.offset[2], Wp().set.rotDeg[0], Wp().set.rotDeg[1],
               Wp().set.rotDeg[2], Wp().set.scale, Wp().set.mirrorX);
@@ -2048,6 +2050,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                         if (hasMf || hasCam)
                             Wp().flash.Draw(ctx, rtv, Wp().rend.Depth(td.Width, td.Height), td.Width, td.Height, hw, Now(), hasMf ? &mf : nullptr,
                                          hasCam ? &wc : nullptr, Wp().set);
+                        LauncherDraw(dev, ctx, rtv, bb, td.Width, td.Height, hw, look);
                         if (part == kPartAll) HudCoverRestore(ctx, bb);
                     }
                     if (part != kPartGun && g_fp) {
@@ -2171,6 +2174,7 @@ void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
         "fov=%.1f offset=%.3f,%.3f,%.3f rot=%.1f,%.1f,%.1f",
         g_enabled, g_staticOk, g_testKey, g_reloadKey, g_animKey, g_modelKey, g_modelCount, g_models[0], Wp().set.fovDeg,
         Wp().set.offset[0], Wp().set.offset[1], Wp().set.offset[2], Wp().set.rotDeg[0], Wp().set.rotDeg[1], Wp().set.rotDeg[2]);
+    LauncherSetup(dllDir);
     if (g_enabled && (g_staticOk || !exeBase)) {
         g_preloadOnBattle = GetPrivateProfileIntW(L"viewmodel", L"preload_on_battle", 1, g_ini) != 0;
         wcsncpy(g_armoryPath, g_ini, MAX_PATH - 1);
@@ -2528,6 +2532,35 @@ void ShieldGame(float* weight, float* moveScale, float* zoomKeep) {
     *zoomKeep = 1.f - (1.f - g_sh.zoomMilli * 1e-3f) * w;
 }
 float ShieldCamKick() { return InterlockedExchange(&g_sh.camKickMdeg, 0) * 1e-3f; }
+bool LauncherConfigured() { return Enabled() && g_lc.configured; }
+UINT LauncherFireKey() { return g_lc.fireKey; }
+UINT LauncherSwitchKey() { return g_lc.switchKey; }
+UINT LauncherFlameKey() { return g_lc.flameKey; }
+int LauncherSelected() { return static_cast<int>(g_lc.selected); }
+void LauncherSwitch() {
+    LONG v = InterlockedXor(&g_lc.selected, 1) ^ 1;
+    InterlockedExchange(&g_lc.switchReq, 1);
+    g_log("launcher: selected %s", v == kLauncherIce ? "ice" : "frag");
+}
+const char* LauncherAbility(int kind) { return kind >= 0 && kind < kLauncherKinds ? g_lc.ability[kind] : ""; }
+float LauncherWindup(int kind) { return kind >= 0 && kind < kLauncherKinds ? g_lc.windup[kind] : 1.f; }
+bool LauncherBusy() { return g_lc.busy && static_cast<LONG>(Now() * 1000.0) < g_lc.busyUntilMs; }
+void LauncherCast(int kind, bool driven, float windup) {
+    if (!g_lc.configured || kind < 0 || kind >= kLauncherKinds) return;
+    double now = Now();
+    if (!(windup > 0.f && windup < 10.f)) windup = g_lc.windup[kind];
+    InterlockedExchange(&g_lc.windupMs, static_cast<LONG>(windup * 1000.f + 0.5f));
+    InterlockedExchange(&g_lc.driven, driven ? 1 : 0);
+    InterlockedExchange64(&g_lc.fireUs, 0);
+    InterlockedExchange64(&g_lc.abortUs, 0);
+    InterlockedExchange(&g_lc.busyUntilMs, static_cast<LONG>((now + kLcMaxHold + 1.0) * 1000.0));
+    InterlockedExchange(&g_lc.busy, 1);
+    InterlockedExchange64(&g_lc.reqUs, static_cast<LONG64>(now * 1e6));
+    MemoryBarrier();
+    InterlockedExchange(&g_lc.req, kind + 1);
+}
+void LauncherFire() { InterlockedExchange64(&g_lc.fireUs, static_cast<LONG64>(Now() * 1e6)); }
+void LauncherAbort() { InterlockedExchange64(&g_lc.abortUs, static_cast<LONG64>(Now() * 1e6)); }
 bool MeleeActive() { return g_meleeOn != 0; }
 void MeleeInput(bool attack, bool block) { InterlockedExchange(&g_meleeIn, (attack ? 1 : 0) | (block ? 2 : 0)); }
 int TakeMeleeStrike() { return static_cast<int>(InterlockedExchange(&g_meleeStrike, 0)) - 1; }
