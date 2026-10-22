@@ -303,6 +303,7 @@ constexpr double kUnloadDelay = 3.0;
 double g_unloadAt[kMaxModels] = {};
 int g_unloadPending = 0;
 volatile LONG g_spent[kMaxModels] = {};
+LONG g_ammoLevel[kMaxModels] = {};
 FILETIME g_armoryTime = {};
 volatile LONG g_reqRoster = 0;
 volatile LONG g_reqWeapon = 0;
@@ -1744,6 +1745,8 @@ void RosterStep(ID3D11Device* dev) {
     static char owned[kMaxModels * 64];
     char mode[32] = "", loadout[kSlots * 64 + 8] = "";
     owned[0] = 0;
+    static char ammoUp[kMaxModels * 72];
+    ammoUp[0] = 0;
     if (FILE* f = _wfopen(path, L"r")) {
         static char line[kMaxModels * 64 + 64];
         while (fgets(line, sizeof line, f)) {
@@ -1752,8 +1755,28 @@ void RosterStep(ID3D11Device* dev) {
             if (!strncmp(line, "mode=", 5)) snprintf(mode, sizeof mode, "%s", line + 5);
             if (!strncmp(line, "owned=", 6)) snprintf(owned, sizeof owned, "%s", line + 6);
             if (!strncmp(line, "loadout=", 8)) snprintf(loadout, sizeof loadout, "%s", line + 8);
+            if (!strncmp(line, "ammo_up=", 8)) snprintf(ammoUp, sizeof ammoUp, "%s", line + 8);
         }
         fclose(f);
+    }
+    {
+        bool camp = !strcmp(mode, "campaign");
+        int nUp = 0;
+        for (int i = 0; i < g_modelCount && i < kMaxModels; ++i) {
+            LONG lv = 0;
+            char a[64];
+            snprintf(a, sizeof a, "%ls", g_w[i].set.weaponId);
+            size_t la = strlen(a);
+            for (const char* p = ammoUp; camp && la && *p;) {
+                const char* e = p;
+                while (*e && *e != ',') ++e;
+                if (static_cast<size_t>(e - p) > la + 1 && !strncmp(p, a, la) && p[la] == ':') lv = atol(p + la + 1);
+                p = *e ? e + 1 : e;
+            }
+            g_ammoLevel[i] = lv < 0 ? 0 : lv > 9 ? 9 : lv;
+            nUp += g_ammoLevel[i] > 0;
+        }
+        if (ammoUp[0] || nUp) g_log("weapon: ammo upgrades '%s' (%s) -> %d weapons upgraded", ammoUp, camp ? "campaign" : "not campaign, ignored", nUp);
     }
     WIN32_FILE_ATTRIBUTE_DATA fa;
     if (GetFileAttributesExW(path, GetFileExInfoStandard, &fa) &&
@@ -2289,18 +2312,34 @@ void MagTick() {
         }
     }
 }
+constexpr LONG kMaxMag = 10000;
+LONG EffMagSize(int i) {
+    if (i < 0 || i >= g_modelCount || i >= kMaxModels) return 0;
+    const auto& s = g_w[i].set;
+    LONG size = s.magSize + (s.magDisposable ? g_ammoLevel[i] * s.ammoUpgrade : 0);
+    return size > 0 && size <= kMaxMag ? size : 0;
+}
+LONG EffAmmoTotal(int i) {
+    if (i < 0 || i >= g_modelCount || i >= kMaxModels) return 0;
+    const auto& s = g_w[i].set;
+    return s.ammoTotal > 0 && s.magSize > 0 && !s.magDisposable ? s.ammoTotal + g_ammoLevel[i] * s.ammoUpgrade : 0;
+}
 void RefillForNewBattle() {
     for (int i = 0; i < g_modelCount && i < kMaxModels; ++i) {
         const auto& s = g_w[i].set;
-        bool disp = s.magDisposable, total = s.ammoTotal > 0 && s.magSize > 0 && !s.magDisposable;
+        LONG tot = EffAmmoTotal(i);
+        bool disp = s.magDisposable, total = tot > 0;
         if (!disp && !total) continue;
         if (disp) InterlockedExchange(&g_spent[i], 0);
         if (i < kMaxModels) g_mag.ammoByModel[i] = -1, g_mag.reserveByModel[i] = -2;
         if (i == g_mag.loadedModel) {
-            InterlockedExchange(&g_mag.ammo, g_mag.size);
-            if (total) InterlockedExchange(&g_mag.reserve, s.ammoTotal > g_mag.size ? s.ammoTotal - g_mag.size : 0);
+            LONG size = EffMagSize(i);
+            InterlockedExchange(&g_mag.size, size);
+            InterlockedExchange(&g_mag.ammo, size);
+            if (total) InterlockedExchange(&g_mag.reserve, tot > size ? tot - size : 0);
         }
-        g_log("weapon: new battle -> %ls refilled%s", s.weaponId, total ? " (magazine + reserve)" : "");
+        g_log("weapon: new battle -> %ls refilled%s (ammo level %ld: magazine %ld, total %ld)", s.weaponId,
+              total ? " (magazine + reserve)" : "", g_ammoLevel[i], EffMagSize(i), tot);
     }
 }
 bool Reloading() {
@@ -2351,7 +2390,7 @@ void MagApply() {
     g_an.spinSeen = 0;
     float rpm = Wp().set.fireRpm;
     InterlockedExchange(&g_mag.fireUs, rpm >= 10.f && rpm <= 2000.f ? static_cast<LONG>(60e6 / rpm) : 0);
-    LONG size = Wp().set.magSize > 0 && Wp().set.magSize <= 1000 ? Wp().set.magSize : 0;
+    LONG size = EffMagSize(g_modelIdx);
     auto refill = [](float sec, int clip) -> LONG {
         if (!(sec > 0.f) && clip >= 0) sec = Wp().rend.ClipDuration(clip) * 0.8f;
         if (!(sec > 0.05f)) sec = 2.f;
@@ -2370,7 +2409,7 @@ void MagApply() {
     InterlockedExchange(&g_mag.ammo, ammo);
     InterlockedExchange(&g_mag.disposable, Wp().set.magDisposable && size > 0 ? 1 : 0);
     {
-        LONG total = Wp().set.ammoTotal > 0 && size > 0 && !Wp().set.magDisposable ? Wp().set.ammoTotal : 0;
+        LONG total = size > 0 ? EffAmmoTotal(g_modelIdx) : 0;
         LONG res = -1;
         if (total > 0) {
             LONG kept = g_modelIdx < kMaxModels ? g_mag.reserveByModel[g_modelIdx] : -2;

@@ -69,6 +69,7 @@ struct Settings {
     int magSize = 0;
     bool magDisposable = false;
     int ammoTotal = 0;
+    int ammoUpgrade = 0;
     float reloadRefill = 0.f;
     float reloadEmptyRefill = 0.f;
     wchar_t weaponId[64] = L"";

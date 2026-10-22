@@ -864,6 +864,8 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.magSize = static_cast<int>(IniFloat(ini, L"mag_size", static_cast<float>(s.magSize)));
     s.magDisposable = IniFloat(ini, L"mag_disposable", s.magDisposable ? 1.f : 0.f) != 0.f;
     s.ammoTotal = static_cast<int>(IniFloat(ini, L"ammo_total", static_cast<float>(s.ammoTotal)));
+    s.ammoUpgrade = static_cast<int>(IniFloat(ini, L"ammo_upgrade", static_cast<float>(s.ammoUpgrade)));
+    if (s.ammoUpgrade < 0 || s.ammoUpgrade > 10000) s.ammoUpgrade = 0;
     s.reloadRefill = IniFloat(ini, L"reload_refill", s.reloadRefill);
     s.reloadEmptyRefill = IniFloat(ini, L"reload_empty_refill", s.reloadEmptyRefill);
     GetPrivateProfileStringW(L"viewmodel", L"weapon_id", s.weaponId, s.weaponId, 64, ini);
