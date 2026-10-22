@@ -843,7 +843,6 @@ struct State {
     unsigned entCount = 0;
     EntPath entPath;
     double nextShot = 0;
-    bool fireChain = false;
     bool sprint = false, tac = false, ads = false;
     bool shiftPrev = false;
     float adsT = 0;
@@ -4275,7 +4274,6 @@ void Apply(uintptr_t mgr) {
     LauncherGameStep(now);
     double fireGap = vmgame::FireInterval() > 0 ? vmgame::FireInterval() : cfg.fireInterval;
     vmgame::SetTrigger(held && g_fireOk && cfg.fireEnabled && !S.sprint && now >= S.fireBlock);
-    if (!held) S.fireChain = false;
     if (held && g_fireOk && cfg.fireEnabled && now >= S.nextShot && !S.sprint && now >= S.fireBlock && vmgame::CanFire()) {
         const float* fwd = vFwd;
         const float* right = vRight;
@@ -4325,8 +4323,7 @@ void Apply(uintptr_t mgr) {
         } else {
             ++S.shotsFailed;
         }
-        S.nextShot = S.fireChain && now - S.nextShot < fireGap ? S.nextShot + fireGap : now + fireGap;
-        S.fireChain = true;
+        S.nextShot = now - S.nextShot < fireGap ? S.nextShot + fireGap : now + fireGap;
     }
     if ((now - S.tStat) * 1000.0 >= cfg.logIntervalMs) {
         Log("sec frames=%u activeWrites=%u yields=%u ent=%.2f,%.2f,%.2f eye=%.2f,%.2f,%.2f yaw=%.1f pitch=%.1f "
