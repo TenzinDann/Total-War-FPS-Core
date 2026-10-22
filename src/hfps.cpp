@@ -207,6 +207,18 @@ const CodePrint kCharPrints904[] = {
     {0x8e2880, 0x0c, 0xf55c7e50acf69be9ull},
     {0x1e86204, 0x11, 0x8aa88ae5c72a99d6ull}};
 constexpr uintptr_t oUnitCharDetails = 0x158, oCharKeyStr = 0x4e8, oUiUnitIsGeneral = 0x6fa;
+const CodePrint kFlyPrints904[] = {
+    {0x8e2420, 0xc, 0x7a3750e9a30ac0d2ull},
+    {0x8e2430, 0xc, 0x62ce00c3f2a8c2afull},
+    {0x8e2440, 0xc, 0xc7052de21b161035ull},
+    {0x8e2860, 0xc, 0x13d482da9323de80ull},
+    {0x2ea9358, 0x38, 0xf662140a1ee931baull},
+    {0x1e3f410, 0x6e, 0x231ab3a1d31f4b75ull},
+    {0x2ed1160, 0x62, 0x4c0cf35d628b1a09ull},
+    {0x2f4ae00, 0xe5, 0x9df247d2bf9b1367ull}};
+constexpr uintptr_t oUiCanFly = 0x70f, oUiAlwaysFly = 0x710, oUiCanToggleFly = 0x711, oUiIsFlying = 0x712;
+constexpr uintptr_t kFnFlyCmdCtor904 = 0x2ea9358, kFnFlyCmdIssue904 = 0x1e3f410;
+bool g_flyOk = false;
 constexpr uintptr_t oUnitAbilityMgr = 0x3d48, oAbMgrEnd = 0x20, oAbMgrFirst = 0x28, oAbNodeNext = 0x8, oAbNodeDef = 0x70, oAbNodeInst = 0x10;
 constexpr uintptr_t oAbDefId = 0x8, oAbDefWindup = 0x30, oAbDefRange = 0x54, oAbRecId = 0x50;
 constexpr uintptr_t oAbWindSteps = 0x120, oAbCooldown = 0x134, oAbUses = 0xb4, oAbFlags = 0x170;
@@ -440,6 +452,8 @@ struct Config {
     bool noMelee = true;
     bool noKnock = true;
     bool heroesOnly = true;
+    bool fly = true, flyTakeoff = true;
+    float flyAhead = 60.f, flyInterval = 2.0f, flyTurnDeg = 20.f, flyEyeHeight = 1.2f;
     bool shieldGame = true;
     bool shieldStagger = true;
     float shieldAngle = 180.f;
@@ -638,6 +652,16 @@ void LoadConfig() {
     cfg.noMelee = GetPrivateProfileIntW(L"hero", L"no_melee", 1, ini) != 0;
     cfg.noKnock = GetPrivateProfileIntW(L"hero", L"no_knockdown", 1, ini) != 0;
     cfg.heroesOnly = GetPrivateProfileIntW(L"hero", L"heroes_only", 1, ini) != 0;
+    cfg.fly = GetPrivateProfileIntW(L"move", L"fly", 1, ini) != 0;
+    cfg.flyTakeoff = GetPrivateProfileIntW(L"move", L"fly_takeoff", 1, ini) != 0;
+    cfg.flyAhead = IniF(L"move", L"fly_ahead", cfg.flyAhead, ini);
+    cfg.flyInterval = IniF(L"move", L"fly_interval", cfg.flyInterval, ini);
+    cfg.flyTurnDeg = IniF(L"move", L"fly_turn_deg", cfg.flyTurnDeg, ini);
+    cfg.flyEyeHeight = IniF(L"move", L"fly_eye_height", cfg.flyEyeHeight, ini);
+    if (cfg.flyAhead < 5.f || cfg.flyAhead > 200.f) cfg.flyAhead = 60.f;
+    if (cfg.flyInterval < 0.1f || cfg.flyInterval > 10.f) cfg.flyInterval = 2.0f;
+    if (cfg.flyTurnDeg < 1.f || cfg.flyTurnDeg > 180.f) cfg.flyTurnDeg = 20.f;
+    if (cfg.flyEyeHeight < -5.f || cfg.flyEyeHeight > 20.f) cfg.flyEyeHeight = 1.2f;
     cfg.shieldGame = GetPrivateProfileIntW(L"viewmodel", L"shield_block_game", 1, ini) != 0;
     cfg.shieldStagger = GetPrivateProfileIntW(L"viewmodel", L"shield_block_stagger", 1, ini) != 0;
     cfg.shieldAngle = IniF(L"viewmodel", L"shield_block_angle", 180.f, ini);
@@ -899,6 +923,7 @@ struct State {
     double tLastTp = 0;
     unsigned tpSent = 0, tpFailed = 0, tpLogs = 0, leashHits = 0;
     int lastMode = -1;
+    bool flyer = false;
     TpRec tpHist[8] = {};
     unsigned tpHead = 0;
     bool stuck = false;
@@ -1017,6 +1042,7 @@ void ReleaseMouse() {
     InterlockedExchange(&g_rawDy, 0);
 }
 bool IssueHalt();
+bool IssueDesiredFlying(bool fly);
 bool StopMoving();
 int MoveMode();
 void HookRenderChild();
@@ -1128,6 +1154,20 @@ void Enter(uintptr_t mgr) {
         }
         Log("enter: lord / hero check passed (IsCharacter key len %d, IsGeneral %d)", keyLen, general ? 1 : 0);
     }
+    bool flyer = false, flyAlways = false;
+    if (cfg.fly && g_flyOk && g_moveOk && cfg.moveEnabled) {
+        uint8_t canFly = 0, always = 0, canToggle = 0, isFly = 0;
+        Rd(uiUnit + oUiCanFly, canFly);
+        Rd(uiUnit + oUiAlwaysFly, always);
+        Rd(uiUnit + oUiCanToggleFly, canToggle);
+        Rd(uiUnit + oUiIsFlying, isFly);
+        flyer = canFly != 0 || always != 0;
+        flyAlways = always != 0;
+        if (flyer)
+            Log("fly: flying hero (CanFly %d, CanAlwaysFlying %d, CanToggleFlying %d, IsFlying %d, entity y %.2f) -> unit move orders, "
+                "camera at the hero's own height, no sprint, no walking bob / footsteps",
+                canFly, always, canToggle, isFly, pos[1]);
+    }
     if (S.exitStage && unit != S.exitUnit) {
         Log("enter refused: previous hero %p is still being restored (exit stage %d); unpause and try again", (void*)S.exitUnit,
             S.exitStage);
@@ -1171,6 +1211,7 @@ void Enter(uintptr_t mgr) {
     S.cam = cam;
     S.prevActive = prev;
     S.unit = unit;
+    S.flyer = flyer;
     S.entity = entity;
     S.entCount = entCount;
     S.entPath = path;
@@ -1286,6 +1327,7 @@ void Enter(uintptr_t mgr) {
     }
     HookRenderChild();
     if (g_moveOk && cfg.moveEnabled && (MoveMode() == 2 || MoveMode() == 0)) IssueHalt();
+    if (S.flyer && cfg.flyTakeoff && !flyAlways) IssueDesiredFlying(true);
     Log("FPS enter mgr=%p battle=%p fpCtrl=%p cam=%p prevActive=%p(vt %p) unit=%p entities=%u entity=%p "
         "pos=%.2f,%.2f,%.2f yaw=%.1f fov=%.4f near=%.3f(prev %.3f) far=%.1f camDone=%u selCount=%d",
         (void*)mgr, (void*)battle, (void*)fpCtrl, (void*)cam, (void*)prev, (void*)Ptr(prev), (void*)unit,
@@ -2252,6 +2294,25 @@ bool IssueHalt() {
     if (S.moveLogs++ < 12) Log("move: halt issued=%d units=%u", ok, n);
     return ok;
 }
+bool IssueDesiredFlying(bool fly) {
+    uintptr_t queue = CmdQueue(nullptr);
+    if (!g_flyOk || !queue) return false;
+    SelBuf sel;
+    unsigned n = MakeSelection(sel);
+    bool ok = false;
+    if (n) {
+        using FnCtor = void* (*)(void*, void*, unsigned char);
+        using FnIssue = unsigned char (*)(uintptr_t, void*);
+        HaltCmdBuf cmd;
+        memset(&cmd, 0, sizeof cmd);
+        reinterpret_cast<FnCtor>(g_base + kFnFlyCmdCtor904)(&cmd, &sel, fly ? 1 : 0);
+        ok = reinterpret_cast<FnIssue>(g_base + kFnFlyCmdIssue904)(queue, &cmd) != 0;
+        FreeSelection(cmd.b + 8);
+    }
+    FreeSelection(&sel);
+    Log("fly: desired flying state %d issued=%d units=%u", fly ? 1 : 0, ok, n);
+    return ok;
+}
 using FnBsWrite = void (*)(void* w, char tag, const void* p, unsigned n);
 using FnDestWrite = void* (*)(void* w, const void* dest);
 using FnCmdDesc = uintptr_t (*)(const uint32_t* type);
@@ -2339,6 +2400,7 @@ bool IssueTeleport(const float* dest) {
     return ok;
 }
 int MoveMode() {
+    if (S.flyer && g_moveOk) return 1;
     if (cfg.moveMode == 0 && g_tpOk) return 0;
     if (cfg.moveMode == 2 && g_ovrOk) return 2;
     return 1;
@@ -3601,8 +3663,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -3673,7 +3733,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -3719,26 +3778,17 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) return;
     int32_t steps = 0, cool = 0;
@@ -4133,7 +4183,7 @@ void Apply(uintptr_t mgr) {
         if (wantMove && S.moving && dt > 0.f && now - S.tMoveBegan > 0.8 && vlen > 0.5f * S.speedEst &&
             vlen < 3.f * S.speedEst)
             S.speedEst += (vlen - S.speedEst) * (1.f - std::exp(-dt / 1.0f));
-        if (cfg.predict && dt > 0.f) {
+        if (cfg.predict && !S.flyer && dt > 0.f) {
             S.lead[0] += (mx * S.speedEst - vx) * dt;
             S.lead[1] += (mz * S.speedEst - vz) * dt;
             bool atRest = !wantMove && vlen < 0.3f;
@@ -4145,7 +4195,7 @@ void Apply(uintptr_t mgr) {
                 S.lead[0] *= cfg.predictMax / ll;
                 S.lead[1] *= cfg.predictMax / ll;
             }
-        } else if (!cfg.predict) {
+        } else if (!cfg.predict || S.flyer) {
             S.lead[0] = S.lead[1] = 0;
         }
         camPos[0] = S.outPos[0] + S.lead[0];
@@ -4168,8 +4218,9 @@ void Apply(uintptr_t mgr) {
     const float* vFwd = kv.fwd;
     const float* vRight = kv.right;
     const float* vUp = kv.up;
-    vmgame::PublishView(S.yaw, S.pitch, S.camSpeed);
-    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + cfg.eyeHeight, camPos[2] + cy * cfg.eyeForward};
+    vmgame::PublishView(S.yaw, S.pitch, S.flyer ? 0.f : S.camSpeed);
+    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : cfg.eyeHeight),
+                    camPos[2] + cy * cfg.eyeForward};
     float target[3] = {eye[0] + vFwd[0] * 10.f, eye[1] + vFwd[1] * 10.f, eye[2] + vFwd[2] * 10.f};
     float up[3] = {0.f, 1.f, 0.f};
     if (vRoll != 0.f) memcpy(up, vUp, sizeof up);
@@ -4199,9 +4250,11 @@ void Apply(uintptr_t mgr) {
     }
     ++S.frames;
     if (canMove && mode != 0) {
+        const float ahead = S.flyer ? cfg.flyAhead : cfg.moveAhead, turnDeg = S.flyer ? cfg.flyTurnDeg : cfg.moveTurnDeg;
+        const double interval = S.flyer ? cfg.flyInterval : cfg.moveInterval;
         if (wantMove) {
             float dot = mx * S.lastMoveDir[0] + mz * S.lastMoveDir[1];
-            bool changed = !S.moving || dot < std::cos(cfg.moveTurnDeg * kPi / 180.f) || run != S.lastRun;
+            bool changed = !S.moving || dot < std::cos(turnDeg * kPi / 180.f) || run != S.lastRun;
             if (changed || now >= S.nextMove) {
                 if (!S.moving) {
                     S.tMoveBegan = now;
@@ -4209,8 +4262,8 @@ void Apply(uintptr_t mgr) {
                     memcpy(S.startPos, raw, sizeof raw);
                     S.tHalt = -1;
                 }
-                if (StartOrSteer(raw[0] + mx * cfg.moveAhead, raw[2] + mz * cfg.moveAhead, run)) ++S.moves;
-                S.nextMove = now + cfg.moveInterval;
+                if (StartOrSteer(raw[0] + mx * ahead, raw[2] + mz * ahead, run)) ++S.moves;
+                S.nextMove = now + interval;
                 S.lastMoveDir[0] = mx;
                 S.lastMoveDir[1] = mz;
                 S.lastRun = run;
@@ -4721,6 +4774,10 @@ bool VerifyGame() {
         g_charOk = PrintsMatch(Prints(kCharPrints904), "lord / hero check (IsCharacter)");
         Log("hero: lords / heroes only check %s (heroes_only=%d)", g_charOk ? "ok" : "OFF - nobody can enter while heroes_only=1",
             cfg.heroesOnly);
+        g_flyOk = PrintsMatch(Prints(kFlyPrints904), "flying heroes (CanFly / desired flying state)");
+        Log("fly: flying heroes %s (fly=%d takeoff=%d ahead=%.0f interval=%.2f turn=%.0f eye=%.2f)",
+            g_flyOk ? "ok" : "OFF - flying heroes use the normal movement", cfg.fly, cfg.flyTakeoff, cfg.flyAhead, cfg.flyInterval,
+            cfg.flyTurnDeg, cfg.flyEyeHeight);
         Log("move: unit orders %s, entity halt %s, entity move %s, entity teleport %s (unavailable modes fall back to unit orders)",
             m ? "ok" : "OFF", h ? "ok" : "OFF", o ? "ok" : "OFF", t ? "ok" : "OFF");
     }
