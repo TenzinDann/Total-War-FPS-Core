@@ -188,6 +188,28 @@ struct Settings {
     wchar_t shieldModel[520] = L"";
     float shieldModelMetal = 1.f;
     float meleeStrikeLead = 0.25f;
+    int wh3Emissive = 0;
+    bool wh3Iridescent = false;
+    wchar_t wh3Part[256] = L"";
+    wchar_t wh3Mask[260] = L"";
+    wchar_t emissiveTexture[260] = L"";
+    wchar_t emissiveDistortion[260] = L"";
+    float emissiveStrength = 1.f;
+    float emissiveTint[3] = {1.f, 1.f, 1.f};
+    float emissiveSpeed[2] = {0.f, 0.f};
+    float emissiveDirection[2] = {1.f, 1.f};
+    float emissiveDistort = 0.f;
+    float emissiveTiling[2] = {1.f, 1.f};
+    float emissiveFresnelStrength = 0.f;
+    float emissivePulseSpeed = 0.f;
+    float emissivePulseStrength = 0.f;
+    float emissiveGradientStop[4] = {0.f, 0.33f, 0.67f, 1.f};
+    float emissiveGradientColour[4][3] = {{0.f, 0.f, 0.f}, {0.33f, 0.33f, 0.33f}, {0.67f, 0.67f, 0.67f}, {1.f, 1.f, 1.f}};
+    float iridescenceAmount = 0.f;
+    float iridescenceColourA[3] = {0.96f, 0.26f, 0.95f};
+    float iridescenceColourB[3] = {0.26f, 0.82f, 0.96f};
+    float emissiveScale = 1.f;
+    bool emissiveSoft = false;
     wchar_t meleeSfx[kMeleeSfx][512] = {};
     float meleeSfxVolume[kMeleeSfx] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f,
                                        -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
@@ -548,6 +570,7 @@ private:
         uint32_t firstIndex, indexCount;
         int tex[3];
         uint32_t normalMode, materialMode, flags;
+        bool wh3 = false;
     };
     struct Bone {
         int parent;
@@ -602,6 +625,12 @@ private:
     Submesh* subs_ = nullptr;
     unsigned subCount_ = 0;
     unsigned lensSubs_ = 0;
+    void SetupWh3Material(const Settings& s);
+    wchar_t hvmDir_[MAX_PATH] = L"";
+    wchar_t texName_[kMaxTextures][64] = {};
+    ID3D11ShaderResourceView* wh3Srv_[3] = {};
+    uint64_t wh3Key_ = 0;
+    bool wh3On_ = false;
     Bone* bones_ = nullptr;
     unsigned boneCount_ = 0;
     Clip* clips_ = nullptr;

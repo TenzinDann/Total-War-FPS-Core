@@ -400,11 +400,21 @@ cbuffer CMat : register(b2) {
     float4 uMat;
     float4 uMat2;
     float4 uMat3;
+    float4 uEm0;
+    float4 uEm1;
+    float4 uEm2;
+    float4 uEm3;
+    float4 uEmStop;
+    float4 uEmC1, uEmC2, uEmC3, uEmC4;
+    float4 uIrA, uIrB;
 };
 Texture2D tAlbedo : register(t0);
 Texture2D tNormal : register(t1);
 Texture2D tMaterial : register(t2);
 Texture2D tScene : register(t3);
+Texture2D tEmMask : register(t4);
+Texture2D tEmTex : register(t5);
+Texture2D tEmDist : register(t6);
 SamplerState sLinear : register(s0);
 struct VSIn {
     float3 pos : POSITION; float3 nrm : NORMAL; float4 tan : TANGENT; float2 uv : TEXCOORD0;
@@ -439,6 +449,27 @@ float3 SrgbDecode(float3 c) {
     float3 hi = pow((c + 0.055) / 1.055, 2.4);
     return float3(c.x <= 0.04045 ? lo.x : hi.x, c.y <= 0.04045 ? lo.y : hi.y, c.z <= 0.04045 ? lo.z : hi.z);
 }
+float3 RgbToHsl(float3 c) {
+    float mn = min(min(c.r, c.g), c.b), mx = max(max(c.r, c.g), c.b), d = mx - mn, l2 = mx + mn;
+    if (d <= 0) return float3(0, 0, l2 * 0.5);
+    float s = d / (l2 < 1 ? max(l2, 1e-6) : max(2 - l2, 1e-6));
+    float3 dl = ((mx - c) / 6 + d * 0.5) / d;
+    float hh = c.r == mx ? dl.b - dl.g : (c.g == mx ? 1.0 / 3 + dl.r - dl.b : 2.0 / 3 + dl.g - dl.r);
+    hh = hh < 0 ? hh + 1 : (hh > 1 ? hh - 1 : hh);
+    return float3(hh, s, l2 * 0.5);
+}
+float HueToRgb(float v1, float v2, float vh) {
+    vh = vh < 0 ? vh + 1 : (vh > 1 ? vh - 1 : vh);
+    if (vh < 1.0 / 6) return v1 + (v2 - v1) * 6 * vh;
+    if (vh < 0.5) return v2;
+    if (vh < 2.0 / 3) return v1 + (v2 - v1) * (2.0 / 3 - vh) * 6;
+    return v1;
+}
+float3 HslToRgb(float3 hsl) {
+    if (hsl.y == 0) return hsl.zzz;
+    float v2 = hsl.z < 0.5 ? hsl.z * (1 + hsl.y) : hsl.z + hsl.y - hsl.y * hsl.z, v1 = 2 * hsl.z - v2;
+    return float3(HueToRgb(v1, v2, hsl.x + 1.0 / 3), HueToRgb(v1, v2, hsl.x), HueToRgb(v1, v2, hsl.x - 1.0 / 3));
+}
 float Bar(float2 d, float a, float b, float hw) {
     float ax = abs(d.x);
     return saturate(min(ax - a, b - ax) + 0.5) * saturate(hw - abs(d.y) + 0.5);
@@ -455,6 +486,7 @@ float Reticle(float2 d, float R) {
 }
 float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
     float4 alb = tAlbedo.Sample(sLinear, i.uv);
+    if (uMat3.y > 0.5 && alb.a < 0.5) discard;
     float3 N = normalize(i.n);
     float3 V = normalize(-i.vpos);
     if (dot(N, V) < 0) N = -N;
@@ -480,6 +512,49 @@ float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
             rough = pow(2.0 / (e + 2.0), 0.25);
             if (uMat2.z > 0.5) metal = m.g;
         } else if (uMat.w > 0.5) { rough = m.r; metal = m.g; } else { metal = m.r; rough = m.g; }
+    }
+    if (uEm3.z > 0.5) {
+        float4 mk = tEmMask.Sample(sLinear, i.uv);
+        float3 base = alb.rgb;
+        float3 ic = lerp(uIrA.rgb, uIrB.rgb, abs(dot(N, V)));
+        float3 cg = pow(abs(ic), 1 / 2.2), bg = pow(abs(base), 1 / 2.2);
+        float3 ov = dot(base, float3(0.3, 0.59, 0.11)) > 0.269 ? 1 - 2 * (1 - cg) * (1 - bg) : 2 * cg * bg;
+        ov = pow(saturate(ov), 2.2);
+        float am = max(uEm3.w, 0);
+        float3 r5 = lerp(base, ov, min(am, 1));
+        float3 hc = RgbToHsl(cg);
+        float3 cb = pow(abs(HslToRgb(float3(hc.xy, RgbToHsl(pow(abs(r5), 1 / 2.2)).z))), 2.2);
+        float3 ir = lerp(r5, cb, saturate(min(am, 2) - 1));
+        alb.rgb = lerp(lerp(base, ir, mk.b), base, saturate(rough));
+    }
+    float3 emis = float3(0, 0, 0);
+    if (uEm0.x > 0.5) {
+        float maskA = tEmMask.Sample(sLinear, i.uv).a;
+        float2 dn = tEmDist.Sample(sLinear, i.uv).rb;
+        float2 euv = (i.uv + dn * uEm0.w + uEm2.xy) * uEm2.zw;
+        float et = tEmTex.Sample(sLinear, euv).r;
+        float fr = 1 - saturate(dot(N, V));
+        fr *= fr;
+        float3 e;
+        if (uEm0.x > 1.5) {
+            e = uEm1.rgb * ((uEm0.y * et + uEm1.w + uEm0.z * fr) * maskA);
+        } else {
+            float v = (et + uEm1.w + uEm0.z * fr) * maskA;
+            float3 g;
+            if (v <= uEmStop.x) g = uEmC1.rgb;
+            else if (v <= uEmStop.y) g = lerp(uEmC1.rgb, uEmC2.rgb, (v - uEmStop.x) / (uEmStop.y - uEmStop.x + 0.001));
+            else if (v <= uEmStop.z) g = lerp(uEmC2.rgb, uEmC3.rgb, (v - uEmStop.y) / (uEmStop.z - uEmStop.y + 0.001));
+            else if (v <= uEmStop.w) g = lerp(uEmC3.rgb, uEmC4.rgb, (v - uEmStop.z) / (uEmStop.w - uEmStop.z + 0.001));
+            else g = uEmC4.rgb;
+            e = g * uEm0.y * uEm1.rgb;
+        }
+        float d = max(max(max(e.r, e.g), e.b), 1);
+        float el = dot(e, float3(0.2126, 0.7152, 0.0722));
+        alb.rgb = 1 - (1 - alb.rgb) * (1 - e / d);
+        float ls = saturate(el);
+        metal *= 1 - ls;
+        rough = lerp(rough, 1, ls);
+        emis = alb.rgb * (1 - metal) * (min(d * el * 0.02, 1) * 255 * uEm3.x);
     }
     rough = clamp(rough, 0.04, 1);
     float3 ambSky = uAmbSky.rgb, ambGround = uAmbGround.rgb, lightCol = uLightColor.rgb;
@@ -527,7 +602,11 @@ float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
     float3 amb = lerp(ambGround, ambSky, hemi);
     float3 Fa = F0 + (max(float3(1 - rough, 1 - rough, 1 - rough), F0) - F0) * pow(1 - NdV, 5);
     float3 ambient = amb * (alb.rgb * (1 - metal) * (1 - Fa)) + lerp(ambGround, ambSky, saturate(reflect(-V, N).y * 0.5 + 0.5)) * Fa * (1 - rough * 0.7);
-    float3 c = (direct + ambient) * uParams.x;
+    float3 c = (direct + ambient + emis) * uParams.x;
+    if (uEm3.y > 0.5 && max(max(emis.r, emis.g), emis.b) > 1e-3) {
+        float m = max(max(c.r, c.g), c.b);
+        if (m > 0.8) c *= (0.8 + 0.2 * (1 - exp(-(m - 0.8) / 0.2))) / m;
+    }
     if (uParams.y > 0.5) c = SrgbEncode(c);
     if (uMat3.x > 0.5 && uLens1.z > 0.001 && uScene.w > 0.5) {
         float2 px = i.pos.xy, ax = uLens0.xy;
@@ -607,7 +686,7 @@ struct StateBackup {
     UINT sampleMask = 0;
     UINT stencilRef = 0;
     ID3D11DepthStencilState* dss = nullptr;
-    ID3D11ShaderResourceView* psSrv[4] = {};
+    ID3D11ShaderResourceView* psSrv[7] = {};
     ID3D11SamplerState* psSampler = nullptr;
     ID3D11PixelShader* ps = nullptr;
     ID3D11VertexShader* vs = nullptr;
@@ -632,7 +711,7 @@ struct StateBackup {
         c->OMGetBlendState(&bs, blendFactor, &sampleMask);
         c->OMGetDepthStencilState(&dss, &stencilRef);
         c->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, &dsv);
-        c->PSGetShaderResources(0, 4, psSrv);
+        c->PSGetShaderResources(0, 7, psSrv);
         c->PSGetSamplers(0, 1, &psSampler);
         psInstCount = vsInstCount = gsInstCount = hsInstCount = dsInstCount = 256;
         c->PSGetShader(&ps, psInst, &psInstCount);
@@ -659,7 +738,7 @@ struct StateBackup {
         c->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, dsv);
         for (auto*& r : rtv) SafeRelease(r);
         SafeRelease(dsv);
-        c->PSSetShaderResources(0, 4, psSrv);
+        c->PSSetShaderResources(0, 7, psSrv);
         for (auto*& s : psSrv) SafeRelease(s);
         c->PSSetSamplers(0, 1, &psSampler);
         SafeRelease(psSampler);
@@ -843,6 +922,58 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.fireTailGap = IniFloat(ini, L"fire_tail_gap", s.fireTailGap);
     s.meleeStrikeLead = IniFloat(ini, L"melee_strike_lead", s.meleeStrikeLead);
     if (!(s.meleeStrikeLead >= 0.f && s.meleeStrikeLead <= 0.6f)) s.meleeStrikeLead = 0.25f;
+    {
+        wchar_t buf[128];
+        GetPrivateProfileStringW(L"viewmodel", L"wh3_shader", L"\x01", buf, 128, ini);
+        if (buf[0] != 1) {
+            static const struct {
+                const wchar_t* name;
+                int emissive;
+                bool iridescent;
+            } kWh3Shaders[] = {{L"rigid_character_emissive", 1, false},
+                               {L"rigid_character_prop_emissive", 2, false},
+                               {L"rigid_character_iridescent", 0, true},
+                               {L"rigid_character_iridescent_emissive", 1, true},
+                               {L"rigid_character_iridescent_emissive_alpha", 1, true}};
+            s.wh3Emissive = 0;
+            s.wh3Iridescent = false;
+            for (const auto& k : kWh3Shaders)
+                if (!_wcsicmp(buf, k.name)) s.wh3Emissive = k.emissive, s.wh3Iridescent = k.iridescent;
+        }
+        GetPrivateProfileStringW(L"viewmodel", L"wh3_part", s.wh3Part, s.wh3Part, 256, ini);
+        GetPrivateProfileStringW(L"viewmodel", L"wh3_mask", s.wh3Mask, s.wh3Mask, 260, ini);
+        GetPrivateProfileStringW(L"viewmodel", L"emissive_texture", s.emissiveTexture, s.emissiveTexture, 260, ini);
+        GetPrivateProfileStringW(L"viewmodel", L"emissive_distortion", s.emissiveDistortion, s.emissiveDistortion, 260, ini);
+        s.emissiveStrength = IniFloat(ini, L"emissive_strength", s.emissiveStrength);
+        IniVec3(ini, L"emissive_tint", s.emissiveTint);
+        float t[2];
+        GetPrivateProfileStringW(L"viewmodel", L"emissive_speed", L"", buf, 128, ini);
+        int n = buf[0] ? swscanf(buf, L"%f , %f", &t[0], &t[1]) : 0;
+        if (n == 1) t[1] = t[0];
+        if (n >= 1 && std::isfinite(t[0]) && std::isfinite(t[1])) s.emissiveSpeed[0] = t[0], s.emissiveSpeed[1] = t[1];
+        IniVec2(ini, L"emissive_direction", s.emissiveDirection);
+        s.emissiveDistort = IniFloat(ini, L"emissive_distort_strength", s.emissiveDistort);
+        s.emissiveDistort = IniFloat(ini, L"emissive_distortion_scale", s.emissiveDistort);
+        IniVec2(ini, L"emissive_tiling", s.emissiveTiling);
+        float tt = IniFloat(ini, L"emissive_texture_tiling", -1e30f);
+        if (tt > -1e29f) s.emissiveTiling[0] = s.emissiveTiling[1] = tt;
+        s.emissiveFresnelStrength = IniFloat(ini, L"emissive_fresnel_strength", s.emissiveFresnelStrength);
+        s.emissivePulseSpeed = IniFloat(ini, L"emissive_pulse_speed", s.emissivePulseSpeed);
+        s.emissivePulseStrength = IniFloat(ini, L"emissive_pulse_strength", s.emissivePulseStrength);
+        for (int k = 0; k < 4; ++k) {
+            wchar_t key[64];
+            swprintf(key, 64, L"emissive_gradient_stop_%d", k + 1);
+            s.emissiveGradientStop[k] = IniFloat(ini, key, s.emissiveGradientStop[k]);
+            swprintf(key, 64, L"emissive_gradient_colour_stop_%d", k + 1);
+            IniVec3(ini, key, s.emissiveGradientColour[k]);
+        }
+        s.iridescenceAmount = IniFloat(ini, L"iridescence_amount", s.iridescenceAmount);
+        IniVec3(ini, L"iridescence_colour_a", s.iridescenceColourA);
+        IniVec3(ini, L"iridescence_colour_b", s.iridescenceColourB);
+        s.emissiveScale = IniFloat(ini, L"emissive_scale", s.emissiveScale);
+        if (!(s.emissiveScale >= 0.f && s.emissiveScale <= 100.f)) s.emissiveScale = 1.f;
+        s.emissiveSoft = IniFloat(ini, L"emissive_soft", s.emissiveSoft ? 1.f : 0.f) != 0.f;
+    }
     for (int i = 0; i < kMeleeSfx; ++i) {
         wchar_t key[64];
         swprintf(key, 64, L"melee_sfx_%ls", kMeleeSfxNames[i]);
@@ -1191,6 +1322,7 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
         wchar_t* slash = wcsrchr(dir, L'\\');
         if (!slash) slash = wcsrchr(dir, L'/');
         if (slash) slash[1] = 0;
+        wcsncpy(hvmDir_, dir, MAX_PATH - 1);
         bool texOk = true;
         for (uint32_t t = 0; t < h.textureCount; ++t) {
             HvmTexture tx;
@@ -1199,6 +1331,14 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
             tx.file[75] = 0;
             wchar_t rel[128];
             MultiByteToWideChar(CP_UTF8, 0, tx.file, -1, rel, 128);
+            if (t < kMaxTextures) {
+                const wchar_t* b = rel;
+                for (const wchar_t* q = rel; *q; ++q)
+                    if (*q == L'/' || *q == L'\\') b = q + 1;
+                wcsncpy(texName_[t], b, 63);
+                texName_[t][63] = 0;
+                _wcslwr(texName_[t]);
+            }
             wchar_t full[MAX_PATH * 2];
             swprintf(full, MAX_PATH * 2, L"%ls%ls", dir, rel);
             if (!LoadDds(dev_, full, tx.srgb != 0, &srv_[t], err, errLen)) {
@@ -1414,7 +1554,7 @@ bool Renderer::CreatePipeline(char* err, size_t errLen) {
     ok = SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbFrame_));
     bd.ByteWidth = kMaxBones * 3 * 16;
     ok = ok && SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbBones_));
-    bd.ByteWidth = 48;
+    bd.ByteWidth = 48 + 11 * 16;
     ok = ok && SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbMat_));
     D3D11_RASTERIZER_DESC rd = {};
     rd.FillMode = D3D11_FILL_SOLID;
@@ -2372,6 +2512,38 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
     ctx->PSSetSamplers(0, 1, &samp_);
     ID3D11ShaderResourceView* sceneView = haveScene ? sceneSrv_ : white_;
     ctx->PSSetShaderResources(3, 1, &sceneView);
+    SetupWh3Material(s);
+    float em[44] = {};
+    if (wh3On_) {
+        if (s.wh3Emissive) {
+            double t = look.time;
+            bool prop = s.wh3Emissive == 2;
+            for (int k = 0; k < 2; ++k) {
+                double v = prop ? 0.05 * s.emissiveSpeed[k] : static_cast<double>(s.emissiveSpeed[0]) * s.emissiveDirection[k];
+                double per = std::fabs(s.emissiveTiling[k]) > 1e-4 ? 1.0 / std::fabs(s.emissiveTiling[k]) : 1.0;
+                em[8 + k] = static_cast<float>(std::fmod(t * v, per));
+                em[10 + k] = s.emissiveTiling[k];
+            }
+            double ph = prop ? s.emissivePulseSpeed * (t + 0.5) : s.emissivePulseSpeed * t;
+            em[0] = static_cast<float>(s.wh3Emissive);
+            em[1] = s.emissiveStrength;
+            em[2] = s.emissiveFresnelStrength;
+            em[3] = s.emissiveDistort;
+            em[4] = s.emissiveTint[0], em[5] = s.emissiveTint[1], em[6] = s.emissiveTint[2];
+            em[7] = static_cast<float>(0.1 * s.emissivePulseStrength * (std::sin(std::fmod(ph, 6.283185307179586)) + 0.99));
+            for (int k = 0; k < 4; ++k) {
+                em[16 + k] = s.emissiveGradientStop[k];
+                for (int j = 0; j < 3; ++j) em[20 + k * 4 + j] = s.emissiveGradientColour[k][j];
+            }
+        }
+        em[12] = s.emissiveScale;
+        em[13] = s.emissiveSoft ? 1.f : 0.f;
+        em[14] = s.wh3Iridescent ? 1.f : 0.f;
+        em[15] = s.iridescenceAmount;
+        for (int j = 0; j < 3; ++j) em[36 + j] = s.iridescenceColourA[j], em[40 + j] = s.iridescenceColourB[j];
+        ID3D11ShaderResourceView* t3[3] = {wh3Srv_[0], wh3Srv_[1] ? wh3Srv_[1] : white_, wh3Srv_[2] ? wh3Srv_[2] : white_};
+        ctx->PSSetShaderResources(4, 3, t3);
+    }
     for (unsigned i = 0; i < subCount_; ++i) {
         const Submesh& sm = subs_[i];
         bool hasDef = (sm.flags >> 17) & 1;
@@ -2379,9 +2551,11 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
                          static_cast<float>(sm.materialMode),
                          hasDef ? (sm.flags & 0xff) / 255.f : 0.55f, hasDef ? ((sm.flags >> 8) & 0xff) / 255.f : 0.f,
                          ((sm.flags >> 18) & 1) ? 1.f : 0.f, ((sm.flags >> 16) & 1) ? 1.f : 0.f,
-                         ((sm.flags >> 19) & 1) ? 1.f : 0.f, 0.f, 0.f, 0.f};
+                         ((sm.flags >> 19) & 1) ? 1.f : 0.f, ((sm.flags >> 20) & 1) ? 1.f : 0.f, 0.f, 0.f};
         if (SUCCEEDED(ctx->Map(cbMat_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mp))) {
             memcpy(mp.pData, mat, sizeof mat);
+            if (wh3On_ && sm.wh3) memcpy(static_cast<char*>(mp.pData) + sizeof mat, em, sizeof em);
+            else memset(static_cast<char*>(mp.pData) + sizeof mat, 0, sizeof em);
             ctx->Unmap(cbMat_, 0);
         }
         ID3D11ShaderResourceView* srv[3];
@@ -2392,8 +2566,57 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
     bk.Restore(ctx);
     return true;
 }
+void Renderer::SetupWh3Material(const Settings& s) {
+    bool any = s.wh3Emissive || s.wh3Iridescent;
+    uint64_t key = any ? Fnv64(s.wh3Part, sizeof s.wh3Part) ^ Fnv64(s.wh3Mask, sizeof s.wh3Mask) * 3 ^
+                             Fnv64(s.emissiveTexture, sizeof s.emissiveTexture) * 5 ^ Fnv64(s.emissiveDistortion, sizeof s.emissiveDistortion) * 7 ^
+                             (static_cast<uint64_t>(s.wh3Emissive) << 1 | (s.wh3Iridescent ? 1u : 0u))
+                       : 0;
+    if (key == wh3Key_) return;
+    wh3Key_ = key;
+    wh3On_ = false;
+    for (auto*& v : wh3Srv_) SafeRelease(v);
+    for (unsigned i = 0; i < subCount_; ++i) subs_[i].wh3 = false;
+    if (!any || !dev_) return;
+    wchar_t parts[256];
+    wcsncpy(parts, s.wh3Part, 255);
+    parts[255] = 0;
+    _wcslwr(parts);
+    unsigned hit = 0;
+    for (unsigned i = 0; i < subCount_; ++i) {
+        int a = subs_[i].tex[0];
+        if (a < 0 || a >= static_cast<int>(kMaxTextures) || !texName_[a][0]) continue;
+        size_t n = wcslen(texName_[a]);
+        for (const wchar_t* p = parts; *p;) {
+            const wchar_t* e = wcschr(p, L';');
+            size_t len = e ? static_cast<size_t>(e - p) : wcslen(p);
+            if (len == n && !wcsncmp(p, texName_[a], n)) {
+                subs_[i].wh3 = true;
+                ++hit;
+                break;
+            }
+            if (!e) break;
+            p = e + 1;
+        }
+    }
+    if (!hit) return;
+    const wchar_t* rel[3] = {s.wh3Mask, s.emissiveTexture, s.emissiveDistortion};
+    for (int k = 0; k < (s.wh3Emissive ? 3 : 1); ++k) {
+        wchar_t full[MAX_PATH * 2];
+        swprintf(full, MAX_PATH * 2, L"%ls%ls", hvmDir_, rel[k]);
+        char err[256];
+        if (!rel[k][0] || !LoadDds(dev_, full, false, &wh3Srv_[k], err, sizeof err)) {
+            for (auto*& v : wh3Srv_) SafeRelease(v);
+            return;
+        }
+    }
+    wh3On_ = true;
+}
 void Renderer::Release() {
     ready_ = false;
+    for (auto*& v : wh3Srv_) SafeRelease(v);
+    wh3Key_ = 0;
+    wh3On_ = false;
     SafeRelease(vb_);
     SafeRelease(ib_);
     SafeRelease(cbFrame_);
