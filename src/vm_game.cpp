@@ -11,42 +11,6 @@
 namespace vmgame {
 void MagApply();
 void RefillForNewBattle();
-bool CsvHas(const char* list, const char* key) {
-    size_t lk = strlen(key);
-    for (const char* p = list; lk && *p;) {
-        const char* e = p;
-        while (*e && *e != ',' && *e != ';') ++e;
-        const char* a = p;
-        while (a < e && *a == ' ') ++a;
-        const char* b = e;
-        while (b > a && b[-1] == ' ') --b;
-        if (static_cast<size_t>(b - a) == lk && !strncmp(a, key, lk)) return true;
-        p = *e ? e + 1 : e;
-    }
-    return false;
-}
-bool CsvHasW(const wchar_t* list, const char* key) {
-    char a[512];
-    snprintf(a, sizeof a, "%ls", list);
-    return CsvHas(a, key);
-}
-void CsvAppend(char* list, size_t cap, const wchar_t* add) {
-    char a[512];
-    snprintf(a, sizeof a, "%ls", add);
-    for (char* p = a; *p;) {
-        char* e = p;
-        while (*e && *e != ',' && *e != ';') ++e;
-        char c = *e;
-        *e = 0;
-        while (*p == ' ') ++p;
-        for (char* t = p + strlen(p); t > p && t[-1] == ' ';) *--t = 0;
-        if (*p && !CsvHas(list, p) && strlen(list) + strlen(p) + 2 < cap) {
-            if (list[0]) strcat(list, ",");
-            strcat(list, p);
-        }
-        p = c ? e + 1 : e;
-    }
-}
 namespace {
 RenderAddrs g_ra = {};
 const unsigned char kScCreateBytes[] = {0x4C, 0x8D, 0x83, 0x50, 0x13, 0x00, 0x00};
@@ -341,14 +305,6 @@ int g_unloadPending = 0;
 volatile LONG g_spent[kMaxModels] = {};
 FILETIME g_armoryTime = {};
 volatile LONG g_reqRoster = 0;
-wchar_t g_mainIniName[64] = L"hero_fps.ini";
-bool g_fullMod = true;
-wchar_t g_addonIds[1024] = L"";
-char g_allowKeys[2048] = "";
-char g_unitKeys[4096] = "";
-char g_heroKey[64] = "";
-SRWLOCK g_heroKeyLock = SRWLOCK_INIT;
-volatile LONG g_newBattle = 0;
 volatile LONG g_reqWeapon = 0;
 volatile LONG g_wantIdx = 0;
 volatile LONG g_switching = 0;
@@ -1770,28 +1726,15 @@ void RosterStep(ID3D11Device* dev) {
         fclose(f);
     }
     WIN32_FILE_ATTRIBUTE_DATA fa;
-    bool fresh = InterlockedExchange(&g_newBattle, 0) != 0;
     if (GetFileAttributesExW(path, GetFileExInfoStandard, &fa) &&
         CompareFileTime(&fa.ftLastWriteTime, &g_armoryTime) != 0) {
         g_armoryTime = fa.ftLastWriteTime;
-<<<<<<< <path>
-        fresh = true;
-    }
-    if (fresh) RefillForNewBattle();
-    if (!g_fullMod) mode[0] = 0, owned[0] = 0, loadout[0] = 0;
-    char hero[64];
-    AcquireSRWLockShared(&g_heroKeyLock);
-    memcpy(hero, g_heroKey, sizeof hero);
-    ReleaseSRWLockShared(&g_heroKeyLock);
-    bool campaign = !strcmp(mode, "campaign");
-=======
         RefillForNewBattle();
     }
     bool iniAll = GetPrivateProfileIntW(L"viewmodel", L"loadout_all", 0, g_ini) != 0;
     bool all = g_loadoutAll || iniAll;
     InterlockedExchange(&g_rosterAll, all ? 1 : 0);
     bool campaign = !strcmp(mode, "campaign") && !iniAll;
->>>>>>> <path>
     auto ownedHas = [&](const wchar_t* id) {
         char a[64];
         snprintf(a, sizeof a, "%ls", id);
@@ -1806,8 +1749,7 @@ void RosterStep(ID3D11Device* dev) {
     };
     auto usable = [&](int i) {
         const vm::Settings& s = g_w[i].set;
-        bool own = hero[0] && CsvHasW(s.weaponOwner, hero);
-        return s.weaponId[0] && (own || (g_fullMod && (!campaign || s.weaponDefault || ownedHas(s.weaponId))));
+        return s.weaponId[0] && (!campaign || s.weaponDefault || ownedHas(s.weaponId));
     };
     LONG n = 0;
     LONG slot[kSlots] = {-1, -1, -1, -1};
@@ -1862,8 +1804,8 @@ void RosterStep(ID3D11Device* dev) {
     if (!n) g_roster[n++] = g_modelIdx;
     for (int k = 0; k < kSlots; ++k) InterlockedExchange(&g_slot[k], slot[k]);
     InterlockedExchange(&g_rosterN, n);
-    g_log("weapon: roster %ld from %s (armory file %s, mode '%s', owned '%s', loadout '%s'; hero '%s', %s)", n, from,
-          mode[0] || owned[0] ? "found" : "missing", mode, owned, loadout, hero, g_fullMod ? "full mod" : "core only: own weapons");
+    g_log("weapon: roster %ld from %s (armory file %s, mode '%s', owned '%s', loadout '%s')", n, from, mode[0] || owned[0] ? "found" : "missing",
+          mode, owned, loadout);
     bool curOk = false;
     for (LONG k = 0; k < n; ++k) {
         int i = g_roster[k];
@@ -2202,24 +2144,6 @@ bool VerifyStatic(uintptr_t exeBase, LogFn log, const RenderAddrs& addrs) {
         static_cast<unsigned long long>(kBbCopySlot), g_bbRouteOk ? "ok" : "does not match this exe - gun stays at Present (drawn over the UI)");
     return ok;
 }
-void SetPayloads(const wchar_t* mainIni, bool fullMod, const wchar_t* addonIds) {
-    swprintf(g_mainIniName, 64, L"%ls", mainIni && mainIni[0] ? mainIni : L"hero_fps.ini");
-    g_fullMod = fullMod;
-    swprintf(g_addonIds, 1024, L"%ls", addonIds ? addonIds : L"");
-}
-const char* UnitKeys() { return g_unitKeys; }
-bool UnitAllowed(const char* unitKey) { return g_fullMod || (unitKey && unitKey[0] && CsvHas(g_allowKeys, unitKey)); }
-void SetHeroKey(const char* unitKey) {
-    AcquireSRWLockExclusive(&g_heroKeyLock);
-    bool changed = strncmp(g_heroKey, unitKey ? unitKey : "", sizeof g_heroKey - 1) != 0;
-    snprintf(g_heroKey, sizeof g_heroKey, "%s", unitKey ? unitKey : "");
-    ReleaseSRWLockExclusive(&g_heroKeyLock);
-    if (changed) {
-        InterlockedExchange(&g_reqRoster, 1);
-        g_log("weapon: hero unit key '%s'", g_heroKey);
-    }
-}
-void NoteNewBattle() { InterlockedExchange(&g_newBattle, 1); }
 void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
     g_base = exeBase;
     g_log = log;
@@ -2227,7 +2151,7 @@ void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
     InitializeCriticalSection(&g_hookLock);
     QueryPerformanceFrequency(&g_qpf);
     QueryPerformanceCounter(&g_t0);
-    swprintf(g_ini, MAX_PATH, L"%ls\\%ls", dllDir, g_mainIniName);
+    swprintf(g_ini, MAX_PATH, L"%ls\\hero_fps.ini", dllDir);
     g_enabled = GetPrivateProfileIntW(L"viewmodel", L"enabled", 1, g_ini) != 0;
     g_testKey = IniKey(L"test_key", 0);
     g_reloadKey = IniKey(L"reload_key", VK_F8);
@@ -2238,47 +2162,18 @@ void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
     static wchar_t list[kMaxModels * MAX_PATH];
     constexpr DWORD kListLen = kMaxModels * MAX_PATH;
     GetPrivateProfileStringW(L"viewmodel", L"models", L"", list, kListLen, g_ini);
-    if (!list[0] && !g_addonIds[0]) GetPrivateProfileStringW(L"viewmodel", L"model", L"hero_fps_vm\\m7\\m7.hvm", list, kListLen, g_ini);
+    if (!list[0]) GetPrivateProfileStringW(L"viewmodel", L"model", L"hero_fps_vm\\m7\\m7.hvm", list, kListLen, g_ini);
     g_modelCount = 0;
-    auto addModels = [&](wchar_t* tok, const wchar_t* from) {
-        int before = g_modelCount;
-        while (*tok && g_modelCount < kMaxModels) {
-            wchar_t* end = wcschr(tok, L';');
-            if (end) *end = 0;
-            while (*tok == L' ') ++tok;
-            if (*tok) swprintf(g_models[g_modelCount++], MAX_PATH * 2, L"%ls\\%ls", dllDir, tok);
-            if (!end) {
-                tok += wcslen(tok);
-                break;
-            }
-            tok = end + 1;
-        }
-        if (*tok && g_modelCount >= kMaxModels) log("viewmodel: weapon limit %d reached - the rest of %ls is ignored", kMaxModels, from);
-        return g_modelCount - before;
-    };
-    addModels(list, g_mainIniName);
-    g_allowKeys[0] = 0;
-    wchar_t ids[1024];
-    wcscpy(ids, g_addonIds);
-    for (wchar_t* id = ids; *id;) {
-        wchar_t* end = wcschr(id, L';');
+    for (wchar_t* tok = list; *tok && g_modelCount < kMaxModels;) {
+        wchar_t* end = wcschr(tok, L';');
         if (end) *end = 0;
-        wchar_t addonIni[MAX_PATH * 2], units[512];
-        swprintf(addonIni, MAX_PATH * 2, L"%ls\\hero_fps_addons\\%ls.ini", dllDir, id);
-        GetPrivateProfileStringW(L"addon", L"models", L"", list, kListLen, addonIni);
-        int got = addModels(list, id);
-        GetPrivateProfileStringW(L"addon", L"units", L"", units, 512, addonIni);
-        CsvAppend(g_allowKeys, sizeof g_allowKeys, units);
-        log("viewmodel: weapon pack %ls: %d weapons, units '%ls' (%ls)", id, got, units, addonIni);
+        while (*tok == L' ') ++tok;
+        if (*tok) swprintf(g_models[g_modelCount++], MAX_PATH * 2, L"%ls\\%ls", dllDir, tok);
         if (!end) break;
-        id = end + 1;
+        tok = end + 1;
     }
     if (!g_modelCount) swprintf(g_models[g_modelCount++], MAX_PATH * 2, L"%ls\\hero_fps_vm\\m7\\m7.hvm", dllDir);
     for (int i = 0; i < g_modelCount; ++i) LoadAllSettings(i, g_w[i].set);
-    snprintf(g_unitKeys, sizeof g_unitKeys, "%s", g_allowKeys);
-    for (int i = 0; i < g_modelCount; ++i) CsvAppend(g_unitKeys, sizeof g_unitKeys, g_w[i].set.weaponOwner);
-    log("viewmodel: main config %ls (%s), weapon packs '%ls', allowed units '%s', unit keys '%s'", g_mainIniName,
-        g_fullMod ? "full mod - every hero may enter" : "core only - only the weapon packs' heroes may enter", g_addonIds, g_allowKeys, g_unitKeys);
     log("viewmodel: enabled=%d static=%d keys test=0x%02X reload=0x%02X anim=0x%02X model=0x%02X models=%d first=%ls "
         "fov=%.1f offset=%.3f,%.3f,%.3f rot=%.1f,%.1f,%.1f",
         g_enabled, g_staticOk, g_testKey, g_reloadKey, g_animKey, g_modelKey, g_modelCount, g_models[0], Wp().set.fovDeg,
@@ -2670,9 +2565,6 @@ void LauncherCast(int kind, bool driven, float windup) {
 }
 void LauncherFire() { InterlockedExchange64(&g_lc.fireUs, static_cast<LONG64>(Now() * 1e6)); }
 void LauncherAbort() { InterlockedExchange64(&g_lc.abortUs, static_cast<LONG64>(Now() * 1e6)); }
-void LauncherCue(int cue, int kind) {
-    if (cue >= 0 && cue < 2 && kind >= 0 && kind < kLauncherKinds) InterlockedOr(&g_lc.cueReq, 1L << (cue * kLauncherKinds + kind));
-}
 bool MeleeActive() { return g_meleeOn != 0; }
 void MeleeInput(bool attack, bool block) { InterlockedExchange(&g_meleeIn, (attack ? 1 : 0) | (block ? 2 : 0)); }
 int TakeMeleeStrike() { return static_cast<int>(InterlockedExchange(&g_meleeStrike, 0)) - 1; }

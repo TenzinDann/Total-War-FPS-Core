@@ -72,7 +72,6 @@ struct Settings {
     float reloadEmptyRefill = 0.f;
     wchar_t weaponId[64] = L"";
     bool weaponDefault = false;
-    wchar_t weaponOwner[160] = L"";
     char projectile[64] = "";
     wchar_t animSounds[128] = L"";
     float animSoundVolume = 0.7f;
