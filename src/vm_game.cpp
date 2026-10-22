@@ -866,6 +866,14 @@ void AnimReset(double now) {
     int draw = Wp().rend.FindClip("draw");
     Play(draw >= 0 ? draw : g_an.idle, now, 0);
 }
+int BoltCycleStance(double now) {
+    const float* sp = Wp().set.fireStanceSync;
+    if (!(sp[0] > 0.f && sp[1] > 0.f) || g_an.cur < 0 || g_an.curveClip >= 0) return -1;
+    int hip = Wp().rend.FindClip("fire1"), ads = Wp().rend.FindClip("ads_fire");
+    int k = hip < 0 || ads < 0 ? -1 : g_an.cur == hip ? 0 : g_an.cur == ads ? 1 : -1;
+    if (k < 0 || ClipT(now) >= Wp().rend.ClipDuration(g_an.cur) - 0.05) return -1;
+    return k;
+}
 int StanceIdle() {
     int c = g_an.stance == 1 ? Wp().rend.FindClip("ads_idle") : g_an.stance == 2 ? Wp().rend.FindClip("sprint") : -1;
     if (g_an.stance == 3) {
@@ -945,6 +953,24 @@ void AnimStep(vm::Look& l, double now) {
             if (g_spin.state == 2) {
                 int c = st == 1 ? Wp().rend.FindClip("ads_fire_loop") : -1;
                 Play(c >= 0 ? c : Wp().rend.FindClip("fire_loop"), now, 0.12);
+            }
+        } else if (st != g_an.stance && BoltCycleStance(now) >= 0) {
+            if (st < 2 && g_an.stance < 2) {
+                const int k = BoltCycleStance(now);
+                const float* sp = Wp().set.fireStanceSync;
+                const double t = ClipT(now);
+                double tTo = t < sp[k] ? t * sp[1 - k] / sp[k] : t - sp[k] + sp[1 - k];
+                const int c = Wp().rend.FindClip(st == 1 ? "ads_fire" : "fire1");
+                const double dTo = Wp().rend.ClipDuration(c);
+                if (tTo > dTo - 0.02) tTo = dTo - 0.02;
+                double fade = AdsTime(StanceAdsKind(raw));
+                if (!(fade > 0.05 && fade < 0.6)) fade = 0.2;
+                g_an.stance = st;
+                Play(c, now, fade);
+                g_an.curStart = now - tTo;
+                g_an.evClip = g_an.cur;
+                g_an.evStart = g_an.curStart;
+                g_an.evLast = tTo;
             }
         } else if (st != g_an.stance && reloadAnim) {
             g_an.stance = st;
@@ -1036,6 +1062,10 @@ void AnimStep(vm::Look& l, double now) {
         g_an.reloadAt = fired ? now + (lastFired && FindLastClip() >= 0 ? 0.2 : 0.12) : now;
         double exitEnd = g_an.stance >= 2 ? now + (g_an.stance == 3 ? 0.3 : 0.2) : g_an.sprintExitEnd;
         if (g_an.reloadAt < exitEnd) g_an.reloadAt = exitEnd;
+        if (BoltCycleStance(now) >= 0) {
+            double end = now + (Wp().rend.ClipDuration(g_an.cur) - ClipT(now)) / (g_an.curRate > 0 ? g_an.curRate : 1.0);
+            if (g_an.reloadAt < end) g_an.reloadAt = end;
+        }
         if (g_sh.w > 0.f) {
             double t = now + g_sh.w * Wp().set.shieldLowerTime;
             if (g_an.reloadAt < t) g_an.reloadAt = t;

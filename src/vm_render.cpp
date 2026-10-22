@@ -833,6 +833,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.shellLandPerSec = IniFloat(ini, L"shell_land_per_sec", s.shellLandPerSec);
     s.shellGround = IniFloat(ini, L"shell_ground", s.shellGround);
     s.fireSettle = IniFloat(ini, L"fire_settle", s.fireSettle ? 1.f : 0.f) != 0.f;
+    IniVec2(ini, L"fire_stance_sync", s.fireStanceSync);
     if (!(s.fireLastVolume <= 2.f)) s.fireLastVolume = -1.f;
     if (!(s.fireCasingVolume >= 0.f && s.fireCasingVolume <= 2.f)) s.fireCasingVolume = 0.08f;
     if (!(s.shellLandVolume >= 0.f && s.shellLandVolume <= 2.f)) s.shellLandVolume = 0.04f;

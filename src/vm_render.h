@@ -64,6 +64,7 @@ struct Settings {
     float shellLandPerSec = 6.f;
     float shellGround = 1.75f;
     bool fireSettle = false;
+    float fireStanceSync[2] = {0.f, 0.f};
     float fireRpm = 0.f;
     int magSize = 0;
     bool magDisposable = false;
