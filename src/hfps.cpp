@@ -203,8 +203,10 @@ constexpr uintptr_t kFnAbilityTable904 = 0x1535340, kFnAbilityGroundCtor904 = 0x
                     kVtAbilityCmd904 = 0x39071f8, kFnAbilityCmdWrite904 = 0x2eed7a8;
 const CodePrint kCharPrints904[] = {
     {0x1e8392c, 0x25, 0x909bd734bb5f100bull},
-    {0x4d3970, 0x2e, 0xb416bbb3274728dcull}};
-constexpr uintptr_t oUnitCharDetails = 0x158, oCharKeyStr = 0x4e8;
+    {0x4d3970, 0x2e, 0xb416bbb3274728dcull},
+    {0x8e2880, 0x0c, 0xf55c7e50acf69be9ull},
+    {0x1e86204, 0x11, 0x8aa88ae5c72a99d6ull}};
+constexpr uintptr_t oUnitCharDetails = 0x158, oCharKeyStr = 0x4e8, oUiUnitIsGeneral = 0x6fa;
 constexpr uintptr_t oUnitAbilityMgr = 0x3d48, oAbMgrEnd = 0x20, oAbMgrFirst = 0x28, oAbNodeNext = 0x8, oAbNodeDef = 0x70, oAbNodeInst = 0x10;
 constexpr uintptr_t oAbDefId = 0x8, oAbDefWindup = 0x30, oAbDefRange = 0x54, oAbRecId = 0x50;
 constexpr uintptr_t oAbWindSteps = 0x120, oAbCooldown = 0x134, oAbUses = 0xb4, oAbFlags = 0x170;
@@ -736,7 +738,7 @@ void CamSetF(uintptr_t cam, uintptr_t slot, float v) {
     uintptr_t fn = slot == vtSetFov ? kFnCamSetFov : slot == vtSetNear ? kFnCamSetNear : kFnCamSetFar;
     reinterpret_cast<FnSetF>(g_base + fn)(cam, v);
 }
-uintptr_t SelectedBattleUnit(int* countOut) {
+uintptr_t SelectedBattleUnit(int* countOut, uintptr_t* uiUnitOut = nullptr) {
     uintptr_t ui = Ptr(g_base + kGlobalUi);
     uintptr_t sel = ui ? Ptr(ui + oUiSelection) : 0;
     int count = 0;
@@ -745,16 +747,21 @@ uintptr_t SelectedBattleUnit(int* countOut) {
     if (count < 1) return 0;
     uintptr_t arr = Ptr(sel + oSelArray);
     uintptr_t uiUnit = arr ? Ptr(arr) : 0;
+    if (uiUnitOut) *uiUnitOut = uiUnit;
     return uiUnit ? Ptr(uiUnit + oUiUnitBattleUnit) : 0;
 }
-bool IsCharacterUnit(uintptr_t unit) {
-    uintptr_t det = Ptr(unit + oUnitCharDetails);
-    if (!det) return false;
+int CharKeyLen(uintptr_t uiUnit) {
+    uintptr_t det = uiUnit ? Ptr(uiUnit + oUnitCharDetails) : 0;
+    if (!det) return -1;
     uint64_t w = 0;
-    if (!Rd(det + oCharKeyStr + 8, w)) return false;
-    if ((w & 0xF000000000000000ull) == 0x8000000000000000ull) return ((w >> 56) & 0xf) != 0;
+    if (!Rd(det + oCharKeyStr + 8, w)) return -1;
+    if ((w & 0xF000000000000000ull) == 0x8000000000000000ull) return int((w >> 56) & 0xf);
     uint32_t len = 0;
-    return Rd(det + oCharKeyStr, len) && len != 0;
+    return Rd(det + oCharKeyStr, len) ? int(len) : -1;
+}
+bool IsGeneralUiUnit(uintptr_t uiUnit) {
+    uint8_t b = 0;
+    return uiUnit && Rd(uiUnit + oUiUnitIsGeneral, b) && b != 0;
 }
 bool ReadVec(uintptr_t a, float v[3]) {
     if (!Rd(a, v[0]) || !Rd(a + 4, v[1]) || !Rd(a + 8, v[2])) return false;
@@ -843,7 +850,6 @@ struct State {
     unsigned entCount = 0;
     EntPath entPath;
     double nextShot = 0;
-    bool fireChain = false;
     bool sprint = false, tac = false, ads = false;
     bool shiftPrev = false;
     float adsT = 0;
@@ -1096,7 +1102,8 @@ void Enter(uintptr_t mgr) {
         return;
     }
     int selCount = 0;
-    uintptr_t unit = SelectedBattleUnit(&selCount);
+    uintptr_t uiUnit = 0;
+    uintptr_t unit = SelectedBattleUnit(&selCount, &uiUnit);
     unsigned entCount = 0;
     EntPath path;
     uintptr_t entity = FindEntity(unit, &path, &entCount);
@@ -1110,10 +1117,15 @@ void Enter(uintptr_t mgr) {
         Log("enter refused: cannot tell lords / heroes apart on this exe (IsCharacter fingerprint mismatch); [hero] heroes_only=0 lets any unit in");
         return;
     }
-    if (cfg.heroesOnly && !IsCharacterUnit(unit)) {
-        Log("enter refused: unit %p is not a lord or hero (first person is lords / heroes only; [hero] heroes_only=0 lets any unit in)",
-            (void*)unit);
-        return;
+    if (cfg.heroesOnly) {
+        int keyLen = CharKeyLen(uiUnit);
+        bool general = IsGeneralUiUnit(uiUnit);
+        if (keyLen <= 0 && !general) {
+            Log("enter refused: unit %p (ui %p) is not a lord or hero (IsCharacter key len %d, IsGeneral 0; first person is lords / heroes only; [hero] heroes_only=0 lets any unit in)",
+                (void*)unit, (void*)uiUnit, keyLen);
+            return;
+        }
+        Log("enter: lord / hero check passed (IsCharacter key len %d, IsGeneral %d)", keyLen, general ? 1 : 0);
     }
     if (S.exitStage && unit != S.exitUnit) {
         Log("enter refused: previous hero %p is still being restored (exit stage %d); unpause and try again", (void*)S.exitUnit,
@@ -3588,8 +3600,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -3660,7 +3670,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -3706,26 +3715,17 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) return;
     int32_t steps = 0, cool = 0;
@@ -4287,7 +4287,6 @@ void Apply(uintptr_t mgr) {
     LauncherGameStep(now);
     double fireGap = vmgame::FireInterval() > 0 ? vmgame::FireInterval() : cfg.fireInterval;
     vmgame::SetTrigger(held && g_fireOk && cfg.fireEnabled && !S.sprint && now >= S.fireBlock);
-    if (!held) S.fireChain = false;
     if (held && g_fireOk && cfg.fireEnabled && now >= S.nextShot && !S.sprint && now >= S.fireBlock && vmgame::CanFire()) {
         const float* fwd = vFwd;
         const float* right = vRight;
@@ -4337,8 +4336,7 @@ void Apply(uintptr_t mgr) {
         } else {
             ++S.shotsFailed;
         }
-        S.nextShot = S.fireChain && now - S.nextShot < fireGap ? S.nextShot + fireGap : now + fireGap;
-        S.fireChain = true;
+        S.nextShot = now - S.nextShot < fireGap ? S.nextShot + fireGap : now + fireGap;
     }
     if ((now - S.tStat) * 1000.0 >= cfg.logIntervalMs) {
         Log("sec frames=%u activeWrites=%u yields=%u ent=%.2f,%.2f,%.2f eye=%.2f,%.2f,%.2f yaw=%.1f pitch=%.1f "

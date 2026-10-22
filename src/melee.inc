@@ -190,7 +190,6 @@ struct Moveset {
     const char* pushToBlock = nullptr;
     float pushToBlockFade = 0.2f;
     int finishVariants = 1;
-    float lightGuard = 0.f;
 };
 const Moveset kSpear = {"m_light_stab", kDef, kExit, static_cast<int>(sizeof kExit / sizeof *kExit), kImpact, 0.2f, 0.8f, 1.0f, nullptr, 0.2f};
 const Def kGsDef[kActs] = {
@@ -291,45 +290,10 @@ const Impact kHbImpact[kActs] = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1
                                  {kSfxHitBash, -1}, {kSfxHitSlash, kSfxTailSlash}, {-1, -1}};
 const Moveset kHalberd = {"m_hb_light_left", kHbDef, kHbExit, static_cast<int>(sizeof kHbExit / sizeof *kHbExit), kHbImpact,
                           0.25f, 0.8f, 1.5f, nullptr, 0.2f};
-const Def kSp2Def[kActs] = {
-    {"idle", "idle", 0.2f, 1.f, 0.f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
-    {"draw", "draw", 0.1f, 1.f, 0.8f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
-    {"default", "m_sp_charge", 0.2f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.4f, -1, 0, 0},
-    {"(unused)", "m_sp_charge", 0.2f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.4f, -1, 0, 0},
-    {"(unused)", "m_sp_charge", 0.2f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.4f, -1, 0, 0},
-    {"default_left_heavy", "m_charge_diag", 0.2f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy2, 0.5f, -1, 0, 0},
-    {"default_stab_heavy", "m_charge_stab", 0.3f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy3, 0.5f, -1, 0, 0},
-    {"thrust", "m_sp_thrust", 0.05f, 1.f, 0.8f, 0.36f, kInf, kDefault, 0.f, -1, -1, 0, kStrikeStab, 0.27f, 0.20f, 0, 0.29f},
-    {"(unused)", "m_sp_thrust", 0.05f, 1.f, 0.8f, 0.36f, kInf, kDefault, 0.f, -1, -1, 0, kStrikeStab, 0.27f, 0.20f, 0, 0.29f},
-    {"(unused)", "m_sp_thrust", 0.05f, 1.f, 0.8f, 0.36f, kInf, kDefault, 0.f, -1, -1, 0, kStrikeStab, 0.27f, 0.20f, 0, 0.29f},
-    {"heavy_attack", "m_sweep", 0.05f, 1.035f, 1.0f, 0.5f, 1.0f, kDefaultLeftHeavy, 0.5f, -1, -1, 0, kStrikeHeavySweep, 0.27f, 0.2675f},
-    {"heavy_attack_right", "m_heavy_down_right", 0.1f, 1.0f, 2.25f, 0.5f, 1.05f, kDefaultStabHeavy, 0.4f, -1, -1, 0, kStrikeHeavy, 0.30f, 0.2188f},
-    {"heavy_attack_stab", "m_heavy_stab", 0.1f, 1.035f, 2.25f, 0.5f, 1.05f, kDefault, 0.4f, -1, -1, 0, kStrikeHeavy, 0.25f, 0.2403f},
-    {"push", "m_push", 0.0f, 1.0f, 0.8f, 0.2f, kInf, kDefault, 0.5f, -1, -1, 0, kStrikeBash, 0.05f, 0.f},
-    {"light_attack_stab_postpush", "m_push_stab", 0.1f, 1.17f, 1.1f, 0.4f, kInf, kDefaultLeftHeavy, 0.45f, -1, -1, 0, kStrikeStab, 0.30f, 0.0667f},
-    {"block", "m_parry_pose", 0.2f, 1.f, 0.f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
-};
-const Exit kSp2Exit[] = {{"draw", "idle", 0.2f}, {"m_sp_thrust", "idle", 0.25f}, {"m_sp_thrust_v2", "idle", 0.25f},
-                         {"m_sp_thrust_v3", "idle", 0.25f}, {"m_sp_thrust_v4", "idle", 0.25f},
-                         {"m_sweep", "m_swing_finished", 0.1f}, {"m_heavy_down_right", "m_swing_finished", 0.1f},
-                         {"m_heavy_stab", "m_swing_finished", 0.1f}, {"m_push_stab", "m_swing_finished", 0.1f},
-                         {"m_swing_finished", "idle", 0.2f}, {"m_push", "idle", 0.2f}, {"m_parry_pose", "m_parry_loop", 0.2f}};
-const Impact kSp2Impact[kActs] = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
-                                  {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash},
-                                  {kSfxHitSlashLight, kSfxTailSlash}, {kSfxHitSlashHeavy, kSfxTailSlash}, {kSfxHitStab, kSfxTailStab},
-                                  {kSfxHitBash, -1}, {kSfxHitSlash, kSfxTailSlash}, {-1, -1}};
-const Moveset kSpear2 = {"m_sp_thrust", kSp2Def, kSp2Exit, static_cast<int>(sizeof kSp2Exit / sizeof *kSp2Exit), kSp2Impact,
-                         0.2f, 0.8f, 1.0f, nullptr, 0.2f, 0.3f, nullptr, 0.2f, 1, 0.30f};
 const Moveset& Ms() {
-    if (Wp().rend.FindClip(kSpear2.detect) >= 0) return kSpear2;
     if (Wp().rend.FindClip(kHalberd.detect) >= 0) return kHalberd;
     if (Wp().rend.FindClip(kGreathammer.detect) >= 0) return kGreathammer;
     return Wp().rend.FindClip(kGreatsword.detect) >= 0 ? kGreatsword : kSpear;
-}
-bool Guarding(double now) {
-    const float lg = Ms().lightGuard;
-    if (lg <= 0.f) return false;
-    return (g.act >= kLight1 && g.act <= kLight3) || (g.act == kDefault && now - g.start < lg);
 }
 struct ImpactRec {
     Impact im;
