@@ -31,6 +31,10 @@ struct Settings {
     int adsSightBone = -1;
     float adsSightPoint[3] = {0.0f, 0.0f, 0.0f};
     float adsSightFront[3] = {0.0f, 0.0f, 0.0f};
+    float scopeZoom = 0.0f;
+    int scopeBone = -1;
+    float scopeLensRadius = 0.0178f;
+    float scopeReticle = 1.0f;
     bool handIk = true;
     float ikGripRi[3] = {0.0f, 0.0f, 0.0f};
     float ikGripLe[3] = {0.0f, 0.0f, 0.0f};
@@ -594,6 +598,7 @@ private:
     unsigned texCount_ = 0;
     Submesh* subs_ = nullptr;
     unsigned subCount_ = 0;
+    unsigned lensSubs_ = 0;
     Bone* bones_ = nullptr;
     unsigned boneCount_ = 0;
     Clip* clips_ = nullptr;

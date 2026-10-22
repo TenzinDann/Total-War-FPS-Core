@@ -391,11 +391,15 @@ const char kShader[] = R"HLSL(cbuffer CFrame : register(b0) {
     float4 uScene;
     float4 uFlashPos;
     float4 uFlashCol;
+    float4 uLens0;
+    float4 uLens1;
+    float4 uLens2;
 };
 cbuffer CBones : register(b1) { float4 uBones[768]; };
 cbuffer CMat : register(b2) {
     float4 uMat;
     float4 uMat2;
+    float4 uMat3;
 };
 Texture2D tAlbedo : register(t0);
 Texture2D tNormal : register(t1);
@@ -434,6 +438,20 @@ float3 SrgbDecode(float3 c) {
     float3 lo = c / 12.92;
     float3 hi = pow((c + 0.055) / 1.055, 2.4);
     return float3(c.x <= 0.04045 ? lo.x : hi.x, c.y <= 0.04045 ? lo.y : hi.y, c.z <= 0.04045 ? lo.z : hi.z);
+}
+float Bar(float2 d, float a, float b, float hw) {
+    float ax = abs(d.x);
+    return saturate(min(ax - a, b - ax) + 0.5) * saturate(hw - abs(d.y) + 0.5);
+}
+float Reticle(float2 d, float R) {
+    float t = max(0.6, R * 0.003), T = max(1.5, R * 0.016), g = R * 0.035, dot_r = max(1.0, R * 0.01);
+    float c = max(max(Bar(d, g, 0.6 * R, t), Bar(d.yx, g, 0.6 * R, t)), max(Bar(d, 0.6 * R, R, T), Bar(d.yx, 0.6 * R, R, T)));
+    float2 ad = abs(d);
+    [unroll] for (int k = 1; k <= 4; ++k) {
+        float p = k * 0.12 * R;
+        c = max(c, max(saturate(dot_r - length(ad - float2(p, 0)) + 0.5), saturate(dot_r - length(ad - float2(0, p)) + 0.5)));
+    }
+    return c;
 }
 float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
     float4 alb = tAlbedo.Sample(sLinear, i.uv);
@@ -511,6 +529,17 @@ float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
     float3 ambient = amb * (alb.rgb * (1 - metal) * (1 - Fa)) + lerp(ambGround, ambSky, saturate(reflect(-V, N).y * 0.5 + 0.5)) * Fa * (1 - rough * 0.7);
     float3 c = (direct + ambient) * uParams.x;
     if (uParams.y > 0.5) c = SrgbEncode(c);
+    if (uMat3.x > 0.5 && uLens1.z > 0.001 && uScene.w > 0.5) {
+        float2 px = i.pos.xy, ax = uLens0.xy;
+        float R = max(uLens0.z, 1.0);
+        float3 sc = tScene.SampleLevel(sLinear, (ax + (px - ax) / max(uLens0.w, 1.0)) * uLens2.xy, 0).rgb;
+        if (uScene.z > 0.5) sc = SrgbDecode(saturate(sc));
+        float ra = length(px - ax) / R, rl = length(px - uLens1.xy) / R;
+        sc *= (1 - smoothstep(0.80, 1.02, ra)) * (1 - 0.35 * smoothstep(0.65, 1.0, rl));
+        sc = lerp(sc, float3(0.004, 0.004, 0.004), Reticle(px - ax, R) * saturate(uLens1.w));
+        if (uParams.y > 0.5) sc = SrgbEncode(sc);
+        c = lerp(c, sc, saturate(uLens1.z));
+    }
     return float4(c, 1);
 }
 )HLSL";
@@ -673,8 +702,11 @@ struct CFrame {
     float scene[4];
     float flashPos[4];
     float flashColor[4];
+    float lens0[4];
+    float lens1[4];
+    float lens2[4];
 };
-static_assert(sizeof(CFrame) == 256, "cframe");
+static_assert(sizeof(CFrame) == 304, "cframe");
 float IniFloat(const wchar_t* ini, const wchar_t* key, float def) {
     wchar_t buf[64];
     GetPrivateProfileStringW(L"viewmodel", key, L"", buf, 64, ini);
@@ -767,7 +799,14 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.adsSightBone = (sb >= 0 && sb < static_cast<float>(kMaxBones)) ? static_cast<int>(sb) : -1;
     IniVec3(ini, L"ads_sight_point", s.adsSightPoint);
     IniVec3(ini, L"ads_sight_front", s.adsSightFront);
-    s.handIk = IniFloat(ini, L"hand_ik", s.handIk ? 1.f : 0.f) != 0.f;
+    s.scopeZoom = IniFloat(ini, L"scope_zoom", s.scopeZoom);
+    if (!(s.scopeZoom >= 0.f && s.scopeZoom <= 40.f)) s.scopeZoom = 0.f;
+    float scb = IniFloat(ini, L"scope_bone", static_cast<float>(s.scopeBone));
+    s.scopeBone = (scb >= 0 && scb < static_cast<float>(kMaxBones)) ? static_cast<int>(scb) : -1;
+    s.scopeLensRadius = IniFloat(ini, L"scope_lens_radius", s.scopeLensRadius);
+    if (!(s.scopeLensRadius > 0.001f && s.scopeLensRadius < 0.2f)) s.scopeLensRadius = 0.0178f;
+    s.scopeReticle = IniFloat(ini, L"scope_reticle", s.scopeReticle);
+    s.handIk =IniFloat(ini, L"hand_ik", s.handIk ? 1.f : 0.f) != 0.f;
     IniVec3(ini, L"ik_grip_ri", s.ikGripRi);
     IniVec3(ini, L"ik_grip_le", s.ikGripLe);
     GetPrivateProfileStringW(L"viewmodel", L"fire_sound",s.fireSound, s.fireSound, 512, ini);
@@ -1166,6 +1205,7 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
         texCount_ = h.textureCount;
         subs_ = new Submesh[h.submeshCount];
         subCount_ = h.submeshCount;
+        lensSubs_ = 0;
         bool subOk = true;
         for (uint32_t s = 0; s < h.submeshCount; ++s) {
             HvmSubmesh hs;
@@ -1182,6 +1222,7 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
             subs_[s].normalMode = hs.normalMode;
             subs_[s].materialMode = hs.materialMode;
             subs_[s].flags = hs.flags;
+            if ((hs.flags >> 19) & 1) ++lensSubs_;
         }
         if (!subOk) {
             SetErr(err, errLen, "submesh index range out of bounds");
@@ -1368,7 +1409,7 @@ bool Renderer::CreatePipeline(char* err, size_t errLen) {
     ok = SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbFrame_));
     bd.ByteWidth = kMaxBones * 3 * 16;
     ok = ok && SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbBones_));
-    bd.ByteWidth = 32;
+    bd.ByteWidth = 48;
     ok = ok && SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbMat_));
     D3D11_RASTERIZER_DESC rd = {};
     rd.FillMode = D3D11_FILL_SOLID;
@@ -2242,10 +2283,31 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
         for (int k = 0; k < 3; ++k) cf.flashColor[k] = c[k] * 2.5f * s.flashLight * look.flashLight;
         cf.flashColor[3] = 1.f;
     }
+    bool lensOn = false;
+    const int lensBone = s.scopeBone >= 0 ? s.scopeBone : s.adsSightBone;
+    if (s.scopeZoom > 1.f && aw > 0.f && lensSubs_ && lensBone >= 0 && lensBone < static_cast<int>(boneCount_)) {
+        Aff lv = AffMul(model, g_world[lensBone]);
+        float p[3] = {lv.m[3], lv.m[7], lv.m[11]}, d[3] = {lv.m[2], lv.m[6], lv.m[10]};
+        float dl = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        if (dl > 1e-6f && d[2] > 0.05f * dl && p[2] > zn) {
+            float hw = 0.5f * static_cast<float>(w), hh = 0.5f * static_cast<float>(h);
+            cf.lens0[0] = hw + hw * xs * d[0] / d[2];
+            cf.lens0[1] = hh - hh * ys * d[1] / d[2];
+            cf.lens0[2] = hh * ys * s.scopeLensRadius * dl / p[2];
+            cf.lens0[3] = s.scopeZoom;
+            cf.lens1[0] = hw + hw * xs * p[0] / p[2];
+            cf.lens1[1] = hh - hh * ys * p[1] / p[2];
+            cf.lens1[2] = aw;
+            cf.lens1[3] = s.scopeReticle;
+            cf.lens2[0] = 1.f / static_cast<float>(w);
+            cf.lens2[1] = 1.f / static_cast<float>(h);
+            lensOn = true;
+        }
+    }
     StateBackup bk;
     bk.Save(ctx);
     bool haveScene = false;
-    if (sceneTex && s.sceneLight > 0.001f) {
+    if (sceneTex && (s.sceneLight > 0.001f || lensOn)) {
         D3D11_TEXTURE2D_DESC sd;
         sceneTex->GetDesc(&sd);
         DXGI_FORMAT f = sd.Format;
@@ -2308,10 +2370,11 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
     for (unsigned i = 0; i < subCount_; ++i) {
         const Submesh& sm = subs_[i];
         bool hasDef = (sm.flags >> 17) & 1;
-        float mat[8] = {static_cast<float>(sm.normalMode), sm.tex[1] >= 0 ? 1.f : 0.f, sm.tex[2] >= 0 ? 1.f : 0.f,
-                        static_cast<float>(sm.materialMode),
-                        hasDef ? (sm.flags & 0xff) / 255.f : 0.55f, hasDef ? ((sm.flags >> 8) & 0xff) / 255.f : 0.f,
-                        ((sm.flags >> 18) & 1) ? 1.f : 0.f, ((sm.flags >> 16) & 1) ? 1.f : 0.f};
+        float mat[12] = {static_cast<float>(sm.normalMode), sm.tex[1] >= 0 ? 1.f : 0.f, sm.tex[2] >= 0 ? 1.f : 0.f,
+                         static_cast<float>(sm.materialMode),
+                         hasDef ? (sm.flags & 0xff) / 255.f : 0.55f, hasDef ? ((sm.flags >> 8) & 0xff) / 255.f : 0.f,
+                         ((sm.flags >> 18) & 1) ? 1.f : 0.f, ((sm.flags >> 16) & 1) ? 1.f : 0.f,
+                         ((sm.flags >> 19) & 1) ? 1.f : 0.f, 0.f, 0.f, 0.f};
         if (SUCCEEDED(ctx->Map(cbMat_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mp))) {
             memcpy(mp.pData, mat, sizeof mat);
             ctx->Unmap(cbMat_, 0);
@@ -2356,6 +2419,7 @@ void Renderer::Release() {
     delete[] subs_;
     subs_ = nullptr;
     subCount_ = 0;
+    lensSubs_ = 0;
     delete[] bones_;
     bones_ = nullptr;
     boneCount_ = 0;
