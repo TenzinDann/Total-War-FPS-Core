@@ -4,7 +4,7 @@
 #include <d3d11.h>
 #include <cstdint>
 namespace vm {
-constexpr int kMeleeSfx = 17;
+constexpr int kMeleeSfx = 18;
 extern const wchar_t* const kMeleeSfxNames[kMeleeSfx];
 struct Settings {
     float fovDeg = 55.0f;
@@ -31,6 +31,10 @@ struct Settings {
     int adsSightBone = -1;
     float adsSightPoint[3] = {0.0f, 0.0f, 0.0f};
     float adsSightFront[3] = {0.0f, 0.0f, 0.0f};
+    float scopeZoom = 0.0f;
+    int scopeBone = -1;
+    float scopeLensRadius = 0.0178f;
+    float scopeReticle = 1.0f;
     bool handIk = true;
     float ikGripRi[3] = {0.0f, 0.0f, 0.0f};
     float ikGripLe[3] = {0.0f, 0.0f, 0.0f};
@@ -184,7 +188,7 @@ struct Settings {
     float meleeStrikeLead = 0.25f;
     wchar_t meleeSfx[kMeleeSfx][512] = {};
     float meleeSfxVolume[kMeleeSfx] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f,
-                                       -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
+                                       -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
     float meleeSfxPitch[kMeleeSfx][2] = {};
     float meleeSfxMaster = 1.f;
     bool meleeSfxSwingCut = false;
@@ -595,6 +599,7 @@ private:
     unsigned texCount_ = 0;
     Submesh* subs_ = nullptr;
     unsigned subCount_ = 0;
+    unsigned lensSubs_ = 0;
     Bone* bones_ = nullptr;
     unsigned boneCount_ = 0;
     Clip* clips_ = nullptr;

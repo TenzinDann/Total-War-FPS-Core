@@ -334,6 +334,7 @@ volatile LONG g_rosterN = 0;
 constexpr int kSlots = 4;
 volatile LONG g_slot[kSlots] = {-1, -1, -1, -1};
 bool g_loadoutAll = false;
+volatile LONG g_rosterAll = 0;
 constexpr double kUnloadDelay = 3.0;
 double g_unloadAt[kMaxModels] = {};
 int g_unloadPending = 0;
@@ -1151,7 +1152,7 @@ void ShieldPoseMatrix(const float* p, const float* rd, float* m) {
 void ShieldStep(vm::Look& l, double now, float dt) {
     const vm::Settings& s = Wp().set;
     bool allowed = g_fp && s.shieldAllow && Wp().rend.ArmRig() && !s.mirrorX;
-    bool meleeBlock = g_fp && MeleeWeapon() && melee::g.act == melee::kBlock;
+    bool meleeBlock = g_fp && MeleeWeapon() && (melee::g.act == melee::kBlock || melee::Guarding(now));
     g_sh.meleeBlock = meleeBlock ? 1 : 0;
     auto blockNow = [&]() {
         if (meleeBlock) return s.shieldBlockAds;
@@ -1773,6 +1774,7 @@ void RosterStep(ID3D11Device* dev) {
     if (GetFileAttributesExW(path, GetFileExInfoStandard, &fa) &&
         CompareFileTime(&fa.ftLastWriteTime, &g_armoryTime) != 0) {
         g_armoryTime = fa.ftLastWriteTime;
+<<<<<<< <path>
         fresh = true;
     }
     if (fresh) RefillForNewBattle();
@@ -1782,6 +1784,14 @@ void RosterStep(ID3D11Device* dev) {
     memcpy(hero, g_heroKey, sizeof hero);
     ReleaseSRWLockShared(&g_heroKeyLock);
     bool campaign = !strcmp(mode, "campaign");
+=======
+        RefillForNewBattle();
+    }
+    bool iniAll = GetPrivateProfileIntW(L"viewmodel", L"loadout_all", 0, g_ini) != 0;
+    bool all = g_loadoutAll || iniAll;
+    InterlockedExchange(&g_rosterAll, all ? 1 : 0);
+    bool campaign = !strcmp(mode, "campaign") && !iniAll;
+>>>>>>> <path>
     auto ownedHas = [&](const wchar_t* id) {
         char a[64];
         snprintf(a, sizeof a, "%ls", id);
@@ -1801,8 +1811,8 @@ void RosterStep(ID3D11Device* dev) {
     };
     LONG n = 0;
     LONG slot[kSlots] = {-1, -1, -1, -1};
-    const char* from = "all usable";
-    if (g_loadoutAll) {
+    const char* from = iniAll ? "ini loadout_all (test: every weapon)" : "all usable";
+    if (all) {
         for (int i = 0; i < g_modelCount; ++i)
             if (usable(i)) g_roster[n++] = i;
     } else {
@@ -1860,7 +1870,7 @@ void RosterStep(ID3D11Device* dev) {
         g_log("weapon:   %ld = model %d %ls (%ls)", k + 1, i, g_models[i], g_w[i].set.weaponId);
         if (i == g_modelIdx) curOk = true;
     }
-    if (!g_loadoutAll)
+    if (!all)
         g_log("weapon: slots 1 primary %d / 2 primary %d / 3 pistol %d / 4 melee %d (model index, -1 = empty)", slot[0], slot[1], slot[2], slot[3]);
     g_preloadNext = 0;
     PrefetchQueue(g_roster, n);
@@ -2538,7 +2548,7 @@ void Tracer(const float from[3], const float to[3]) {
 void SelectWeapon(int n) {
     if (!Enabled() || !g_fp) return;
     LONG idx;
-    if (g_loadoutAll) {
+    if (g_rosterAll) {
         LONG cnt = g_rosterN;
         if (n < 1 || n > cnt) return;
         idx = g_roster[n - 1];
@@ -2660,6 +2670,9 @@ void LauncherCast(int kind, bool driven, float windup) {
 }
 void LauncherFire() { InterlockedExchange64(&g_lc.fireUs, static_cast<LONG64>(Now() * 1e6)); }
 void LauncherAbort() { InterlockedExchange64(&g_lc.abortUs, static_cast<LONG64>(Now() * 1e6)); }
+void LauncherCue(int cue, int kind) {
+    if (cue >= 0 && cue < 2 && kind >= 0 && kind < kLauncherKinds) InterlockedOr(&g_lc.cueReq, 1L << (cue * kLauncherKinds + kind));
+}
 bool MeleeActive() { return g_meleeOn != 0; }
 void MeleeInput(bool attack, bool block) { InterlockedExchange(&g_meleeIn, (attack ? 1 : 0) | (block ? 2 : 0)); }
 int TakeMeleeStrike() { return static_cast<int>(InterlockedExchange(&g_meleeStrike, 0)) - 1; }
