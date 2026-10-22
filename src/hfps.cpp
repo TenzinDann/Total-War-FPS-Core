@@ -186,6 +186,28 @@ const CodePrint kShieldGamePrints904[] = {
     {0x8d3ca0, 0x3, 0x58389c18233078ffull}};
 constexpr uintptr_t kVtSoldier904 = 0x3912950, kFnProjHit904 = 0x306b1a8, kFnProjCanHit904 = 0x305947c, kFnRet0Of1c8_904 = 0x8d3ca0,
                     kFnHitReact904 = 0x307517c, kFnStagger904 = 0x306ee40, kMeleeRet1_904 = 0x3253e70, kMeleeRet2_904 = 0x326565e;
+const CodePrint kAbilityPrints904[] = {
+    {0x2f008d0, 0x27b, 0x594cd05ca9272710ull},
+    {0x2ea94e8, 0xa0, 0x744ebda3b94ebcedull},
+    {0x2e9df94, 0x2a, 0xfebdfc7ea7568f1dull},
+    {0x1bc2ff0, 0x6e, 0x5d2cb85accdf2e34ull},
+    {0x2eed7a8, 0x136, 0x3b941bd6a61e91b8ull},
+    {0x1bccb8c, 0x22, 0xb3fc638559b54daeull},
+    {0x1535340, 0x2d, 0xe8700aef872daaeaull},
+    {0x2ed1478, 0x1b0, 0x5ccc3fdb5f7825f2ull},
+    {0x2f35c64, 0x278, 0xcf324f891c88c2a4ull},
+    {0x3037d78, 0x50c, 0x21c1d1989d8dc5e2ull},
+    {0x2d93918, 0x1ab, 0xe6393eae6bb589caull},
+    {0x2d9334c, 0x77, 0x3f34f133ef2c7aa9ull}};
+constexpr uintptr_t kFnAbilityTable904 = 0x1535340, kFnAbilityGroundCtor904 = 0x2ea94e8, kFnAbilityIssue904 = 0x1bc2ff0,
+                    kVtAbilityCmd904 = 0x39071f8, kFnAbilityCmdWrite904 = 0x2eed7a8;
+const CodePrint kCharPrints904[] = {
+    {0x1e8392c, 0x25, 0x909bd734bb5f100bull},
+    {0x4d3970, 0x2e, 0xb416bbb3274728dcull}};
+constexpr uintptr_t oUnitCharDetails = 0x158, oCharKeyStr = 0x4e8;
+constexpr uintptr_t oUnitAbilityMgr = 0x3d48, oAbMgrEnd = 0x20, oAbMgrFirst = 0x28, oAbNodeNext = 0x8, oAbNodeDef = 0x70, oAbNodeInst = 0x10;
+constexpr uintptr_t oAbDefId = 0x8, oAbDefWindup = 0x30, oAbDefRange = 0x54, oAbRecId = 0x50;
+constexpr uintptr_t oAbWindSteps = 0x120, oAbCooldown = 0x134, oAbUses = 0xb4, oAbFlags = 0x170;
 const unsigned char kPresentHelper904[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x33,
                                            0xDB, 0x48, 0x8B, 0xF9, 0x38, 0x1D, 0x07, 0x3E, 0xED, 0x03, 0x48,
                                            0x8B, 0x09, 0x0F, 0x85, 0x98, 0x9E, 0xCC, 0x00, 0x4C, 0x8B, 0x89,
@@ -357,6 +379,8 @@ bool g_shotOk = false;
 bool g_meleeHitOk = false;
 bool g_noKnockOk = false;
 bool g_shieldGameOk = false;
+bool g_abilityOk = false;
+bool g_charOk = false;
 constexpr uintptr_t oUiHudRoot = 0x358, oUicChildCount = 0x1cc, oUicChildren = 0x1d0, oUicId = 0x2a0, oUicVisible = 0x353;
 constexpr int kMaxHideUi = 12;
 constexpr uintptr_t oUicPos = 0x2c0, oUicLayout = 0x2f0, oLayoutW = 0x11c, oLayoutH = 0x120;
@@ -413,6 +437,7 @@ struct Config {
     bool revealEnemies = true;
     bool noMelee = true;
     bool noKnock = true;
+    bool heroesOnly = true;
     bool shieldGame = true;
     bool shieldStagger = true;
     float shieldAngle = 180.f;
@@ -509,10 +534,16 @@ float IniF(const wchar_t* sec, const wchar_t* key, float def, const wchar_t* ini
     return (end != buf && std::isfinite(v)) ? static_cast<float>(v) : def;
 }
 LONG g_cfgGen = 0;
+const wchar_t* MainIniName() {
+#ifdef HFPS_PACK_ASSETS
+    return packx::MainIniName();
+#else
+    return L"hero_fps.ini";
+#endif
+}
 void LoadConfig() {
     wchar_t ini[MAX_PATH];
-    wcscpy(ini, g_dir);
-    wcscat(ini, L"\\hero_fps.ini");
+    swprintf(ini, MAX_PATH, L"%ls\\%ls", g_dir, MainIniName());
     InterlockedIncrement(&g_cfgGen);
     cfg.enabled = GetPrivateProfileIntW(L"general", L"enabled", 1, ini) != 0;
     UINT key = GetPrivateProfileIntW(L"general", L"toggle_key", VK_F6, ini);
@@ -610,6 +641,7 @@ void LoadConfig() {
     cfg.revealEnemies = GetPrivateProfileIntW(L"hero", L"reveal_enemies", 1, ini) != 0;
     cfg.noMelee = GetPrivateProfileIntW(L"hero", L"no_melee", 1, ini) != 0;
     cfg.noKnock = GetPrivateProfileIntW(L"hero", L"no_knockdown", 1, ini) != 0;
+    cfg.heroesOnly = GetPrivateProfileIntW(L"hero", L"heroes_only", 1, ini) != 0;
     cfg.shieldGame = GetPrivateProfileIntW(L"viewmodel", L"shield_block_game", 1, ini) != 0;
     cfg.shieldStagger = GetPrivateProfileIntW(L"viewmodel", L"shield_block_stagger", 1, ini) != 0;
     cfg.shieldAngle = IniF(L"viewmodel", L"shield_block_angle", 180.f, ini);
@@ -720,6 +752,15 @@ uintptr_t SelectedBattleUnit(int* countOut) {
     uintptr_t arr = Ptr(sel + oSelArray);
     uintptr_t uiUnit = arr ? Ptr(arr) : 0;
     return uiUnit ? Ptr(uiUnit + oUiUnitBattleUnit) : 0;
+}
+bool IsCharacterUnit(uintptr_t unit) {
+    uintptr_t det = Ptr(unit + oUnitCharDetails);
+    if (!det) return false;
+    uint64_t w = 0;
+    if (!Rd(det + oCharKeyStr + 8, w)) return false;
+    if ((w & 0xF000000000000000ull) == 0x8000000000000000ull) return ((w >> 56) & 0xf) != 0;
+    uint32_t len = 0;
+    return Rd(det + oCharKeyStr, len) && len != 0;
 }
 bool ReadVec(uintptr_t a, float v[3]) {
     if (!Rd(a, v[0]) || !Rd(a + 4, v[1]) || !Rd(a + 8, v[2])) return false;
@@ -1001,8 +1042,10 @@ void FastFireStats(bool force);
 const char* ModeName(int m);
 void ReleaseHero(int mode, const char* why);
 void ExitSequenceStep(uintptr_t mgr);
+void LauncherReset();
 void Exit(uintptr_t mgr, const char* why, bool release = true) {
     if (!S.active) return;
+    LauncherReset();
     FastFireUninstall(why);
     EarlyFlightUninstall(why);
     herofx::Uninstall(why);
@@ -1040,6 +1083,36 @@ void Exit(uintptr_t mgr, const char* why, bool release = true) {
     Log("FPS exit reason=%s restoredPrev=%d active=%p prev=%p", why, restored, (void*)active,
         (void*)S.prevActive);
 }
+struct UnitKeyRec {
+    uintptr_t unit;
+    char key[48];
+};
+UnitKeyRec g_unitKeyTab[64];
+int g_unitKeyNext = 0;
+SRWLOCK g_unitKeyLock = SRWLOCK_INIT;
+void RememberUnitKey(uintptr_t unit, const char* key) {
+    AcquireSRWLockExclusive(&g_unitKeyLock);
+    int slot = -1;
+    for (int i = 0; i < 64 && slot < 0; ++i)
+        if (g_unitKeyTab[i].unit == unit) slot = i;
+    if (slot < 0) slot = g_unitKeyNext, g_unitKeyNext = (g_unitKeyNext + 1) % 64;
+    g_unitKeyTab[slot].unit = unit;
+    snprintf(g_unitKeyTab[slot].key, sizeof g_unitKeyTab[slot].key, "%s", key);
+    ReleaseSRWLockExclusive(&g_unitKeyLock);
+}
+void ForgetUnitKeys() {
+    AcquireSRWLockExclusive(&g_unitKeyLock);
+    memset(g_unitKeyTab, 0, sizeof g_unitKeyTab);
+    g_unitKeyNext = 0;
+    ReleaseSRWLockExclusive(&g_unitKeyLock);
+}
+void UnitKeyOf(uintptr_t unit, char* out, size_t n) {
+    out[0] = 0;
+    AcquireSRWLockShared(&g_unitKeyLock);
+    for (int i = 0; i < 64; ++i)
+        if (unit && g_unitKeyTab[i].unit == unit) snprintf(out, n, "%s", g_unitKeyTab[i].key);
+    ReleaseSRWLockShared(&g_unitKeyLock);
+}
 void Enter(uintptr_t mgr) {
     uintptr_t battle = Ptr(mgr + oMgrBattle);
     uintptr_t ui = Ptr(g_base + kGlobalUi);
@@ -1067,6 +1140,22 @@ void Enter(uintptr_t mgr) {
     if (!unit || !entity || !ReadVec(entity + oEntPos, pos)) {
         Log("enter refused: selection count=%d unit=%p entity=%p (select one unit first)", selCount, (void*)unit,
             (void*)entity);
+        return;
+    }
+    if (cfg.heroesOnly && !g_charOk) {
+        Log("enter refused: cannot tell lords / heroes apart on this exe (IsCharacter fingerprint mismatch); [hero] heroes_only=0 lets any unit in");
+        return;
+    }
+    if (cfg.heroesOnly && !IsCharacterUnit(unit)) {
+        Log("enter refused: unit %p is not a lord or hero (first person is lords / heroes only; [hero] heroes_only=0 lets any unit in)",
+            (void*)unit);
+        return;
+    }
+    char heroKey[48];
+    UnitKeyOf(unit, heroKey, sizeof heroKey);
+    if (!vmgame::UnitAllowed(heroKey)) {
+        Log("enter refused: unit %p (unit key '%s') is not a weapon pack's hero - without hero_fps.pack only those heroes may enter (allowed: %s)",
+            (void*)unit, heroKey, vmgame::UnitKeys());
         return;
     }
     if (S.exitStage && unit != S.exitUnit) {
@@ -1150,6 +1239,7 @@ void Enter(uintptr_t mgr) {
     InterlockedExchange(&g_rawDy, 0);
     SetupMouse();
     S.active = true;
+    vmgame::SetHeroKey(heroKey);
     vmgame::SetFirstPerson(true);
     if (S.exitStage == 2) {
         Log("ghost: pending release cancelled - first person entered again");
@@ -3530,6 +3620,174 @@ void ProbeFrame(uintptr_t battle, double now) {
         g_dp.armed = false;
     }
 }
+volatile LONG g_reqLauncher = 0;
+volatile LONG g_heroLauncher = 0;
+struct LauncherGame {
+    unsigned casts = 0, refused = 0, busy = 0;
+    int logs = 0;
+    int32_t id[vmgame::kLauncherKinds] = {-2, -2, -2};
+    int kind = -1;
+    uintptr_t inst = 0;
+    double tIssue = 0, windup = 1.0;
+    bool sawWind = false;
+    double tHeroCheck = -1;
+    uintptr_t heroUnit = 0;
+} g_lg;
+int32_t AbilityId(int kind) {
+    int32_t& id = g_lg.id[kind];
+    if (id != -2) return id;
+    const char* key = vmgame::LauncherAbility(kind);
+    uintptr_t sb = Ptr(g_base + kGlobalScript);
+    uintptr_t battle = sb ? Ptr(sb + oScriptBattle) : 0;
+    uintptr_t dbo = battle ? Ptr(battle + 0x430) : 0;
+    uintptr_t db = dbo ? Ptr(dbo + 0x20) : 0;
+    if (!key[0] || !db) return -1;
+    using FnTable = uintptr_t (*)(uintptr_t);
+    using FnFind = uint32_t (*)(uintptr_t, void*);
+    using FnAt = uintptr_t (*)(uintptr_t, uint32_t);
+    using FnStr = void* (*)(void*, const char*);
+    using FnStrDel = void (*)(void*);
+    uintptr_t table = reinterpret_cast<FnTable>(g_base + kFnAbilityTable904)(db);
+    if (!table) return -1;
+    alignas(16) unsigned char str[64] = {};
+    reinterpret_cast<FnStr>(g_base + kFnStrCtor)(str, key);
+    uint32_t idx = reinterpret_cast<FnFind>(g_base + kFnTableFind)(table, str);
+    reinterpret_cast<FnStrDel>(g_base + kFnStrDtor)(str);
+    uintptr_t rec = reinterpret_cast<FnAt>(g_base + kFnTableAt)(table, idx);
+    int32_t v = -1;
+    if (rec) Rd(rec + oAbRecId, v);
+    id = rec ? v : -1;
+    Log("launcher: ability %s -> record %p id %d", key, (void*)rec, id);
+    return id;
+}
+bool FindAbility(int32_t id, uintptr_t* inst, uintptr_t* def) {
+    uintptr_t mgr = S.unit ? Ptr(S.unit + oUnitAbilityMgr) : 0;
+    if (!mgr) return false;
+    uintptr_t end = mgr + oAbMgrEnd, n = Ptr(mgr + oAbMgrFirst);
+    for (int guard = 0; n && n != end && guard < 256; ++guard, n = Ptr(n + oAbNodeNext)) {
+        uintptr_t d = Ptr(n + oAbNodeDef);
+        int32_t did = -1;
+        if (d && Rd(d + oAbDefId, did) && did == id) {
+            *inst = n + oAbNodeInst, *def = d;
+            return true;
+        }
+    }
+    return false;
+}
+bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
+    const char* key = vmgame::LauncherAbility(kind);
+    auto refuse = [&](const char* why) {
+        ++g_lg.refused;
+        if (g_lg.logs < 30) ++g_lg.logs, Log("launcher: %s not cast - %s", key, why);
+        return false;
+    };
+    if (!key[0]) return refuse("no ability key in [launcher]");
+    if (vmgame::LauncherBusy() || g_lg.kind >= 0) {
+        ++g_lg.busy;
+        return false;
+    }
+    if (!g_abilityOk) return refuse("ability cast code does not match this exe");
+    if (S.ghost) return refuse("ghost mode (hero disabled)");
+    uintptr_t battle = 0, queue = CmdQueue(&battle);
+    if (!queue) return refuse("battle paused / no command queue");
+    int32_t id = AbilityId(kind);
+    if (id < 0) return refuse("ability not in the special ability table");
+    uintptr_t A = 0, D = 0;
+    if (!FindAbility(id, &A, &D)) return refuse("this hero does not have it");
+    int32_t steps = 0, cool = 0, uses = 0;
+    unsigned char flags = 0;
+    float windup = 1.f, range = -1.f;
+    Rd(A + oAbWindSteps, steps), Rd(A + oAbCooldown, cool), Rd(A + oAbUses, uses), Rd(A + oAbFlags, flags);
+    Rd(D + oAbDefWindup, windup), Rd(D + oAbDefRange, range);
+    char why[96];
+    if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
+        snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
+        return refuse(why);
+    }
+    float H[3] = {0, 0, 0};
+    if (!S.entity || !Rd(S.entity + oEntPos, H)) return refuse("no hero entity position");
+    float lim = range > 0.f ? range * 0.95f : 120.f;
+    AimHit hit = TraceAim(eye, fwd, lim + 30.f, 0.f);
+    float P[3] = {eye[0] + fwd[0] * hit.dist, eye[1] + fwd[1] * hit.dist, eye[2] + fwd[2] * hit.dist};
+    for (int pass = 0; pass < 3; ++pass) {
+        float dx = P[0] - H[0], dz = P[2] - H[2], h = std::sqrt(dx * dx + dz * dz), dy = P[1] - H[1];
+        float d3 = std::sqrt(h * h + dy * dy);
+        if (pass > 0 && d3 <= lim) break;
+        float hmax = lim * lim > dy * dy ? std::sqrt(lim * lim - dy * dy) : 0.f;
+        if (pass == 0) hmax = lim;
+        if (h > hmax && h > 1e-3f) P[0] = H[0] + dx * hmax / h, P[2] = H[2] + dz * hmax / h;
+        alignas(16) float dest[8];
+        if (MakeDestAt(P[0], P[2], dest) && std::fabs(dest[0] - P[0]) < 3.f && std::fabs(dest[2] - P[2]) < 3.f)
+            P[1] = dest[1];
+        else if (pass == 0)
+            P[1] = H[1];
+    }
+    float ang = std::atan2(P[0] - H[0], P[2] - H[2]) * 10430.378f;
+    unsigned angle = static_cast<unsigned>(static_cast<uint16_t>(static_cast<int16_t>(std::lround(ang))));
+    SelBuf sel;
+    unsigned n = MakeSelection(sel);
+    bool ok = false;
+    if (n) {
+        alignas(16) unsigned char cmd[0xc0] = {};
+        using FnCtor = void* (*)(void*, void*, int, int, uintptr_t, const float*, unsigned, float);
+        using FnIssue = unsigned char (*)(uintptr_t, void*);
+        reinterpret_cast<FnCtor>(g_base + kFnAbilityGroundCtor904)(cmd, &sel, id, 0, 0, P, angle, 0.f);
+        ok = reinterpret_cast<FnIssue>(g_base + kFnAbilityIssue904)(queue, cmd) != 0;
+        FreeSelection(cmd + 8);
+    }
+    FreeSelection(&sel);
+    if (g_lg.logs < 30)
+        ++g_lg.logs, Log("launcher: %s id %d -> %s (units %u) target %.1f,%.1f,%.1f (aim %s %.1f m, range %.0f m) hero %.1f,%.1f,%.1f angle %u wind-up %.2f s",
+                         key, id, ok ? "issued" : "NOT issued", n, P[0], P[1], P[2], hit.what, hit.dist, range, H[0], H[1], H[2], angle, windup);
+    if (!ok) return refuse(n ? "command queue refused" : "hero not accepted into a selection");
+    ++g_lg.casts;
+    g_lg.kind = kind, g_lg.inst = A, g_lg.tIssue = Now(), g_lg.windup = windup, g_lg.sawWind = false;
+    vmgame::LauncherCast(kind, true, windup);
+    return true;
+}
+void LauncherGameStep(double now) {
+    if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
+            int32_t id = AbilityId(k);
+            has = id >= 0 && FindAbility(id, &a, &d);
+        }
+        if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
+            Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
+                has ? "are ours" : "go to the game");
+        InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
+        g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
+    }
+    if (g_lg.kind < 0) return;
+    int32_t steps = 0, cool = 0;
+    unsigned char flags = 0;
+    bool rd = Rd(g_lg.inst + oAbWindSteps, steps) && Rd(g_lg.inst + oAbCooldown, cool) && Rd(g_lg.inst + oAbFlags, flags);
+    const char* what = nullptr;
+    if (!rd) {
+        vmgame::LauncherAbort(), what = "instance unreadable - folded";
+    } else if (steps > 0) {
+        g_lg.sawWind = true;
+    } else if (g_lg.sawWind) {
+        if ((flags & 1) || cool > 0)
+            vmgame::LauncherFire(), what = "released";
+        else
+            vmgame::LauncherAbort(), what = "cancelled - folded";
+    } else if (now - g_lg.tIssue > 0.6) {
+        vmgame::LauncherAbort(), what = "wind-up never started (out of range / refused?) - folded";
+    }
+    if (!what && now - g_lg.tIssue > g_lg.windup + 2.0) vmgame::LauncherAbort(), what = "no release in time - folded";
+    if (what) {
+        if (g_lg.logs < 30) ++g_lg.logs, Log("launcher: %s %s %.2f s after the command", vmgame::LauncherAbility(g_lg.kind), what, now - g_lg.tIssue);
+        g_lg.kind = -1;
+    }
+}
+void LauncherReset() {
+    g_lg.kind = -1;
+    g_lg.tHeroCheck = -1;
+    InterlockedExchange(&g_reqLauncher, 0);
+    InterlockedExchange(&g_heroLauncher, 0);
+}
 void Apply(uintptr_t mgr) {
     double now = Now();
     uintptr_t ent = EntityByPath(S.unit, S.entPath);
@@ -4057,6 +4315,8 @@ void Apply(uintptr_t mgr) {
         }
         held = false;
     }
+    if (LONG lr = InterlockedExchange(&g_reqLauncher, 0)) LauncherTryCast(static_cast<int>(lr - 1), eye, vFwd);
+    LauncherGameStep(now);
     double fireGap = vmgame::FireInterval() > 0 ? vmgame::FireInterval() : cfg.fireInterval;
     vmgame::SetTrigger(held && g_fireOk && cfg.fireEnabled && !S.sprint && now >= S.fireBlock);
     if (!held) S.fireChain = false;
@@ -4230,6 +4490,17 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (!(l & (1L << 30))) vmgame::DebugShieldHit();
             return 0;
         }
+        if (S.active && g_heroLauncher && vmgame::LauncherConfigured()) {
+            if (w == vmgame::LauncherSwitchKey()) {
+                if (!(l & (1L << 30))) vmgame::LauncherSwitch();
+                return 0;
+            }
+            if (w == vmgame::LauncherFireKey() || w == vmgame::LauncherFlameKey()) {
+                int kind = w == vmgame::LauncherFlameKey() ? vmgame::kLauncherFlame : vmgame::LauncherSelected();
+                if (!(l & (1L << 30))) InterlockedExchange(&g_reqLauncher, kind + 1);
+                return 0;
+            }
+        }
         if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D')) return 0;
         break;
     case WM_KEYUP:
@@ -4240,6 +4511,9 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D' || w == 'R' || (w >= '1' && w <= '9'))) return 0;
         if (S.active && ((vmgame::ShieldKey() && w == vmgame::ShieldKey()) || (vmgame::ShieldHitKey() && w == vmgame::ShieldHitKey()))) return 0;
+        if (S.active && g_heroLauncher && vmgame::LauncherConfigured() &&
+            (w == vmgame::LauncherFireKey() || w == vmgame::LauncherSwitchKey() || w == vmgame::LauncherFlameKey()))
+            return 0;
         break;
     case WM_MOUSEWHEEL:
         if (S.active) {
@@ -4460,6 +4734,12 @@ bool VerifyGame() {
                          Ptr(g_base + kVtSoldier904 + 0x3a8) == g_base + kFnHitReact904 && Ptr(g_base + kVtSoldier904 + 0x558) == g_base + kFnStagger904;
         if (g_shieldGameOk) g_hero_1c8_ret1 = g_base + kMeleeRet1_904, g_hero_1c8_ret2 = g_base + kMeleeRet2_904;
         Log("shield-game: shield blocks real hits (missile +0x310 / melee +0x1c8 / stagger +0x558 / hp refund) %s", g_shieldGameOk ? "ok" : "OFF");
+        g_abilityOk = m && PrintsMatch(Prints(kAbilityPrints904), "launcher ability cast") &&
+                      Ptr(g_base + kVtAbilityCmd904) == g_base + kFnAbilityCmdWrite904;
+        Log("launcher: ability cast (special ability on ground) %s", g_abilityOk ? "ok" : "OFF");
+        g_charOk = PrintsMatch(Prints(kCharPrints904), "lord / hero check (IsCharacter)");
+        Log("hero: lords / heroes only check %s (heroes_only=%d)", g_charOk ? "ok" : "OFF - nobody can enter while heroes_only=1",
+            cfg.heroesOnly);
         Log("move: unit orders %s, entity halt %s, entity move %s, entity teleport %s (unavailable modes fall back to unit orders)",
             m ? "ok" : "OFF", h ? "ok" : "OFF", o ? "ok" : "OFF", t ? "ok" : "OFF");
     }
@@ -4481,11 +4761,21 @@ DWORD WINAPI InitThread(LPVOID) {
         }
         Log("loader: version.dll = %ls (not ours), module dir %ls", vp[0] ? vp : L"(none)", g_dir);
     }
+    {
+        wchar_t name[64];
+        swprintf(name, 64, L"Local\\hero_fps_native_%lu", GetCurrentProcessId());
+        HANDLE mx = CreateMutexW(nullptr, FALSE, name);
+        if (mx && GetLastError() == ERROR_ALREADY_EXISTS) {
+            Log("loader: another hero_fps_native is already running in this process - this copy stays idle");
+            return 0;
+        }
+    }
 #ifdef HFPS_PACK_ASSETS
     if (!packx::ExtractFromPack(g_dir, &Log)) {
         Log("onepack: assets not available - first person stays off");
         return 0;
     }
+    vmgame::SetPayloads(packx::MainIniName(), packx::FullMod(), packx::AddonIds());
 #endif
 #else
     Log("==== hero_fps native M1 + viewmodel test loaded (version.dll proxy) pid=%lu", GetCurrentProcessId());
@@ -4494,7 +4784,7 @@ DWORD WINAPI InitThread(LPVOID) {
     if (!VerifyGame()) return 0;
     LoadConfig();
     if (!cfg.enabled) {
-        Log("disabled by hero_fps.ini");
+        Log("disabled by %ls", MainIniName());
         return 0;
     }
     vmgame::Setup(g_base, g_dir, &Log);
@@ -4697,6 +4987,7 @@ struct Fns {
     float (*tonumber)(void*, int);
     int (*type)(void*, int);
     size_t (*objlen)(void*, int);
+    const char* (*tolstring)(void*, int, size_t*);
 } f;
 int g_state = -1;
 char g_missing[48] = "";
@@ -4718,12 +5009,44 @@ bool Resolve() {
         }
         memcpy(e.slot, &p, sizeof p);
     }
+    if (FARPROC p = exe ? GetProcAddress(exe, "lua_tolstring") : nullptr) memcpy(&f.tolstring, &p, sizeof p);
     g_state = 1;
     return true;
 }
 int Api(void* L) {
-    f.pushnumber(L, 3.f);
+    f.pushnumber(L, 4.f);
     return 1;
+}
+int UnitKeysFn(void* L) {
+    f.pushstring(L, vmgame::UnitKeys());
+    return 1;
+}
+int AccessAll(void* L) {
+    f.pushboolean(L, vmgame::UnitAllowed("") ? 1 : 0);
+    return 1;
+}
+int SetUnit(void* L) {
+    bool ok = false;
+    if (f.tolstring && f.type(L, 1) == kTUserdata && f.objlen(L, 1) >= sizeof(uintptr_t)) {
+        const void* blk = f.touserdata(L, 1);
+        uintptr_t wrap = 0;
+        if (blk) memcpy(&wrap, blk, sizeof wrap);
+        const uintptr_t p = wrap ? Ptr(wrap + 8) : 0;
+        size_t n = 0;
+        const char* key = f.tolstring(L, 2, &n);
+        if (p && key && n > 0 && n < 48) {
+            RememberUnitKey(p, key);
+            ok = true;
+        }
+    }
+    f.pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
+int BattleStarted(void*) {
+    ForgetUnitKeys();
+    vmgame::NoteNewBattle();
+    Log("lua-api: battle started (unit keys cleared)");
+    return 0;
 }
 int Active(void* L) {
     f.pushboolean(L, S.active && S.unit ? 1 : 0);
@@ -4786,14 +5109,15 @@ int PushTable(void* L) {
         Log("lua-api: %s not exported by the game - no interface table (luaopen #%ld)", g_missing, n);
         return 0;
     }
-    f.createtable(L, 0, 6);
+    f.createtable(L, 0, 10);
     const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_enabled", HudEnabled},
-                                                        {"set_hud_rect", SetHudRect}, {"ammo", Ammo}};
+                                                        {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"unit_keys", UnitKeysFn},
+                                                        {"access_all", AccessAll}, {"set_unit", SetUnit}, {"battle_started", BattleStarted}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);
     }
-    Log("lua-api: interface table v3 returned (luaopen #%ld, lua state %p)", n, L);
+    Log("lua-api: interface table v4 returned (luaopen #%ld, lua state %p%s)", n, L, f.tolstring ? "" : ", lua_tolstring missing - set_unit off");
     return 1;
 }
 }
