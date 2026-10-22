@@ -79,4 +79,17 @@ bool MeleeActive();
 void MeleeInput(bool attack, bool block);
 int TakeMeleeStrike();
 void MeleeHitFeedback(int hits);
+enum LauncherKind { kLauncherFrag, kLauncherIce, kLauncherFlame, kLauncherKinds };
+bool LauncherConfigured();
+UINT LauncherFireKey();
+UINT LauncherSwitchKey();
+UINT LauncherFlameKey();
+int LauncherSelected();
+void LauncherSwitch();
+const char* LauncherAbility(int kind);
+float LauncherWindup(int kind);
+bool LauncherBusy();
+void LauncherCast(int kind, bool driven = false, float windup = 0.f);
+void LauncherFire();
+void LauncherAbort();
 }
