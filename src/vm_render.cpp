@@ -51,6 +51,60 @@ bool ReadFileAll(const wchar_t* path, unsigned char** out, size_t* outLen) {
     *outLen = n;
     return true;
 }
+struct PreEntry {
+    int tag;
+    bool hvm;
+    wchar_t path[MAX_PATH * 2];
+    unsigned char* data;
+    size_t len;
+    ULONGLONG size;
+    FILETIME stamp;
+};
+constexpr int kMaxPre = 256;
+PreEntry g_pre[kMaxPre];
+int g_preN = 0;
+SRWLOCK g_preLock = SRWLOCK_INIT;
+bool FileStamp(const wchar_t* path, ULONGLONG* size, FILETIME* stamp) {
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fa)) return false;
+    *size = (static_cast<ULONGLONG>(fa.nFileSizeHigh) << 32) | fa.nFileSizeLow;
+    *stamp = fa.ftLastWriteTime;
+    return true;
+}
+void PutPrefetched(int tag, bool hvm, const wchar_t* path, unsigned char* data, size_t len, ULONGLONG size, FILETIME stamp) {
+    AcquireSRWLockExclusive(&g_preLock);
+    if (g_preN < kMaxPre && wcslen(path) < MAX_PATH * 2) {
+        PreEntry& e = g_pre[g_preN++];
+        e.tag = tag, e.hvm = hvm, e.data = data, e.len = len, e.size = size, e.stamp = stamp;
+        wcscpy(e.path, path);
+        data = nullptr;
+    }
+    ReleaseSRWLockExclusive(&g_preLock);
+    delete[] data;
+}
+bool TakePrefetched(const wchar_t* path, bool hvm, unsigned char** out, size_t* outLen) {
+    PreEntry got = {};
+    bool found = false;
+    AcquireSRWLockExclusive(&g_preLock);
+    for (int i = 0; i < g_preN; ++i) {
+        if (g_pre[i].hvm != hvm || _wcsicmp(g_pre[i].path, path)) continue;
+        got = g_pre[i];
+        g_pre[i] = g_pre[--g_preN];
+        found = true;
+        break;
+    }
+    ReleaseSRWLockExclusive(&g_preLock);
+    if (!found) return false;
+    ULONGLONG size = 0;
+    FILETIME stamp = {};
+    if (!FileStamp(path, &size, &stamp) || size != got.size || CompareFileTime(&stamp, &got.stamp)) {
+        delete[] got.data;
+        return false;
+    }
+    *out = got.data;
+    *outLen = got.len;
+    return true;
+}
 #pragma pack(push, 1)
 struct DdsPixelFormat {
     DWORD size, flags, fourCC, rgbBitCount, rMask, gMask, bMask, aMask;
@@ -93,7 +147,7 @@ bool LoadDds(ID3D11Device* dev, const wchar_t* path, bool srgb, ID3D11ShaderReso
              size_t errLen) {
     unsigned char* data = nullptr;
     size_t len = 0;
-    if (!ReadFileAll(path, &data, &len)) {
+    if (!TakePrefetched(path, false, &data, &len) && !ReadFileAll(path, &data, &len)) {
         SetErr(err, errLen, "texture missing: %ls", path);
         return false;
     }
@@ -346,11 +400,21 @@ cbuffer CMat : register(b2) {
     float4 uMat;
     float4 uMat2;
     float4 uMat3;
+    float4 uEm0;
+    float4 uEm1;
+    float4 uEm2;
+    float4 uEm3;
+    float4 uEmStop;
+    float4 uEmC1, uEmC2, uEmC3, uEmC4;
+    float4 uIrA, uIrB;
 };
 Texture2D tAlbedo : register(t0);
 Texture2D tNormal : register(t1);
 Texture2D tMaterial : register(t2);
 Texture2D tScene : register(t3);
+Texture2D tEmMask : register(t4);
+Texture2D tEmTex : register(t5);
+Texture2D tEmDist : register(t6);
 SamplerState sLinear : register(s0);
 struct VSIn {
     float3 pos : POSITION; float3 nrm : NORMAL; float4 tan : TANGENT; float2 uv : TEXCOORD0;
@@ -385,6 +449,27 @@ float3 SrgbDecode(float3 c) {
     float3 hi = pow((c + 0.055) / 1.055, 2.4);
     return float3(c.x <= 0.04045 ? lo.x : hi.x, c.y <= 0.04045 ? lo.y : hi.y, c.z <= 0.04045 ? lo.z : hi.z);
 }
+float3 RgbToHsl(float3 c) {
+    float mn = min(min(c.r, c.g), c.b), mx = max(max(c.r, c.g), c.b), d = mx - mn, l2 = mx + mn;
+    if (d <= 0) return float3(0, 0, l2 * 0.5);
+    float s = d / (l2 < 1 ? max(l2, 1e-6) : max(2 - l2, 1e-6));
+    float3 dl = ((mx - c) / 6 + d * 0.5) / d;
+    float hh = c.r == mx ? dl.b - dl.g : (c.g == mx ? 1.0 / 3 + dl.r - dl.b : 2.0 / 3 + dl.g - dl.r);
+    hh = hh < 0 ? hh + 1 : (hh > 1 ? hh - 1 : hh);
+    return float3(hh, s, l2 * 0.5);
+}
+float HueToRgb(float v1, float v2, float vh) {
+    vh = vh < 0 ? vh + 1 : (vh > 1 ? vh - 1 : vh);
+    if (vh < 1.0 / 6) return v1 + (v2 - v1) * 6 * vh;
+    if (vh < 0.5) return v2;
+    if (vh < 2.0 / 3) return v1 + (v2 - v1) * (2.0 / 3 - vh) * 6;
+    return v1;
+}
+float3 HslToRgb(float3 hsl) {
+    if (hsl.y == 0) return hsl.zzz;
+    float v2 = hsl.z < 0.5 ? hsl.z * (1 + hsl.y) : hsl.z + hsl.y - hsl.y * hsl.z, v1 = 2 * hsl.z - v2;
+    return float3(HueToRgb(v1, v2, hsl.x + 1.0 / 3), HueToRgb(v1, v2, hsl.x), HueToRgb(v1, v2, hsl.x - 1.0 / 3));
+}
 float Bar(float2 d, float a, float b, float hw) {
     float ax = abs(d.x);
     return saturate(min(ax - a, b - ax) + 0.5) * saturate(hw - abs(d.y) + 0.5);
@@ -398,25 +483,6 @@ float Reticle(float2 d, float R) {
         c = max(c, max(saturate(dot_r - length(ad - float2(p, 0)) + 0.5), saturate(dot_r - length(ad - float2(0, p)) + 0.5)));
     }
     return c;
-}
-float4 CatRom(float f) {
-    return float4(f * (-0.5 + f * (1.0 - 0.5 * f)), 1.0 + f * f * (-2.5 + 1.5 * f), f * (0.5 + f * (2.0 - 1.5 * f)), f * f * (-0.5 + 0.5 * f));
-}
-float3 SceneAt(int2 q) {
-    uint tw, th, nm;
-    tScene.GetDimensions(0, tw, th, nm);
-    return tScene.Load(int3(clamp(q, int2(0, 0), int2(tw, th) - 1), 0)).rgb;
-}
-float3 SceneCubic(float2 pos) {
-    float2 p = pos - 0.5, i0 = floor(p), f = p - i0;
-    float4 wx = CatRom(f.x), wy = CatRom(f.y);
-    float3 acc = float3(0, 0, 0);
-    [unroll] for (int y = 0; y < 4; ++y) {
-        float3 row = float3(0, 0, 0);
-        [unroll] for (int x = 0; x < 4; ++x) row += SceneAt(int2(i0) + int2(x - 1, y - 1)) * wx[x];
-        acc += row * wy[y];
-    }
-    return acc;
 }
 float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
     float4 alb = tAlbedo.Sample(sLinear, i.uv);
@@ -445,6 +511,49 @@ float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
             rough = pow(2.0 / (e + 2.0), 0.25);
             if (uMat2.z > 0.5) metal = m.g;
         } else if (uMat.w > 0.5) { rough = m.r; metal = m.g; } else { metal = m.r; rough = m.g; }
+    }
+    if (uEm3.z > 0.5) {
+        float4 mk = tEmMask.Sample(sLinear, i.uv);
+        float3 base = alb.rgb;
+        float3 ic = lerp(uIrA.rgb, uIrB.rgb, abs(dot(N, V)));
+        float3 cg = pow(abs(ic), 1 / 2.2), bg = pow(abs(base), 1 / 2.2);
+        float3 ov = dot(base, float3(0.3, 0.59, 0.11)) > 0.269 ? 1 - 2 * (1 - cg) * (1 - bg) : 2 * cg * bg;
+        ov = pow(saturate(ov), 2.2);
+        float am = max(uEm3.w, 0);
+        float3 r5 = lerp(base, ov, min(am, 1));
+        float3 hc = RgbToHsl(cg);
+        float3 cb = pow(abs(HslToRgb(float3(hc.xy, RgbToHsl(pow(abs(r5), 1 / 2.2)).z))), 2.2);
+        float3 ir = lerp(r5, cb, saturate(min(am, 2) - 1));
+        alb.rgb = lerp(lerp(base, ir, mk.b), base, saturate(rough));
+    }
+    float3 emis = float3(0, 0, 0);
+    if (uEm0.x > 0.5) {
+        float maskA = tEmMask.Sample(sLinear, i.uv).a;
+        float2 dn = tEmDist.Sample(sLinear, i.uv).rb;
+        float2 euv = (i.uv + dn * uEm0.w + uEm2.xy) * uEm2.zw;
+        float et = tEmTex.Sample(sLinear, euv).r;
+        float fr = 1 - saturate(dot(N, V));
+        fr *= fr;
+        float3 e;
+        if (uEm0.x > 1.5) {
+            e = uEm1.rgb * ((uEm0.y * et + uEm1.w + uEm0.z * fr) * maskA);
+        } else {
+            float v = (et + uEm1.w + uEm0.z * fr) * maskA;
+            float3 g;
+            if (v <= uEmStop.x) g = uEmC1.rgb;
+            else if (v <= uEmStop.y) g = lerp(uEmC1.rgb, uEmC2.rgb, (v - uEmStop.x) / (uEmStop.y - uEmStop.x + 0.001));
+            else if (v <= uEmStop.z) g = lerp(uEmC2.rgb, uEmC3.rgb, (v - uEmStop.y) / (uEmStop.z - uEmStop.y + 0.001));
+            else if (v <= uEmStop.w) g = lerp(uEmC3.rgb, uEmC4.rgb, (v - uEmStop.z) / (uEmStop.w - uEmStop.z + 0.001));
+            else g = uEmC4.rgb;
+            e = g * uEm0.y * uEm1.rgb;
+        }
+        float d = max(max(max(e.r, e.g), e.b), 1);
+        float el = dot(e, float3(0.2126, 0.7152, 0.0722));
+        alb.rgb = 1 - (1 - alb.rgb) * (1 - e / d);
+        float ls = saturate(el);
+        metal *= 1 - ls;
+        rough = lerp(rough, 1, ls);
+        emis = alb.rgb * (1 - metal) * (min(d * el * 0.02, 1) * 255 * uEm3.x);
     }
     rough = clamp(rough, 0.04, 1);
     float3 ambSky = uAmbSky.rgb, ambGround = uAmbGround.rgb, lightCol = uLightColor.rgb;
@@ -492,27 +601,16 @@ float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
     float3 amb = lerp(ambGround, ambSky, hemi);
     float3 Fa = F0 + (max(float3(1 - rough, 1 - rough, 1 - rough), F0) - F0) * pow(1 - NdV, 5);
     float3 ambient = amb * (alb.rgb * (1 - metal) * (1 - Fa)) + lerp(ambGround, ambSky, saturate(reflect(-V, N).y * 0.5 + 0.5)) * Fa * (1 - rough * 0.7);
-    float3 c = (direct + ambient) * uParams.x;
+    float3 c = (direct + ambient + emis) * uParams.x;
+    if (uEm3.y > 0.5 && max(max(emis.r, emis.g), emis.b) > 1e-3) {
+        float m = max(max(c.r, c.g), c.b);
+        if (m > 0.8) c *= (0.8 + 0.2 * (1 - exp(-(m - 0.8) / 0.2))) / m;
+    }
     if (uParams.y > 0.5) c = SrgbEncode(c);
     if (uMat3.x > 0.5 && uLens1.z > 0.001 && uScene.w > 0.5) {
         float2 px = i.pos.xy, ax = uLens0.xy;
         float R = max(uLens0.z, 1.0);
-        float2 sp = ax + (px - ax) / max(uLens0.w, 1.0);
-        float3 sc;
-        if (uLens2.w > 0.5) {
-            sc = SceneCubic(sp);
-            if (uLens2.z > 0.001) {
-                float3 n0 = tScene.SampleLevel(sLinear, (sp + float2(1, 0)) * uLens2.xy, 0).rgb;
-                float3 n1 = tScene.SampleLevel(sLinear, (sp - float2(1, 0)) * uLens2.xy, 0).rgb;
-                float3 n2 = tScene.SampleLevel(sLinear, (sp + float2(0, 1)) * uLens2.xy, 0).rgb;
-                float3 n3 = tScene.SampleLevel(sLinear, (sp - float2(0, 1)) * uLens2.xy, 0).rgb;
-                float3 lo = min(min(n0, n1), min(n2, n3)), hi = max(max(n0, n1), max(n2, n3));
-                sc = clamp(sc + uLens2.z * (sc - 0.25 * (n0 + n1 + n2 + n3)), min(lo, sc), max(hi, sc));
-            }
-            sc = max(sc, float3(0, 0, 0));
-        } else {
-            sc = tScene.SampleLevel(sLinear, sp * uLens2.xy, 0).rgb;
-        }
+        float3 sc = tScene.SampleLevel(sLinear, (ax + (px - ax) / max(uLens0.w, 1.0)) * uLens2.xy, 0).rgb;
         if (uScene.z > 0.5) sc = SrgbDecode(saturate(sc));
         float ra = length(px - ax) / R, rl = length(px - uLens1.xy) / R;
         sc *= (1 - smoothstep(0.80, 1.02, ra)) * (1 - 0.35 * smoothstep(0.65, 1.0, rl));
@@ -525,11 +623,57 @@ float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
 )HLSL";
 typedef HRESULT(WINAPI* FnD3DCompile)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*, LPCSTR, LPCSTR,
                                      UINT, UINT, ID3DBlob**, ID3DBlob**);
-FnD3DCompile GetCompiler() {
+FnD3DCompile RealCompiler() {
     HMODULE m = GetModuleHandleW(L"d3dcompiler_47.dll");
     if (!m) m = LoadLibraryW(L"d3dcompiler_47.dll");
     return m ? reinterpret_cast<FnD3DCompile>(GetProcAddress(m, "D3DCompile")) : nullptr;
 }
+struct ShaderCacheEntry {
+    uint64_t hash;
+    SIZE_T len;
+    char entry[16], target[16];
+    UINT f1, f2;
+    ID3DBlob* blob;
+};
+ShaderCacheEntry g_shc[32];
+int g_shcN = 0;
+SRWLOCK g_shcLock = SRWLOCK_INIT;
+uint64_t Fnv64(const void* p, size_t n) {
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; ++i) h = (h ^ static_cast<const unsigned char*>(p)[i]) * 1099511628211ull;
+    return h;
+}
+HRESULT WINAPI CachedCompile(LPCVOID src, SIZE_T len, LPCSTR name, const D3D_SHADER_MACRO* defs, ID3DInclude* inc, LPCSTR entry,
+                             LPCSTR target, UINT f1, UINT f2, ID3DBlob** code, ID3DBlob** msgs) {
+    FnD3DCompile real = RealCompiler();
+    if (!real) return E_FAIL;
+    if (defs || inc || !src || !entry || !target || !code || strlen(entry) >= 16 || strlen(target) >= 16)
+        return real(src, len, name, defs, inc, entry, target, f1, f2, code, msgs);
+    uint64_t h = Fnv64(src, len);
+    AcquireSRWLockExclusive(&g_shcLock);
+    for (int i = 0; i < g_shcN; ++i) {
+        const ShaderCacheEntry& e = g_shc[i];
+        if (e.hash == h && e.len == len && e.f1 == f1 && e.f2 == f2 && !strcmp(e.entry, entry) && !strcmp(e.target, target)) {
+            e.blob->AddRef();
+            *code = e.blob;
+            if (msgs) *msgs = nullptr;
+            ReleaseSRWLockExclusive(&g_shcLock);
+            return S_OK;
+        }
+    }
+    HRESULT hr = real(src, len, name, defs, inc, entry, target, f1, f2, code, msgs);
+    if (SUCCEEDED(hr) && *code && g_shcN < static_cast<int>(sizeof g_shc / sizeof *g_shc)) {
+        ShaderCacheEntry& e = g_shc[g_shcN++];
+        e.hash = h, e.len = len, e.f1 = f1, e.f2 = f2;
+        strcpy(e.entry, entry);
+        strcpy(e.target, target);
+        e.blob = *code;
+        e.blob->AddRef();
+    }
+    ReleaseSRWLockExclusive(&g_shcLock);
+    return hr;
+}
+FnD3DCompile GetCompiler() { return RealCompiler() ? &CachedCompile : nullptr; }
 struct StateBackup {
     UINT scissorCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     UINT viewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
@@ -541,7 +685,7 @@ struct StateBackup {
     UINT sampleMask = 0;
     UINT stencilRef = 0;
     ID3D11DepthStencilState* dss = nullptr;
-    ID3D11ShaderResourceView* psSrv[4] = {};
+    ID3D11ShaderResourceView* psSrv[7] = {};
     ID3D11SamplerState* psSampler = nullptr;
     ID3D11PixelShader* ps = nullptr;
     ID3D11VertexShader* vs = nullptr;
@@ -566,7 +710,7 @@ struct StateBackup {
         c->OMGetBlendState(&bs, blendFactor, &sampleMask);
         c->OMGetDepthStencilState(&dss, &stencilRef);
         c->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, &dsv);
-        c->PSGetShaderResources(0, 4, psSrv);
+        c->PSGetShaderResources(0, 7, psSrv);
         c->PSGetSamplers(0, 1, &psSampler);
         psInstCount = vsInstCount = gsInstCount = hsInstCount = dsInstCount = 256;
         c->PSGetShader(&ps, psInst, &psInstCount);
@@ -593,7 +737,7 @@ struct StateBackup {
         c->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, dsv);
         for (auto*& r : rtv) SafeRelease(r);
         SafeRelease(dsv);
-        c->PSSetShaderResources(0, 4, psSrv);
+        c->PSSetShaderResources(0, 7, psSrv);
         for (auto*& s : psSrv) SafeRelease(s);
         c->PSSetSamplers(0, 1, &psSampler);
         SafeRelease(psSampler);
@@ -702,7 +846,7 @@ void IniVec3(const wchar_t* ini, const wchar_t* key, float* v) {
 const wchar_t* const kMeleeSfxNames[kMeleeSfx] = {L"swing", L"swing_layer", L"push", L"hit_stab", L"hit_stab_heavy",
                                                   L"hit_slash", L"hit_slash_heavy", L"hit_bash", L"hit_body", L"hit_gore",
                                                   L"hit_tail_stab", L"hit_tail_slash", L"block", L"block_tail",
-                                                  L"hit_slash_light", L"hit_l4", L"hit_heavy"};
+                                                  L"hit_slash_light", L"hit_l4", L"hit_heavy", L"swing_heavy"};
 bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (GetFileAttributesW(ini) == INVALID_FILE_ATTRIBUTES) return false;
     s.fovDeg = IniFloat(ini, L"fov", s.fovDeg);
@@ -740,9 +884,6 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.scopeLensRadius = IniFloat(ini, L"scope_lens_radius", s.scopeLensRadius);
     if (!(s.scopeLensRadius > 0.001f && s.scopeLensRadius < 0.2f)) s.scopeLensRadius = 0.0178f;
     s.scopeReticle = IniFloat(ini, L"scope_reticle", s.scopeReticle);
-    s.scopeSharpen = IniFloat(ini, L"scope_sharpen", s.scopeSharpen);
-    if (!(s.scopeSharpen >= 0.f && s.scopeSharpen <= 2.f)) s.scopeSharpen = 0.5f;
-    s.scopeCubic = IniFloat(ini, L"scope_cubic", s.scopeCubic ? 1.f : 0.f) != 0.f;
     s.handIk =IniFloat(ini, L"hand_ik", s.handIk ? 1.f : 0.f) != 0.f;
     IniVec3(ini, L"ik_grip_ri", s.ikGripRi);
     IniVec3(ini, L"ik_grip_le", s.ikGripLe);
@@ -780,6 +921,58 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.fireTailGap = IniFloat(ini, L"fire_tail_gap", s.fireTailGap);
     s.meleeStrikeLead = IniFloat(ini, L"melee_strike_lead", s.meleeStrikeLead);
     if (!(s.meleeStrikeLead >= 0.f && s.meleeStrikeLead <= 0.6f)) s.meleeStrikeLead = 0.25f;
+    {
+        wchar_t buf[128];
+        GetPrivateProfileStringW(L"viewmodel", L"wh3_shader", L"\x01", buf, 128, ini);
+        if (buf[0] != 1) {
+            static const struct {
+                const wchar_t* name;
+                int emissive;
+                bool iridescent;
+            } kWh3Shaders[] = {{L"rigid_character_emissive", 1, false},
+                               {L"rigid_character_prop_emissive", 2, false},
+                               {L"rigid_character_iridescent", 0, true},
+                               {L"rigid_character_iridescent_emissive", 1, true},
+                               {L"rigid_character_iridescent_emissive_alpha", 1, true}};
+            s.wh3Emissive = 0;
+            s.wh3Iridescent = false;
+            for (const auto& k : kWh3Shaders)
+                if (!_wcsicmp(buf, k.name)) s.wh3Emissive = k.emissive, s.wh3Iridescent = k.iridescent;
+        }
+        GetPrivateProfileStringW(L"viewmodel", L"wh3_part", s.wh3Part, s.wh3Part, 256, ini);
+        GetPrivateProfileStringW(L"viewmodel", L"wh3_mask", s.wh3Mask, s.wh3Mask, 260, ini);
+        GetPrivateProfileStringW(L"viewmodel", L"emissive_texture", s.emissiveTexture, s.emissiveTexture, 260, ini);
+        GetPrivateProfileStringW(L"viewmodel", L"emissive_distortion", s.emissiveDistortion, s.emissiveDistortion, 260, ini);
+        s.emissiveStrength = IniFloat(ini, L"emissive_strength", s.emissiveStrength);
+        IniVec3(ini, L"emissive_tint", s.emissiveTint);
+        float t[2];
+        GetPrivateProfileStringW(L"viewmodel", L"emissive_speed", L"", buf, 128, ini);
+        int n = buf[0] ? swscanf(buf, L"%f , %f", &t[0], &t[1]) : 0;
+        if (n == 1) t[1] = t[0];
+        if (n >= 1 && std::isfinite(t[0]) && std::isfinite(t[1])) s.emissiveSpeed[0] = t[0], s.emissiveSpeed[1] = t[1];
+        IniVec2(ini, L"emissive_direction", s.emissiveDirection);
+        s.emissiveDistort = IniFloat(ini, L"emissive_distort_strength", s.emissiveDistort);
+        s.emissiveDistort = IniFloat(ini, L"emissive_distortion_scale", s.emissiveDistort);
+        IniVec2(ini, L"emissive_tiling", s.emissiveTiling);
+        float tt = IniFloat(ini, L"emissive_texture_tiling", -1e30f);
+        if (tt > -1e29f) s.emissiveTiling[0] = s.emissiveTiling[1] = tt;
+        s.emissiveFresnelStrength = IniFloat(ini, L"emissive_fresnel_strength", s.emissiveFresnelStrength);
+        s.emissivePulseSpeed = IniFloat(ini, L"emissive_pulse_speed", s.emissivePulseSpeed);
+        s.emissivePulseStrength = IniFloat(ini, L"emissive_pulse_strength", s.emissivePulseStrength);
+        for (int k = 0; k < 4; ++k) {
+            wchar_t key[64];
+            swprintf(key, 64, L"emissive_gradient_stop_%d", k + 1);
+            s.emissiveGradientStop[k] = IniFloat(ini, key, s.emissiveGradientStop[k]);
+            swprintf(key, 64, L"emissive_gradient_colour_stop_%d", k + 1);
+            IniVec3(ini, key, s.emissiveGradientColour[k]);
+        }
+        s.iridescenceAmount = IniFloat(ini, L"iridescence_amount", s.iridescenceAmount);
+        IniVec3(ini, L"iridescence_colour_a", s.iridescenceColourA);
+        IniVec3(ini, L"iridescence_colour_b", s.iridescenceColourB);
+        s.emissiveScale = IniFloat(ini, L"emissive_scale", s.emissiveScale);
+        if (!(s.emissiveScale >= 0.f && s.emissiveScale <= 100.f)) s.emissiveScale = 1.f;
+        s.emissiveSoft = IniFloat(ini, L"emissive_soft", s.emissiveSoft ? 1.f : 0.f) != 0.f;
+    }
     for (int i = 0; i < kMeleeSfx; ++i) {
         wchar_t key[64];
         swprintf(key, 64, L"melee_sfx_%ls", kMeleeSfxNames[i]);
@@ -801,6 +994,8 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.magSize = static_cast<int>(IniFloat(ini, L"mag_size", static_cast<float>(s.magSize)));
     s.magDisposable = IniFloat(ini, L"mag_disposable", s.magDisposable ? 1.f : 0.f) != 0.f;
     s.ammoTotal = static_cast<int>(IniFloat(ini, L"ammo_total", static_cast<float>(s.ammoTotal)));
+    s.ammoUpgrade = static_cast<int>(IniFloat(ini, L"ammo_upgrade", static_cast<float>(s.ammoUpgrade)));
+    if (s.ammoUpgrade < 0 || s.ammoUpgrade > 10000) s.ammoUpgrade = 0;
     s.reloadRefill = IniFloat(ini, L"reload_refill", s.reloadRefill);
     s.reloadEmptyRefill = IniFloat(ini, L"reload_empty_refill", s.reloadEmptyRefill);
     GetPrivateProfileStringW(L"viewmodel", L"weapon_id", s.weaponId, s.weaponId, 64, ini);
@@ -857,7 +1052,8 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
         if (!(*v == 0.f || (*v >= 0.01f && *v <= 2.f))) *v = 0.f;
     {
         wchar_t buf[128];
-        GetPrivateProfileStringW(L"viewmodel", L"ads_curve_time", L"", buf, 128, ini);
+        GetPrivateProfileStringW(L"viewmodel", L"ads_timing", L"", buf, 128, ini);
+        if (!buf[0]) GetPrivateProfileStringW(L"viewmodel", L"ads_curve_time", L"", buf, 128, ini);
         float t[4];
         if (buf[0]) {
             bool ok = swscanf(buf, L"%f , %f , %f , %f", &t[0], &t[1], &t[2], &t[3]) == 4;
@@ -887,6 +1083,8 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
         GetPrivateProfileStringW(L"viewmodel", L"projectile", L"", pw, 64, ini);
         if (pw[0] && WideCharToMultiByte(CP_UTF8, 0, pw, -1, s.projectile, sizeof s.projectile, nullptr, nullptr) <= 0) s.projectile[0] = 0;
     }
+    s.fireRange = IniFloat(ini, L"fire_range", s.fireRange);
+    if (!(s.fireRange == 0.f || (s.fireRange >= 5.f && s.fireRange <= 2000.f))) s.fireRange = 0.f;
     if (!(s.fireLfeVolume >= 0.f && s.fireLfeVolume <= 2.f)) s.fireLfeVolume = 0.7f;
     if (!(s.fireAtmoVolume >= 0.f && s.fireAtmoVolume <= 2.f)) s.fireAtmoVolume = 0.7f;
     if (!(s.fireTailVolume >= 0.f && s.fireTailVolume <= 2.f)) s.fireTailVolume = 0.7f;
@@ -898,6 +1096,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     IniVec3(ini, L"muzzle_axis", s.muzzleAxis);
     IniVec3(ini, L"muzzle_up", s.muzzleUp);
     GetPrivateProfileStringW(L"viewmodel", L"flash_fx", s.flashFx, s.flashFx, 128, ini);
+    GetPrivateProfileStringW(L"viewmodel", L"effect_fx", s.effectFx, s.effectFx, 128, ini);
     s.flashScale = IniFloat(ini, L"flash_scale", s.flashScale);
     s.flashIntensity = IniFloat(ini, L"flash_intensity", s.flashIntensity);
     s.flashLight = IniFloat(ini, L"flash_light", s.flashLight);
@@ -926,7 +1125,6 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.flashGasAds = IniFloat(ini, L"flash_gas_ads", s.flashGasAds);
     if (!(s.flashGasAds >= 0.f && s.flashGasAds <= 1.f)) s.flashGasAds = 1.f;
     s.shellEject = IniFloat(ini, L"shell_eject", s.shellEject ? 1.f : 0.f) != 0.f;
-    s.shellEjectAnim = IniFloat(ini, L"shell_eject_anim", s.shellEjectAnim ? 1.f : 0.f) != 0.f;
     s.shellScale = IniFloat(ini, L"shell_scale", s.shellScale);
     s.shellSpeed = IniFloat(ini, L"shell_speed", s.shellSpeed);
     s.shellLife = IniFloat(ini, L"shell_life", s.shellLife);
@@ -1036,12 +1234,43 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (!(s.scale > 0.001f && s.scale < 1000)) s.scale = 1;
     return true;
 }
-bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
+namespace {
+bool ReadHvmV1(const wchar_t* path, unsigned char** out, size_t* outLen, char* err, size_t errLen) {
     unsigned char* data = nullptr;
     size_t len = 0;
     if (!ReadFileAll(path, &data, &len)) {
         SetErr(err, errLen, "model file missing: %ls", path);
         return false;
+    }
+    if (hvmslim::IsV3(data, len)) {
+        char relU8[260];
+        bool conv = hvmslim::V3BaseRel(data, len, relU8, sizeof relU8, err, errLen);
+        unsigned char* base = nullptr;
+        size_t baseLen = 0;
+        if (conv) {
+            wchar_t basePath[MAX_PATH * 2];
+            wcsncpy(basePath, path, MAX_PATH - 1);
+            basePath[MAX_PATH - 1] = 0;
+            wchar_t* slash = wcsrchr(basePath, L'\\');
+            if (!slash) slash = wcsrchr(basePath, L'/');
+            if (slash) slash[1] = 0;
+            else basePath[0] = 0;
+            wchar_t relW[260];
+            MultiByteToWideChar(CP_UTF8, 0, relU8, -1, relW, 260);
+            wcsncat(basePath, relW, MAX_PATH * 2 - wcslen(basePath) - 1);
+            if (!ReadFileAll(basePath, &base, &baseLen)) {
+                SetErr(err, errLen, "hvm3: base model missing: %ls", basePath);
+                conv = false;
+            }
+        }
+        unsigned char* v2 = nullptr;
+        size_t v2Len = 0;
+        if (conv) conv = hvmslim::V3ToV2(data, len, base, baseLen, &v2, &v2Len, err, errLen);
+        delete[] base;
+        delete[] data;
+        if (!conv) return false;
+        data = v2;
+        len = v2Len;
     }
     if (hvmslim::IsV2(data, len)) {
         unsigned char* v1 = nullptr;
@@ -1052,6 +1281,15 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
         data = v1;
         len = v1Len;
     }
+    *out = data;
+    *outLen = len;
+    return true;
+}
+}
+bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
+    unsigned char* data = nullptr;
+    size_t len = 0;
+    if (!TakePrefetched(path, true, &data, &len) && !ReadHvmV1(path, &data, &len, err, errLen)) return false;
     bool ok = false;
     ID3D11Buffer* vb = nullptr;
     ID3D11Buffer* ib = nullptr;
@@ -1083,6 +1321,7 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
         wchar_t* slash = wcsrchr(dir, L'\\');
         if (!slash) slash = wcsrchr(dir, L'/');
         if (slash) slash[1] = 0;
+        wcsncpy(hvmDir_, dir, MAX_PATH - 1);
         bool texOk = true;
         for (uint32_t t = 0; t < h.textureCount; ++t) {
             HvmTexture tx;
@@ -1091,6 +1330,14 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
             tx.file[75] = 0;
             wchar_t rel[128];
             MultiByteToWideChar(CP_UTF8, 0, tx.file, -1, rel, 128);
+            if (t < kMaxTextures) {
+                const wchar_t* b = rel;
+                for (const wchar_t* q = rel; *q; ++q)
+                    if (*q == L'/' || *q == L'\\') b = q + 1;
+                wcsncpy(texName_[t], b, 63);
+                texName_[t][63] = 0;
+                _wcslwr(texName_[t]);
+            }
             wchar_t full[MAX_PATH * 2];
             swprintf(full, MAX_PATH * 2, L"%ls%ls", dir, rel);
             if (!LoadDds(dev_, full, tx.srgb != 0, &srv_[t], err, errLen)) {
@@ -1306,7 +1553,7 @@ bool Renderer::CreatePipeline(char* err, size_t errLen) {
     ok = SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbFrame_));
     bd.ByteWidth = kMaxBones * 3 * 16;
     ok = ok && SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbBones_));
-    bd.ByteWidth = 48;
+    bd.ByteWidth = 48 + 11 * 16;
     ok = ok && SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbMat_));
     D3D11_RASTERIZER_DESC rd = {};
     rd.FillMode = D3D11_FILL_SOLID;
@@ -1673,6 +1920,31 @@ bool DebugBoneWorld(unsigned b, float m12[12]) {
     if (b >= g_lastCount) return false;
     memcpy(m12, g_world[b].m, sizeof(float) * 12);
     return true;
+}
+namespace {
+struct AnimStateCopy {
+    Aff world[kMaxBones], local[kMaxBones];
+    float lastTrs[kMaxBones][10], snapTrs[kMaxBones][10];
+    unsigned lastCount;
+    signed char fadeSign[kMaxBones];
+    float lastNew[kMaxBones][4], lastOld[kMaxBones][4];
+    int fadeClip, fadePrev;
+    float fadeBlend;
+} g_animSaved;
+}
+void AnimStatePush() {
+    AnimStateCopy& c = g_animSaved;
+    memcpy(c.world, g_world, sizeof g_world), memcpy(c.local, g_local, sizeof g_local);
+    memcpy(c.lastTrs, g_lastTrs, sizeof g_lastTrs), memcpy(c.snapTrs, g_snapTrs, sizeof g_snapTrs);
+    memcpy(c.fadeSign, g_fadeSign, sizeof g_fadeSign), memcpy(c.lastNew, g_lastNew, sizeof g_lastNew), memcpy(c.lastOld, g_lastOld, sizeof g_lastOld);
+    c.lastCount = g_lastCount, c.fadeClip = g_fadeClip, c.fadePrev = g_fadePrev, c.fadeBlend = g_fadeBlend;
+}
+void AnimStatePop() {
+    const AnimStateCopy& c = g_animSaved;
+    memcpy(g_world, c.world, sizeof g_world), memcpy(g_local, c.local, sizeof g_local);
+    memcpy(g_lastTrs, c.lastTrs, sizeof g_lastTrs), memcpy(g_snapTrs, c.snapTrs, sizeof g_snapTrs);
+    memcpy(g_fadeSign, c.fadeSign, sizeof g_fadeSign), memcpy(g_lastNew, c.lastNew, sizeof g_lastNew), memcpy(g_lastOld, c.lastOld, sizeof g_lastOld);
+    g_lastCount = c.lastCount, g_fadeClip = c.fadeClip, g_fadePrev = c.fadePrev, g_fadeBlend = c.fadeBlend;
 }
 void Renderer::ArmIk(const Settings& s, const float* k12) {
     Aff K;
@@ -2173,8 +2445,6 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
             cf.lens1[3] = s.scopeReticle;
             cf.lens2[0] = 1.f / static_cast<float>(w);
             cf.lens2[1] = 1.f / static_cast<float>(h);
-            cf.lens2[2] = s.scopeSharpen;
-            cf.lens2[3] = s.scopeCubic ? 1.f : 0.f;
             lensOn = true;
         }
     }
@@ -2241,6 +2511,38 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
     ctx->PSSetSamplers(0, 1, &samp_);
     ID3D11ShaderResourceView* sceneView = haveScene ? sceneSrv_ : white_;
     ctx->PSSetShaderResources(3, 1, &sceneView);
+    SetupWh3Material(s);
+    float em[44] = {};
+    if (wh3On_) {
+        if (s.wh3Emissive) {
+            double t = look.time;
+            bool prop = s.wh3Emissive == 2;
+            for (int k = 0; k < 2; ++k) {
+                double v = prop ? 0.05 * s.emissiveSpeed[k] : static_cast<double>(s.emissiveSpeed[0]) * s.emissiveDirection[k];
+                double per = std::fabs(s.emissiveTiling[k]) > 1e-4 ? 1.0 / std::fabs(s.emissiveTiling[k]) : 1.0;
+                em[8 + k] = static_cast<float>(std::fmod(t * v, per));
+                em[10 + k] = s.emissiveTiling[k];
+            }
+            double ph = prop ? s.emissivePulseSpeed * (t + 0.5) : s.emissivePulseSpeed * t;
+            em[0] = static_cast<float>(s.wh3Emissive);
+            em[1] = s.emissiveStrength;
+            em[2] = s.emissiveFresnelStrength;
+            em[3] = s.emissiveDistort;
+            em[4] = s.emissiveTint[0], em[5] = s.emissiveTint[1], em[6] = s.emissiveTint[2];
+            em[7] = static_cast<float>(0.1 * s.emissivePulseStrength * (std::sin(std::fmod(ph, 6.283185307179586)) + 0.99));
+            for (int k = 0; k < 4; ++k) {
+                em[16 + k] = s.emissiveGradientStop[k];
+                for (int j = 0; j < 3; ++j) em[20 + k * 4 + j] = s.emissiveGradientColour[k][j];
+            }
+        }
+        em[12] = s.emissiveScale;
+        em[13] = s.emissiveSoft ? 1.f : 0.f;
+        em[14] = s.wh3Iridescent ? 1.f : 0.f;
+        em[15] = s.iridescenceAmount;
+        for (int j = 0; j < 3; ++j) em[36 + j] = s.iridescenceColourA[j], em[40 + j] = s.iridescenceColourB[j];
+        ID3D11ShaderResourceView* t3[3] = {wh3Srv_[0], wh3Srv_[1] ? wh3Srv_[1] : white_, wh3Srv_[2] ? wh3Srv_[2] : white_};
+        ctx->PSSetShaderResources(4, 3, t3);
+    }
     for (unsigned i = 0; i < subCount_; ++i) {
         const Submesh& sm = subs_[i];
         bool hasDef = (sm.flags >> 17) & 1;
@@ -2251,6 +2553,8 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
                          ((sm.flags >> 19) & 1) ? 1.f : 0.f, 0.f, 0.f, 0.f};
         if (SUCCEEDED(ctx->Map(cbMat_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mp))) {
             memcpy(mp.pData, mat, sizeof mat);
+            if (wh3On_ && sm.wh3) memcpy(static_cast<char*>(mp.pData) + sizeof mat, em, sizeof em);
+            else memset(static_cast<char*>(mp.pData) + sizeof mat, 0, sizeof em);
             ctx->Unmap(cbMat_, 0);
         }
         ID3D11ShaderResourceView* srv[3];
@@ -2261,8 +2565,57 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
     bk.Restore(ctx);
     return true;
 }
+void Renderer::SetupWh3Material(const Settings& s) {
+    bool any = s.wh3Emissive || s.wh3Iridescent;
+    uint64_t key = any ? Fnv64(s.wh3Part, sizeof s.wh3Part) ^ Fnv64(s.wh3Mask, sizeof s.wh3Mask) * 3 ^
+                             Fnv64(s.emissiveTexture, sizeof s.emissiveTexture) * 5 ^ Fnv64(s.emissiveDistortion, sizeof s.emissiveDistortion) * 7 ^
+                             (static_cast<uint64_t>(s.wh3Emissive) << 1 | (s.wh3Iridescent ? 1u : 0u))
+                       : 0;
+    if (key == wh3Key_) return;
+    wh3Key_ = key;
+    wh3On_ = false;
+    for (auto*& v : wh3Srv_) SafeRelease(v);
+    for (unsigned i = 0; i < subCount_; ++i) subs_[i].wh3 = false;
+    if (!any || !dev_) return;
+    wchar_t parts[256];
+    wcsncpy(parts, s.wh3Part, 255);
+    parts[255] = 0;
+    _wcslwr(parts);
+    unsigned hit = 0;
+    for (unsigned i = 0; i < subCount_; ++i) {
+        int a = subs_[i].tex[0];
+        if (a < 0 || a >= static_cast<int>(kMaxTextures) || !texName_[a][0]) continue;
+        size_t n = wcslen(texName_[a]);
+        for (const wchar_t* p = parts; *p;) {
+            const wchar_t* e = wcschr(p, L';');
+            size_t len = e ? static_cast<size_t>(e - p) : wcslen(p);
+            if (len == n && !wcsncmp(p, texName_[a], n)) {
+                subs_[i].wh3 = true;
+                ++hit;
+                break;
+            }
+            if (!e) break;
+            p = e + 1;
+        }
+    }
+    if (!hit) return;
+    const wchar_t* rel[3] = {s.wh3Mask, s.emissiveTexture, s.emissiveDistortion};
+    for (int k = 0; k < (s.wh3Emissive ? 3 : 1); ++k) {
+        wchar_t full[MAX_PATH * 2];
+        swprintf(full, MAX_PATH * 2, L"%ls%ls", hvmDir_, rel[k]);
+        char err[256];
+        if (!rel[k][0] || !LoadDds(dev_, full, false, &wh3Srv_[k], err, sizeof err)) {
+            for (auto*& v : wh3Srv_) SafeRelease(v);
+            return;
+        }
+    }
+    wh3On_ = true;
+}
 void Renderer::Release() {
     ready_ = false;
+    for (auto*& v : wh3Srv_) SafeRelease(v);
+    wh3Key_ = 0;
+    wh3On_ = false;
     SafeRelease(vb_);
     SafeRelease(ib_);
     SafeRelease(cbFrame_);
@@ -2444,9 +2797,9 @@ struct FlashCb {
 constexpr int kFlashTexVent = 0, kFlashTexFire = 1, kFlashTexGlow = 2, kFlashTexSmoke = 3, kFlashTexSpark = 4;
 constexpr int kFlashTexGasJet = 5, kFlashTexGasPuff = 6;
 constexpr int kFlashTexDistRing = 7, kFlashTexDistHaze = 8, kFlashTexGasBall = 9, kFlashTexGasWisp = 10, kFlashTexCount = 11;
-const wchar_t* const kFlashTexNames[kFlashTexCount] = {L"ref_flash", L"fire_particle_4", L"particle_flare_004", L"ref_mist",
-                                                       L"spark", L"ref_gas_jet", L"ref_gas_puff", L"ref_dist_ring", L"ref_dist_haze",
-                                                       L"ref_gas_ball", L"ref_gas_wisp"};
+const wchar_t* const kFlashTexNames[kFlashTexCount] = {L"flash_vent", L"flash_fire", L"flash_glow", L"hit_mist",
+                                                       L"tracer", L"gas_jet", L"gas_puff", L"dist_ring", L"dist_haze",
+                                                       L"gas_ball", L"gas_wisp"};
 constexpr float kTracerSpeed = 13000.f * 0.0254f, kTracerMaxLen = 500.f * 0.0254f, kTracerHalfWidth = 3.f * 0.0254f;
 ID3D11ShaderResourceView* LoadDdsBc(ID3D11Device* dev, const wchar_t* path, char* err, size_t errLen) {
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -2660,9 +3013,9 @@ void MuzzleFlash::AddImpact(const float* pos, const float* dir, bool kill) {
     rng_ = rng_ * 1664525u + 1013904223u;
     m.seed = rng_ ? rng_ : 1u;
 }
-bool MuzzleFlash::Load(ID3D11Device* dev, const wchar_t* fxDir, const wchar_t* gasDir, char* err, size_t errLen) {
+bool MuzzleFlash::Load(ID3D11Device* dev, const wchar_t* fxDir, const wchar_t* effectDir, const wchar_t* gasDir, char* err, size_t errLen) {
     Release();
-    if (!dev || !fxDir || !fxDir[0]) return false;
+    if (!dev) return false;
     dev_ = dev;
     if (!InitPipeline(dev)) {
         snprintf(err, errLen, "flash pipeline init failed");
@@ -2670,16 +3023,13 @@ bool MuzzleFlash::Load(ID3D11Device* dev, const wchar_t* fxDir, const wchar_t* g
         return false;
     }
     for (int i = 0; i < 5; ++i) {
+        const wchar_t* d = i == kFlashTexSmoke || i == kFlashTexSpark ? effectDir : fxDir;
+        if (!d || !d[0]) continue;
         wchar_t path[MAX_PATH * 2];
-        swprintf(path, MAX_PATH * 2, L"%ls\\%ls.dds", fxDir, kFlashTexNames[i]);
+        swprintf(path, MAX_PATH * 2, L"%ls\\%ls.dds", d, kFlashTexNames[i]);
         char e[256] = {};
         tex_[i] = LoadDdsBc(dev, path, e, sizeof e);
-        if (!tex_[i] && i != kFlashTexSmoke && i != kFlashTexSpark) {
-            snprintf(err, errLen, "%s", e);
-            Release();
-            return false;
-        }
-        swprintf(path, MAX_PATH * 2, L"%ls\\%ls.sheet", fxDir, kFlashTexNames[i]);
+        swprintf(path, MAX_PATH * 2, L"%ls\\%ls.sheet", d, kFlashTexNames[i]);
         LoadSheet(path, sheet_[i]);
     }
     for (int i = kFlashTexGasJet; gasDir && gasDir[0] && i < kFlashTexCount; ++i) {
@@ -2716,7 +3066,7 @@ void MuzzleFlash::Spawn(const Settings& s) {
     n_ = 0;
     if (s.flashFlame) SpawnFlame(s);
     if (s.flashGas) SpawnGas(s);
-    if (s.shellEject && !s.shellEjectAnim) SpawnShellFx(s);
+    if (s.shellEject) SpawnShellFx(s);
 }
 void MuzzleFlash::SpawnGas(const Settings& s) {
     if (!GasLoaded()) return;
@@ -5019,5 +5369,96 @@ void Shield::Release() {
     builtModel_[0] = 0;
     n_ = hitPending_ = 0;
     for (UINT& c : kindCount_) c = 0;
+}
+namespace prefetch {
+bool Model(int tag, const wchar_t* hvmPath, int* files, size_t* bytes, char* err, size_t errLen) {
+    *files = 0;
+    *bytes = 0;
+    ULONGLONG size = 0;
+    FILETIME stamp = {};
+    if (!FileStamp(hvmPath, &size, &stamp)) {
+        SetErr(err, errLen, "model file missing: %ls", hvmPath);
+        return false;
+    }
+    unsigned char* data = nullptr;
+    size_t len = 0;
+    if (!ReadHvmV1(hvmPath, &data, &len, err, errLen)) return false;
+    HvmHeader h = {};
+    constexpr uint32_t kTexCap = 64;
+    HvmTexture tex[kTexCap];
+    uint32_t texN = 0;
+    if (len >= sizeof h) {
+        memcpy(&h, data, sizeof h);
+        if (!memcmp(h.magic, "HVM1", 4) && h.version == 1 && h.textureCount <= kTexCap &&
+            sizeof h + h.textureCount * sizeof(HvmTexture) <= len)
+            texN = h.textureCount;
+    }
+    memcpy(tex, data + sizeof h, texN * sizeof(HvmTexture));
+    *files = 1;
+    *bytes = len;
+    PutPrefetched(tag, true, hvmPath, data, len, size, stamp);
+    wchar_t dir[MAX_PATH];
+    wcsncpy(dir, hvmPath, MAX_PATH - 1);
+    dir[MAX_PATH - 1] = 0;
+    wchar_t* slash = wcsrchr(dir, L'\\');
+    if (!slash) slash = wcsrchr(dir, L'/');
+    if (slash) slash[1] = 0;
+    for (uint32_t t = 0; t < texN; ++t) {
+        tex[t].file[75] = 0;
+        wchar_t rel[128];
+        MultiByteToWideChar(CP_UTF8, 0, tex[t].file, -1, rel, 128);
+        wchar_t full[MAX_PATH * 2];
+        swprintf(full, MAX_PATH * 2, L"%ls%ls", dir, rel);
+        unsigned char* d = nullptr;
+        size_t l = 0;
+        if (!FileStamp(full, &size, &stamp) || !ReadFileAll(full, &d, &l)) continue;
+        ++*files;
+        *bytes += l;
+        PutPrefetched(tag, false, full, d, l, size, stamp);
+    }
+    return true;
+}
+void Drop(int tag) {
+    unsigned char* del[kMaxPre];
+    int n = 0;
+    AcquireSRWLockExclusive(&g_preLock);
+    for (int i = 0; i < g_preN;) {
+        if (g_pre[i].tag != tag) {
+            ++i;
+            continue;
+        }
+        del[n++] = g_pre[i].data;
+        g_pre[i] = g_pre[--g_preN];
+    }
+    ReleaseSRWLockExclusive(&g_preLock);
+    for (int k = 0; k < n; ++k) delete[] del[k];
+}
+int WarmShaders() {
+    FnD3DCompile compile = GetCompiler();
+    if (!compile) return 0;
+    struct One {
+        const char* src;
+        size_t len;
+        const char *name, *entry, *target;
+    } const list[] = {{kShader, sizeof kShader - 1, "hero_fps_vm", "VS", "vs_5_0"},
+                      {kShader, sizeof kShader - 1, "hero_fps_vm", "PS", "ps_5_0"},
+                      {kFlashShader, sizeof kFlashShader - 1, "hero_fps_flash", "VS", "vs_5_0"},
+                      {kFlashShader, sizeof kFlashShader - 1, "hero_fps_flash", "PS", "ps_5_0"},
+                      {kFlashShader, sizeof kFlashShader - 1, "hero_fps_flash", "PSD", "ps_5_0"},
+                      {kShellShader, sizeof kShellShader - 1, "hero_fps_shell", "VS", "vs_5_0"},
+                      {kShellShader, sizeof kShellShader - 1, "hero_fps_shell", "PS", "ps_5_0"},
+                      {kCrossShader, sizeof kCrossShader - 1, "hero_fps_cross", "VS", "vs_5_0"},
+                      {kCrossShader, sizeof kCrossShader - 1, "hero_fps_cross", "PS", "ps_5_0"},
+                      {kShieldShader, sizeof kShieldShader - 1, "hero_fps_shield", "VS", "vs_5_0"},
+                      {kShieldShader, sizeof kShieldShader - 1, "hero_fps_shield", "PS", "ps_5_0"}};
+    int ok = 0;
+    for (const One& o : list) {
+        ID3DBlob *b = nullptr, *m = nullptr;
+        if (SUCCEEDED(compile(o.src, o.len, o.name, nullptr, nullptr, o.entry, o.target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &b, &m))) ++ok;
+        SafeRelease(b);
+        SafeRelease(m);
+    }
+    return ok;
+}
 }
 }

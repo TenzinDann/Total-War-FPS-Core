@@ -4,7 +4,7 @@
 #include <d3d11.h>
 #include <cstdint>
 namespace vm {
-constexpr int kMeleeSfx = 17;
+constexpr int kMeleeSfx = 18;
 extern const wchar_t* const kMeleeSfxNames[kMeleeSfx];
 struct Settings {
     float fovDeg = 55.0f;
@@ -35,8 +35,6 @@ struct Settings {
     int scopeBone = -1;
     float scopeLensRadius = 0.0178f;
     float scopeReticle = 1.0f;
-    float scopeSharpen = 0.5f;
-    bool scopeCubic = true;
     bool handIk = true;
     float ikGripRi[3] = {0.0f, 0.0f, 0.0f};
     float ikGripLe[3] = {0.0f, 0.0f, 0.0f};
@@ -71,11 +69,13 @@ struct Settings {
     int magSize = 0;
     bool magDisposable = false;
     int ammoTotal = 0;
+    int ammoUpgrade = 0;
     float reloadRefill = 0.f;
     float reloadEmptyRefill = 0.f;
     wchar_t weaponId[64] = L"";
     bool weaponDefault = false;
     char projectile[64] = "";
+    float fireRange = 0.f;
     wchar_t animSounds[128] = L"";
     float animSoundVolume = 0.7f;
     wchar_t stepFoot[512] = L"";
@@ -107,6 +107,7 @@ struct Settings {
     bool crossHip = true, crossAds = false;
     float crossScale = 1.f;
     wchar_t flashFx[128] = L"";
+    wchar_t effectFx[128] = L"..\\_fx";
     float flashScale = 1.0f;
     float flashIntensity = 1.0f;
     float flashLight = 1.0f;
@@ -126,7 +127,6 @@ struct Settings {
     float flashGasBarrelSmokeFade = 0.9f;
     float flashGasLinger = 1.0f;
     bool shellEject = true;
-    bool shellEjectAnim = false;
     float shellScale = 1.0f;
     float shellSpeed = 1.0f;
     float shellLife = 1.0f;
@@ -188,9 +188,31 @@ struct Settings {
     wchar_t shieldModel[520] = L"";
     float shieldModelMetal = 1.f;
     float meleeStrikeLead = 0.25f;
+    int wh3Emissive = 0;
+    bool wh3Iridescent = false;
+    wchar_t wh3Part[256] = L"";
+    wchar_t wh3Mask[260] = L"";
+    wchar_t emissiveTexture[260] = L"";
+    wchar_t emissiveDistortion[260] = L"";
+    float emissiveStrength = 1.f;
+    float emissiveTint[3] = {1.f, 1.f, 1.f};
+    float emissiveSpeed[2] = {0.f, 0.f};
+    float emissiveDirection[2] = {1.f, 1.f};
+    float emissiveDistort = 0.f;
+    float emissiveTiling[2] = {1.f, 1.f};
+    float emissiveFresnelStrength = 0.f;
+    float emissivePulseSpeed = 0.f;
+    float emissivePulseStrength = 0.f;
+    float emissiveGradientStop[4] = {0.f, 0.33f, 0.67f, 1.f};
+    float emissiveGradientColour[4][3] = {{0.f, 0.f, 0.f}, {0.33f, 0.33f, 0.33f}, {0.67f, 0.67f, 0.67f}, {1.f, 1.f, 1.f}};
+    float iridescenceAmount = 0.f;
+    float iridescenceColourA[3] = {0.96f, 0.26f, 0.95f};
+    float iridescenceColourB[3] = {0.26f, 0.82f, 0.96f};
+    float emissiveScale = 1.f;
+    bool emissiveSoft = false;
     wchar_t meleeSfx[kMeleeSfx][512] = {};
     float meleeSfxVolume[kMeleeSfx] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f,
-                                       -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
+                                       -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
     float meleeSfxPitch[kMeleeSfx][2] = {};
     float meleeSfxMaster = 1.f;
     bool meleeSfxSwingCut = false;
@@ -262,7 +284,7 @@ struct CrosshairSettings {
 bool LoadCrosshair(const wchar_t* ini, CrosshairSettings& s);
 class MuzzleFlash {
 public:
-    bool Load(ID3D11Device* dev, const wchar_t* fxDir, const wchar_t* gasDir, char* err, size_t errLen);
+    bool Load(ID3D11Device* dev, const wchar_t* fxDir, const wchar_t* effectDir, const wchar_t* gasDir, char* err, size_t errLen);
     void Trigger(float ads = 0.f);
     void AddTracer(const float* from, const float* to);
     void AddImpact(const float* pos, const float* dir, bool kill);
@@ -273,7 +295,7 @@ public:
     void SetScene(ID3D11ShaderResourceView* srv, bool gamma) { scene_ = srv; sceneGamma_ = gamma; }
     bool HasDistortion() const;
     void Release();
-    bool Loaded() const { return tex_[0] != nullptr; }
+    bool Loaded() const { return vs_ != nullptr; }
     bool GasLoaded() const { return tex_[5] && tex_[6]; }
     int LiveTracers() const { return nTr_; }
     int LiveImpacts() const { return nImp_; }
@@ -548,6 +570,7 @@ private:
         uint32_t firstIndex, indexCount;
         int tex[3];
         uint32_t normalMode, materialMode, flags;
+        bool wh3 = false;
     };
     struct Bone {
         int parent;
@@ -602,6 +625,12 @@ private:
     Submesh* subs_ = nullptr;
     unsigned subCount_ = 0;
     unsigned lensSubs_ = 0;
+    void SetupWh3Material(const Settings& s);
+    wchar_t hvmDir_[MAX_PATH] = L"";
+    wchar_t texName_[kMaxTextures][64] = {};
+    ID3D11ShaderResourceView* wh3Srv_[3] = {};
+    uint64_t wh3Key_ = 0;
+    bool wh3On_ = false;
     Bone* bones_ = nullptr;
     unsigned boneCount_ = 0;
     Clip* clips_ = nullptr;
@@ -628,4 +657,11 @@ private:
     bool muzzleFrameValid_ = false;
     MuzzleFrame muzzleFrame_ = {};
 };
+void AnimStatePush();
+void AnimStatePop();
+namespace prefetch {
+bool Model(int tag, const wchar_t* hvmPath, int* files, size_t* bytes, char* err, size_t errLen);
+void Drop(int tag);
+int WarmShaders();
+}
 }

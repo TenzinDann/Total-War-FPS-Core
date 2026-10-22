@@ -186,6 +186,42 @@ const CodePrint kShieldGamePrints904[] = {
     {0x8d3ca0, 0x3, 0x58389c18233078ffull}};
 constexpr uintptr_t kVtSoldier904 = 0x3912950, kFnProjHit904 = 0x306b1a8, kFnProjCanHit904 = 0x305947c, kFnRet0Of1c8_904 = 0x8d3ca0,
                     kFnHitReact904 = 0x307517c, kFnStagger904 = 0x306ee40, kMeleeRet1_904 = 0x3253e70, kMeleeRet2_904 = 0x326565e;
+const CodePrint kAbilityPrints904[] = {
+    {0x2f008d0, 0x27b, 0x594cd05ca9272710ull},
+    {0x2ea94e8, 0xa0, 0x744ebda3b94ebcedull},
+    {0x2e9df94, 0x2a, 0xfebdfc7ea7568f1dull},
+    {0x1bc2ff0, 0x6e, 0x5d2cb85accdf2e34ull},
+    {0x2eed7a8, 0x136, 0x3b941bd6a61e91b8ull},
+    {0x1bccb8c, 0x22, 0xb3fc638559b54daeull},
+    {0x1535340, 0x2d, 0xe8700aef872daaeaull},
+    {0x2ed1478, 0x1b0, 0x5ccc3fdb5f7825f2ull},
+    {0x2f35c64, 0x278, 0xcf324f891c88c2a4ull},
+    {0x3037d78, 0x50c, 0x21c1d1989d8dc5e2ull},
+    {0x2d93918, 0x1ab, 0xe6393eae6bb589caull},
+    {0x2d9334c, 0x77, 0x3f34f133ef2c7aa9ull}};
+constexpr uintptr_t kFnAbilityTable904 = 0x1535340, kFnAbilityGroundCtor904 = 0x2ea94e8, kFnAbilityIssue904 = 0x1bc2ff0,
+                    kVtAbilityCmd904 = 0x39071f8, kFnAbilityCmdWrite904 = 0x2eed7a8;
+const CodePrint kCharPrints904[] = {
+    {0x1e8392c, 0x25, 0x909bd734bb5f100bull},
+    {0x4d3970, 0x2e, 0xb416bbb3274728dcull},
+    {0x8e2880, 0x0c, 0xf55c7e50acf69be9ull},
+    {0x1e86204, 0x11, 0x8aa88ae5c72a99d6ull}};
+constexpr uintptr_t oUnitCharDetails = 0x158, oCharKeyStr = 0x4e8, oUiUnitIsGeneral = 0x6fa;
+const CodePrint kFlyPrints904[] = {
+    {0x8e2420, 0xc, 0x7a3750e9a30ac0d2ull},
+    {0x8e2430, 0xc, 0x62ce00c3f2a8c2afull},
+    {0x8e2440, 0xc, 0xc7052de21b161035ull},
+    {0x8e2860, 0xc, 0x13d482da9323de80ull},
+    {0x2ea9358, 0x38, 0xf662140a1ee931baull},
+    {0x1e3f410, 0x6e, 0x231ab3a1d31f4b75ull},
+    {0x2ed1160, 0x62, 0x4c0cf35d628b1a09ull},
+    {0x2f4ae00, 0xe5, 0x9df247d2bf9b1367ull}};
+constexpr uintptr_t oUiCanFly = 0x70f, oUiAlwaysFly = 0x710, oUiCanToggleFly = 0x711, oUiIsFlying = 0x712;
+constexpr uintptr_t kFnFlyCmdCtor904 = 0x2ea9358, kFnFlyCmdIssue904 = 0x1e3f410;
+bool g_flyOk = false;
+constexpr uintptr_t oUnitAbilityMgr = 0x3d48, oAbMgrEnd = 0x20, oAbMgrFirst = 0x28, oAbNodeNext = 0x8, oAbNodeDef = 0x70, oAbNodeInst = 0x10;
+constexpr uintptr_t oAbDefId = 0x8, oAbDefWindup = 0x30, oAbDefRange = 0x54, oAbRecId = 0x50;
+constexpr uintptr_t oAbWindSteps = 0x120, oAbCooldown = 0x134, oAbUses = 0xb4, oAbFlags = 0x170;
 const unsigned char kPresentHelper904[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x33,
                                            0xDB, 0x48, 0x8B, 0xF9, 0x38, 0x1D, 0x07, 0x3E, 0xED, 0x03, 0x48,
                                            0x8B, 0x09, 0x0F, 0x85, 0x98, 0x9E, 0xCC, 0x00, 0x4C, 0x8B, 0x89,
@@ -357,6 +393,8 @@ bool g_shotOk = false;
 bool g_meleeHitOk = false;
 bool g_noKnockOk = false;
 bool g_shieldGameOk = false;
+bool g_abilityOk = false;
+bool g_charOk = false;
 constexpr uintptr_t oUiHudRoot = 0x358, oUicChildCount = 0x1cc, oUicChildren = 0x1d0, oUicId = 0x2a0, oUicVisible = 0x353;
 constexpr int kMaxHideUi = 12;
 constexpr uintptr_t oUicPos = 0x2c0, oUicLayout = 0x2f0, oLayoutW = 0x11c, oLayoutH = 0x120;
@@ -413,6 +451,9 @@ struct Config {
     bool revealEnemies = true;
     bool noMelee = true;
     bool noKnock = true;
+    bool heroesOnly = true;
+    bool fly = true, flyTakeoff = true;
+    float flyAhead = 60.f, flyInterval = 2.0f, flyTurnDeg = 20.f, flyEyeHeight = 1.2f;
     bool shieldGame = true;
     bool shieldStagger = true;
     float shieldAngle = 180.f;
@@ -610,6 +651,17 @@ void LoadConfig() {
     cfg.revealEnemies = GetPrivateProfileIntW(L"hero", L"reveal_enemies", 1, ini) != 0;
     cfg.noMelee = GetPrivateProfileIntW(L"hero", L"no_melee", 1, ini) != 0;
     cfg.noKnock = GetPrivateProfileIntW(L"hero", L"no_knockdown", 1, ini) != 0;
+    cfg.heroesOnly = GetPrivateProfileIntW(L"hero", L"heroes_only", 1, ini) != 0;
+    cfg.fly = GetPrivateProfileIntW(L"move", L"fly", 1, ini) != 0;
+    cfg.flyTakeoff = GetPrivateProfileIntW(L"move", L"fly_takeoff", 1, ini) != 0;
+    cfg.flyAhead = IniF(L"move", L"fly_ahead", cfg.flyAhead, ini);
+    cfg.flyInterval = IniF(L"move", L"fly_interval", cfg.flyInterval, ini);
+    cfg.flyTurnDeg = IniF(L"move", L"fly_turn_deg", cfg.flyTurnDeg, ini);
+    cfg.flyEyeHeight = IniF(L"move", L"fly_eye_height", cfg.flyEyeHeight, ini);
+    if (cfg.flyAhead < 5.f || cfg.flyAhead > 200.f) cfg.flyAhead = 60.f;
+    if (cfg.flyInterval < 0.1f || cfg.flyInterval > 10.f) cfg.flyInterval = 2.0f;
+    if (cfg.flyTurnDeg < 1.f || cfg.flyTurnDeg > 180.f) cfg.flyTurnDeg = 20.f;
+    if (cfg.flyEyeHeight < -5.f || cfg.flyEyeHeight > 20.f) cfg.flyEyeHeight = 1.2f;
     cfg.shieldGame = GetPrivateProfileIntW(L"viewmodel", L"shield_block_game", 1, ini) != 0;
     cfg.shieldStagger = GetPrivateProfileIntW(L"viewmodel", L"shield_block_stagger", 1, ini) != 0;
     cfg.shieldAngle = IniF(L"viewmodel", L"shield_block_angle", 180.f, ini);
@@ -710,7 +762,7 @@ void CamSetF(uintptr_t cam, uintptr_t slot, float v) {
     uintptr_t fn = slot == vtSetFov ? kFnCamSetFov : slot == vtSetNear ? kFnCamSetNear : kFnCamSetFar;
     reinterpret_cast<FnSetF>(g_base + fn)(cam, v);
 }
-uintptr_t SelectedBattleUnit(int* countOut) {
+uintptr_t SelectedBattleUnit(int* countOut, uintptr_t* uiUnitOut = nullptr) {
     uintptr_t ui = Ptr(g_base + kGlobalUi);
     uintptr_t sel = ui ? Ptr(ui + oUiSelection) : 0;
     int count = 0;
@@ -719,7 +771,21 @@ uintptr_t SelectedBattleUnit(int* countOut) {
     if (count < 1) return 0;
     uintptr_t arr = Ptr(sel + oSelArray);
     uintptr_t uiUnit = arr ? Ptr(arr) : 0;
+    if (uiUnitOut) *uiUnitOut = uiUnit;
     return uiUnit ? Ptr(uiUnit + oUiUnitBattleUnit) : 0;
+}
+int CharKeyLen(uintptr_t uiUnit) {
+    uintptr_t det = uiUnit ? Ptr(uiUnit + oUnitCharDetails) : 0;
+    if (!det) return -1;
+    uint64_t w = 0;
+    if (!Rd(det + oCharKeyStr + 8, w)) return -1;
+    if ((w & 0xF000000000000000ull) == 0x8000000000000000ull) return int((w >> 56) & 0xf);
+    uint32_t len = 0;
+    return Rd(det + oCharKeyStr, len) ? int(len) : -1;
+}
+bool IsGeneralUiUnit(uintptr_t uiUnit) {
+    uint8_t b = 0;
+    return uiUnit && Rd(uiUnit + oUiUnitIsGeneral, b) && b != 0;
 }
 bool ReadVec(uintptr_t a, float v[3]) {
     if (!Rd(a, v[0]) || !Rd(a + 4, v[1]) || !Rd(a + 8, v[2])) return false;
@@ -857,6 +923,7 @@ struct State {
     double tLastTp = 0;
     unsigned tpSent = 0, tpFailed = 0, tpLogs = 0, leashHits = 0;
     int lastMode = -1;
+    bool flyer = false;
     TpRec tpHist[8] = {};
     unsigned tpHead = 0;
     bool stuck = false;
@@ -975,6 +1042,7 @@ void ReleaseMouse() {
     InterlockedExchange(&g_rawDy, 0);
 }
 bool IssueHalt();
+bool IssueDesiredFlying(bool fly);
 bool StopMoving();
 int MoveMode();
 void HookRenderChild();
@@ -1001,8 +1069,10 @@ void FastFireStats(bool force);
 const char* ModeName(int m);
 void ReleaseHero(int mode, const char* why);
 void ExitSequenceStep(uintptr_t mgr);
+void LauncherReset();
 void Exit(uintptr_t mgr, const char* why, bool release = true) {
     if (!S.active) return;
+    LauncherReset();
     FastFireUninstall(why);
     EarlyFlightUninstall(why);
     herofx::Uninstall(why);
@@ -1059,7 +1129,8 @@ void Enter(uintptr_t mgr) {
         return;
     }
     int selCount = 0;
-    uintptr_t unit = SelectedBattleUnit(&selCount);
+    uintptr_t uiUnit = 0;
+    uintptr_t unit = SelectedBattleUnit(&selCount, &uiUnit);
     unsigned entCount = 0;
     EntPath path;
     uintptr_t entity = FindEntity(unit, &path, &entCount);
@@ -1068,6 +1139,34 @@ void Enter(uintptr_t mgr) {
         Log("enter refused: selection count=%d unit=%p entity=%p (select one unit first)", selCount, (void*)unit,
             (void*)entity);
         return;
+    }
+    if (cfg.heroesOnly && !g_charOk) {
+        Log("enter refused: cannot tell lords / heroes apart on this exe (IsCharacter fingerprint mismatch); [hero] heroes_only=0 lets any unit in");
+        return;
+    }
+    if (cfg.heroesOnly) {
+        int keyLen = CharKeyLen(uiUnit);
+        bool general = IsGeneralUiUnit(uiUnit);
+        if (keyLen <= 0 && !general) {
+            Log("enter refused: unit %p (ui %p) is not a lord or hero (IsCharacter key len %d, IsGeneral 0; first person is lords / heroes only; [hero] heroes_only=0 lets any unit in)",
+                (void*)unit, (void*)uiUnit, keyLen);
+            return;
+        }
+        Log("enter: lord / hero check passed (IsCharacter key len %d, IsGeneral %d)", keyLen, general ? 1 : 0);
+    }
+    bool flyer = false, flyAlways = false;
+    if (cfg.fly && g_flyOk && g_moveOk && cfg.moveEnabled) {
+        uint8_t canFly = 0, always = 0, canToggle = 0, isFly = 0;
+        Rd(uiUnit + oUiCanFly, canFly);
+        Rd(uiUnit + oUiAlwaysFly, always);
+        Rd(uiUnit + oUiCanToggleFly, canToggle);
+        Rd(uiUnit + oUiIsFlying, isFly);
+        flyer = canFly != 0 || always != 0;
+        flyAlways = always != 0;
+        if (flyer)
+            Log("fly: flying hero (CanFly %d, CanAlwaysFlying %d, CanToggleFlying %d, IsFlying %d, entity y %.2f) -> unit move orders, "
+                "camera at the hero's own height, no sprint, no walking bob / footsteps",
+                canFly, always, canToggle, isFly, pos[1]);
     }
     if (S.exitStage && unit != S.exitUnit) {
         Log("enter refused: previous hero %p is still being restored (exit stage %d); unpause and try again", (void*)S.exitUnit,
@@ -1112,6 +1211,7 @@ void Enter(uintptr_t mgr) {
     S.cam = cam;
     S.prevActive = prev;
     S.unit = unit;
+    S.flyer = flyer;
     S.entity = entity;
     S.entCount = entCount;
     S.entPath = path;
@@ -1227,6 +1327,7 @@ void Enter(uintptr_t mgr) {
     }
     HookRenderChild();
     if (g_moveOk && cfg.moveEnabled && (MoveMode() == 2 || MoveMode() == 0)) IssueHalt();
+    if (S.flyer && cfg.flyTakeoff && !flyAlways) IssueDesiredFlying(true);
     Log("FPS enter mgr=%p battle=%p fpCtrl=%p cam=%p prevActive=%p(vt %p) unit=%p entities=%u entity=%p "
         "pos=%.2f,%.2f,%.2f yaw=%.1f fov=%.4f near=%.3f(prev %.3f) far=%.1f camDone=%u selCount=%d",
         (void*)mgr, (void*)battle, (void*)fpCtrl, (void*)cam, (void*)prev, (void*)Ptr(prev), (void*)unit,
@@ -1969,7 +2070,8 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     } else {
         for (int i = 0; i < 3; ++i) ray[i] = fwd[i];
     }
-    for (int i = 0; i < 3; ++i) c.target[i] = eye[i] + fwd[i] * cfg.fireRange;
+    const float wRange = vmgame::WeaponFireRange(vmgame::CurrentWeapon()), range = wRange > 0.f ? wRange : cfg.fireRange;
+    for (int i = 0; i < 3; ++i) c.target[i] = eye[i] + fwd[i] * range;
     float d = muzzle ? cfg.muzzleDepth : cfg.fireForward, minGap = 0;
     bool clear = cfg.fireShooter != 0 || nBodies == 0;
     for (; !clear && d <= 6.0f; d += 0.1f) {
@@ -2013,7 +2115,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     QueryPerformanceCounter(&q0);
     float dispLag = cfg.displayLag - (period - toNext);
     if (dispLag < 0.f) dispLag = 0.f;
-    AimHit hit = TraceAim(eye, fwd, cfg.fireRange, dispLag);
+    AimHit hit = TraceAim(eye, fwd, range, dispLag);
     QueryPerformanceCounter(&q1);
     float aim[3] = {eye[0] + fwd[0] * hit.dist, eye[1] + fwd[1] * hit.dist, eye[2] + fwd[2] * hit.dist};
     float leadT = 0.f, lead[2] = {0.f, 0.f};
@@ -2029,7 +2131,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
         float dv[3] = {aim[0] - c.launch[0], aim[1] - c.launch[1], aim[2] - c.launch[2]};
         float dl = std::sqrt(dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]);
         if (dl > 0.5f)
-            for (int i = 0; i < 3; ++i) c.target[i] = c.launch[i] + dv[i] / dl * cfg.fireRange;
+            for (int i = 0; i < 3; ++i) c.target[i] = c.launch[i] + dv[i] / dl * range;
     }
     using FnIssue = unsigned char (*)(uintptr_t queue, FireCmd* cmd);
     unsigned char ok = 0;
@@ -2193,6 +2295,25 @@ bool IssueHalt() {
     if (S.moveLogs++ < 12) Log("move: halt issued=%d units=%u", ok, n);
     return ok;
 }
+bool IssueDesiredFlying(bool fly) {
+    uintptr_t queue = CmdQueue(nullptr);
+    if (!g_flyOk || !queue) return false;
+    SelBuf sel;
+    unsigned n = MakeSelection(sel);
+    bool ok = false;
+    if (n) {
+        using FnCtor = void* (*)(void*, void*, unsigned char);
+        using FnIssue = unsigned char (*)(uintptr_t, void*);
+        HaltCmdBuf cmd;
+        memset(&cmd, 0, sizeof cmd);
+        reinterpret_cast<FnCtor>(g_base + kFnFlyCmdCtor904)(&cmd, &sel, fly ? 1 : 0);
+        ok = reinterpret_cast<FnIssue>(g_base + kFnFlyCmdIssue904)(queue, &cmd) != 0;
+        FreeSelection(cmd.b + 8);
+    }
+    FreeSelection(&sel);
+    Log("fly: desired flying state %d issued=%d units=%u", fly ? 1 : 0, ok, n);
+    return ok;
+}
 using FnBsWrite = void (*)(void* w, char tag, const void* p, unsigned n);
 using FnDestWrite = void* (*)(void* w, const void* dest);
 using FnCmdDesc = uintptr_t (*)(const uint32_t* type);
@@ -2280,6 +2401,7 @@ bool IssueTeleport(const float* dest) {
     return ok;
 }
 int MoveMode() {
+    if (S.flyer && g_moveOk) return 1;
     if (cfg.moveMode == 0 && g_tpOk) return 0;
     if (cfg.moveMode == 2 && g_ovrOk) return 2;
     return 1;
@@ -3530,6 +3652,174 @@ void ProbeFrame(uintptr_t battle, double now) {
         g_dp.armed = false;
     }
 }
+volatile LONG g_reqLauncher = 0;
+volatile LONG g_heroLauncher = 0;
+struct LauncherGame {
+    unsigned casts = 0, refused = 0, busy = 0;
+    int logs = 0;
+    int32_t id[vmgame::kLauncherKinds] = {-2, -2, -2};
+    int kind = -1;
+    uintptr_t inst = 0;
+    double tIssue = 0, windup = 1.0;
+    bool sawWind = false;
+    double tHeroCheck = -1;
+    uintptr_t heroUnit = 0;
+} g_lg;
+int32_t AbilityId(int kind) {
+    int32_t& id = g_lg.id[kind];
+    if (id != -2) return id;
+    const char* key = vmgame::LauncherAbility(kind);
+    uintptr_t sb = Ptr(g_base + kGlobalScript);
+    uintptr_t battle = sb ? Ptr(sb + oScriptBattle) : 0;
+    uintptr_t dbo = battle ? Ptr(battle + 0x430) : 0;
+    uintptr_t db = dbo ? Ptr(dbo + 0x20) : 0;
+    if (!key[0] || !db) return -1;
+    using FnTable = uintptr_t (*)(uintptr_t);
+    using FnFind = uint32_t (*)(uintptr_t, void*);
+    using FnAt = uintptr_t (*)(uintptr_t, uint32_t);
+    using FnStr = void* (*)(void*, const char*);
+    using FnStrDel = void (*)(void*);
+    uintptr_t table = reinterpret_cast<FnTable>(g_base + kFnAbilityTable904)(db);
+    if (!table) return -1;
+    alignas(16) unsigned char str[64] = {};
+    reinterpret_cast<FnStr>(g_base + kFnStrCtor)(str, key);
+    uint32_t idx = reinterpret_cast<FnFind>(g_base + kFnTableFind)(table, str);
+    reinterpret_cast<FnStrDel>(g_base + kFnStrDtor)(str);
+    uintptr_t rec = reinterpret_cast<FnAt>(g_base + kFnTableAt)(table, idx);
+    int32_t v = -1;
+    if (rec) Rd(rec + oAbRecId, v);
+    id = rec ? v : -1;
+    Log("launcher: ability %s -> record %p id %d", key, (void*)rec, id);
+    return id;
+}
+bool FindAbility(int32_t id, uintptr_t* inst, uintptr_t* def) {
+    uintptr_t mgr = S.unit ? Ptr(S.unit + oUnitAbilityMgr) : 0;
+    if (!mgr) return false;
+    uintptr_t end = mgr + oAbMgrEnd, n = Ptr(mgr + oAbMgrFirst);
+    for (int guard = 0; n && n != end && guard < 256; ++guard, n = Ptr(n + oAbNodeNext)) {
+        uintptr_t d = Ptr(n + oAbNodeDef);
+        int32_t did = -1;
+        if (d && Rd(d + oAbDefId, did) && did == id) {
+            *inst = n + oAbNodeInst, *def = d;
+            return true;
+        }
+    }
+    return false;
+}
+bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
+    const char* key = vmgame::LauncherAbility(kind);
+    auto refuse = [&](const char* why) {
+        ++g_lg.refused;
+        if (g_lg.logs < 30) ++g_lg.logs, Log("launcher: %s not cast - %s", key, why);
+        return false;
+    };
+    if (!key[0]) return refuse("no ability key in [launcher]");
+    if (vmgame::LauncherBusy() || g_lg.kind >= 0) {
+        ++g_lg.busy;
+        return false;
+    }
+    if (!g_abilityOk) return refuse("ability cast code does not match this exe");
+    if (S.ghost) return refuse("ghost mode (hero disabled)");
+    uintptr_t battle = 0, queue = CmdQueue(&battle);
+    if (!queue) return refuse("battle paused / no command queue");
+    int32_t id = AbilityId(kind);
+    if (id < 0) return refuse("ability not in the special ability table");
+    uintptr_t A = 0, D = 0;
+    if (!FindAbility(id, &A, &D)) return refuse("this hero does not have it");
+    int32_t steps = 0, cool = 0, uses = 0;
+    unsigned char flags = 0;
+    float windup = 1.f, range = -1.f;
+    Rd(A + oAbWindSteps, steps), Rd(A + oAbCooldown, cool), Rd(A + oAbUses, uses), Rd(A + oAbFlags, flags);
+    Rd(D + oAbDefWindup, windup), Rd(D + oAbDefRange, range);
+    char why[96];
+    if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
+        snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
+        return refuse(why);
+    }
+    float H[3] = {0, 0, 0};
+    if (!S.entity || !Rd(S.entity + oEntPos, H)) return refuse("no hero entity position");
+    float lim = range > 0.f ? range * 0.95f : 120.f;
+    AimHit hit = TraceAim(eye, fwd, lim + 30.f, 0.f);
+    float P[3] = {eye[0] + fwd[0] * hit.dist, eye[1] + fwd[1] * hit.dist, eye[2] + fwd[2] * hit.dist};
+    for (int pass = 0; pass < 3; ++pass) {
+        float dx = P[0] - H[0], dz = P[2] - H[2], h = std::sqrt(dx * dx + dz * dz), dy = P[1] - H[1];
+        float d3 = std::sqrt(h * h + dy * dy);
+        if (pass > 0 && d3 <= lim) break;
+        float hmax = lim * lim > dy * dy ? std::sqrt(lim * lim - dy * dy) : 0.f;
+        if (pass == 0) hmax = lim;
+        if (h > hmax && h > 1e-3f) P[0] = H[0] + dx * hmax / h, P[2] = H[2] + dz * hmax / h;
+        alignas(16) float dest[8];
+        if (MakeDestAt(P[0], P[2], dest) && std::fabs(dest[0] - P[0]) < 3.f && std::fabs(dest[2] - P[2]) < 3.f)
+            P[1] = dest[1];
+        else if (pass == 0)
+            P[1] = H[1];
+    }
+    float ang = std::atan2(P[0] - H[0], P[2] - H[2]) * 10430.378f;
+    unsigned angle = static_cast<unsigned>(static_cast<uint16_t>(static_cast<int16_t>(std::lround(ang))));
+    SelBuf sel;
+    unsigned n = MakeSelection(sel);
+    bool ok = false;
+    if (n) {
+        alignas(16) unsigned char cmd[0xc0] = {};
+        using FnCtor = void* (*)(void*, void*, int, int, uintptr_t, const float*, unsigned, float);
+        using FnIssue = unsigned char (*)(uintptr_t, void*);
+        reinterpret_cast<FnCtor>(g_base + kFnAbilityGroundCtor904)(cmd, &sel, id, 0, 0, P, angle, 0.f);
+        ok = reinterpret_cast<FnIssue>(g_base + kFnAbilityIssue904)(queue, cmd) != 0;
+        FreeSelection(cmd + 8);
+    }
+    FreeSelection(&sel);
+    if (g_lg.logs < 30)
+        ++g_lg.logs, Log("launcher: %s id %d -> %s (units %u) target %.1f,%.1f,%.1f (aim %s %.1f m, range %.0f m) hero %.1f,%.1f,%.1f angle %u wind-up %.2f s",
+                         key, id, ok ? "issued" : "NOT issued", n, P[0], P[1], P[2], hit.what, hit.dist, range, H[0], H[1], H[2], angle, windup);
+    if (!ok) return refuse(n ? "command queue refused" : "hero not accepted into a selection");
+    ++g_lg.casts;
+    g_lg.kind = kind, g_lg.inst = A, g_lg.tIssue = Now(), g_lg.windup = windup, g_lg.sawWind = false;
+    vmgame::LauncherCast(kind, true, windup);
+    return true;
+}
+void LauncherGameStep(double now) {
+    if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
+            int32_t id = AbilityId(k);
+            has = id >= 0 && FindAbility(id, &a, &d);
+        }
+        if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
+            Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
+                has ? "are ours" : "go to the game");
+        InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
+        g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
+    }
+    if (g_lg.kind < 0) return;
+    int32_t steps = 0, cool = 0;
+    unsigned char flags = 0;
+    bool rd = Rd(g_lg.inst + oAbWindSteps, steps) && Rd(g_lg.inst + oAbCooldown, cool) && Rd(g_lg.inst + oAbFlags, flags);
+    const char* what = nullptr;
+    if (!rd) {
+        vmgame::LauncherAbort(), what = "instance unreadable - folded";
+    } else if (steps > 0) {
+        g_lg.sawWind = true;
+    } else if (g_lg.sawWind) {
+        if ((flags & 1) || cool > 0)
+            vmgame::LauncherFire(), what = "released";
+        else
+            vmgame::LauncherAbort(), what = "cancelled - folded";
+    } else if (now - g_lg.tIssue > 0.6) {
+        vmgame::LauncherAbort(), what = "wind-up never started (out of range / refused?) - folded";
+    }
+    if (!what && now - g_lg.tIssue > g_lg.windup + 2.0) vmgame::LauncherAbort(), what = "no release in time - folded";
+    if (what) {
+        if (g_lg.logs < 30) ++g_lg.logs, Log("launcher: %s %s %.2f s after the command", vmgame::LauncherAbility(g_lg.kind), what, now - g_lg.tIssue);
+        g_lg.kind = -1;
+    }
+}
+void LauncherReset() {
+    g_lg.kind = -1;
+    g_lg.tHeroCheck = -1;
+    InterlockedExchange(&g_reqLauncher, 0);
+    InterlockedExchange(&g_heroLauncher, 0);
+}
 void Apply(uintptr_t mgr) {
     double now = Now();
     uintptr_t ent = EntityByPath(S.unit, S.entPath);
@@ -3894,7 +4184,7 @@ void Apply(uintptr_t mgr) {
         if (wantMove && S.moving && dt > 0.f && now - S.tMoveBegan > 0.8 && vlen > 0.5f * S.speedEst &&
             vlen < 3.f * S.speedEst)
             S.speedEst += (vlen - S.speedEst) * (1.f - std::exp(-dt / 1.0f));
-        if (cfg.predict && dt > 0.f) {
+        if (cfg.predict && !S.flyer && dt > 0.f) {
             S.lead[0] += (mx * S.speedEst - vx) * dt;
             S.lead[1] += (mz * S.speedEst - vz) * dt;
             bool atRest = !wantMove && vlen < 0.3f;
@@ -3906,7 +4196,7 @@ void Apply(uintptr_t mgr) {
                 S.lead[0] *= cfg.predictMax / ll;
                 S.lead[1] *= cfg.predictMax / ll;
             }
-        } else if (!cfg.predict) {
+        } else if (!cfg.predict || S.flyer) {
             S.lead[0] = S.lead[1] = 0;
         }
         camPos[0] = S.outPos[0] + S.lead[0];
@@ -3929,8 +4219,9 @@ void Apply(uintptr_t mgr) {
     const float* vFwd = kv.fwd;
     const float* vRight = kv.right;
     const float* vUp = kv.up;
-    vmgame::PublishView(S.yaw, S.pitch, S.camSpeed);
-    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + cfg.eyeHeight, camPos[2] + cy * cfg.eyeForward};
+    vmgame::PublishView(S.yaw, S.pitch, S.flyer ? 0.f : S.camSpeed);
+    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : cfg.eyeHeight),
+                    camPos[2] + cy * cfg.eyeForward};
     float target[3] = {eye[0] + vFwd[0] * 10.f, eye[1] + vFwd[1] * 10.f, eye[2] + vFwd[2] * 10.f};
     float up[3] = {0.f, 1.f, 0.f};
     if (vRoll != 0.f) memcpy(up, vUp, sizeof up);
@@ -3960,9 +4251,11 @@ void Apply(uintptr_t mgr) {
     }
     ++S.frames;
     if (canMove && mode != 0) {
+        const float ahead = S.flyer ? cfg.flyAhead : cfg.moveAhead, turnDeg = S.flyer ? cfg.flyTurnDeg : cfg.moveTurnDeg;
+        const double interval = S.flyer ? cfg.flyInterval : cfg.moveInterval;
         if (wantMove) {
             float dot = mx * S.lastMoveDir[0] + mz * S.lastMoveDir[1];
-            bool changed = !S.moving || dot < std::cos(cfg.moveTurnDeg * kPi / 180.f) || run != S.lastRun;
+            bool changed = !S.moving || dot < std::cos(turnDeg * kPi / 180.f) || run != S.lastRun;
             if (changed || now >= S.nextMove) {
                 if (!S.moving) {
                     S.tMoveBegan = now;
@@ -3970,8 +4263,8 @@ void Apply(uintptr_t mgr) {
                     memcpy(S.startPos, raw, sizeof raw);
                     S.tHalt = -1;
                 }
-                if (StartOrSteer(raw[0] + mx * cfg.moveAhead, raw[2] + mz * cfg.moveAhead, run)) ++S.moves;
-                S.nextMove = now + cfg.moveInterval;
+                if (StartOrSteer(raw[0] + mx * ahead, raw[2] + mz * ahead, run)) ++S.moves;
+                S.nextMove = now + interval;
                 S.lastMoveDir[0] = mx;
                 S.lastMoveDir[1] = mz;
                 S.lastRun = run;
@@ -4057,6 +4350,8 @@ void Apply(uintptr_t mgr) {
         }
         held = false;
     }
+    if (LONG lr = InterlockedExchange(&g_reqLauncher, 0)) LauncherTryCast(static_cast<int>(lr - 1), eye, vFwd);
+    LauncherGameStep(now);
     double fireGap = vmgame::FireInterval() > 0 ? vmgame::FireInterval() : cfg.fireInterval;
     vmgame::SetTrigger(held && g_fireOk && cfg.fireEnabled && !S.sprint && now >= S.fireBlock);
     if (!held) S.fireChain = false;
@@ -4230,6 +4525,17 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (!(l & (1L << 30))) vmgame::DebugShieldHit();
             return 0;
         }
+        if (S.active && g_heroLauncher && vmgame::LauncherConfigured()) {
+            if (w == vmgame::LauncherSwitchKey()) {
+                if (!(l & (1L << 30))) vmgame::LauncherSwitch();
+                return 0;
+            }
+            if (w == vmgame::LauncherFireKey() || w == vmgame::LauncherFlameKey()) {
+                int kind = w == vmgame::LauncherFlameKey() ? vmgame::kLauncherFlame : vmgame::LauncherSelected();
+                if (!(l & (1L << 30))) InterlockedExchange(&g_reqLauncher, kind + 1);
+                return 0;
+            }
+        }
         if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D')) return 0;
         break;
     case WM_KEYUP:
@@ -4240,6 +4546,9 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D' || w == 'R' || (w >= '1' && w <= '9'))) return 0;
         if (S.active && ((vmgame::ShieldKey() && w == vmgame::ShieldKey()) || (vmgame::ShieldHitKey() && w == vmgame::ShieldHitKey()))) return 0;
+        if (S.active && g_heroLauncher && vmgame::LauncherConfigured() &&
+            (w == vmgame::LauncherFireKey() || w == vmgame::LauncherSwitchKey() || w == vmgame::LauncherFlameKey()))
+            return 0;
         break;
     case WM_MOUSEWHEEL:
         if (S.active) {
@@ -4460,6 +4769,16 @@ bool VerifyGame() {
                          Ptr(g_base + kVtSoldier904 + 0x3a8) == g_base + kFnHitReact904 && Ptr(g_base + kVtSoldier904 + 0x558) == g_base + kFnStagger904;
         if (g_shieldGameOk) g_hero_1c8_ret1 = g_base + kMeleeRet1_904, g_hero_1c8_ret2 = g_base + kMeleeRet2_904;
         Log("shield-game: shield blocks real hits (missile +0x310 / melee +0x1c8 / stagger +0x558 / hp refund) %s", g_shieldGameOk ? "ok" : "OFF");
+        g_abilityOk = m && PrintsMatch(Prints(kAbilityPrints904), "launcher ability cast") &&
+                      Ptr(g_base + kVtAbilityCmd904) == g_base + kFnAbilityCmdWrite904;
+        Log("launcher: ability cast (special ability on ground) %s", g_abilityOk ? "ok" : "OFF");
+        g_charOk = PrintsMatch(Prints(kCharPrints904), "lord / hero check (IsCharacter)");
+        Log("hero: lords / heroes only check %s (heroes_only=%d)", g_charOk ? "ok" : "OFF - nobody can enter while heroes_only=1",
+            cfg.heroesOnly);
+        g_flyOk = PrintsMatch(Prints(kFlyPrints904), "flying heroes (CanFly / desired flying state)");
+        Log("fly: flying heroes %s (fly=%d takeoff=%d ahead=%.0f interval=%.2f turn=%.0f eye=%.2f)",
+            g_flyOk ? "ok" : "OFF - flying heroes use the normal movement", cfg.fly, cfg.flyTakeoff, cfg.flyAhead, cfg.flyInterval,
+            cfg.flyTurnDeg, cfg.flyEyeHeight);
         Log("move: unit orders %s, entity halt %s, entity move %s, entity teleport %s (unavailable modes fall back to unit orders)",
             m ? "ok" : "OFF", h ? "ok" : "OFF", o ? "ok" : "OFF", t ? "ok" : "OFF");
     }

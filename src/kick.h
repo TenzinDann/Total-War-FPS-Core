@@ -24,6 +24,7 @@ struct Params {
     float burstReset = 0.25f;
     float recover[3] = {0.4f, 0.10f, 18.f};
     float punchSpring[2] = {8.f, 0.6f};
+    float punchAlt = 0.f;
     float gunPosSpring[2] = {11.f, 0.75f};
     float gunRotSpring[2] = {7.f, 0.45f};
     float gunPivot[3] = {0.07f, -0.12f, 0.13f};
@@ -104,6 +105,7 @@ inline void Load(const wchar_t* ini, Params& p) {
     ReadFloats(ini, L"burst_reset", &p.burstReset, 1);
     ReadFloats(ini, L"recover", p.recover, 3);
     ReadFloats(ini, L"punch_spring", p.punchSpring, 2);
+    ReadFloats(ini, L"punch_alternate", &p.punchAlt, 1);
     ReadFloats(ini, L"gun_pos_spring", p.gunPosSpring, 2);
     ReadFloats(ini, L"gun_rot_spring", p.gunRotSpring, 2);
     ReadFloats(ini, L"gun_pivot", p.gunPivot, 3);
@@ -274,8 +276,16 @@ struct CamKick {
         burstClimb += *pitch - before;
         *yaw += rng.Range(s.climbYaw) * scale * kDeg;
         v[0] += Impulse(s.punch[0] * scale * (0.85f + 0.3f * rng.U()), P.punchSpring[0], P.punchSpring[1]);
-        v[1] += Impulse(rng.Sym(s.punch[1]) * scale, P.punchSpring[0], P.punchSpring[1]);
-        v[2] += Impulse(rng.Sym(s.punch[2]) * scale, P.punchSpring[0], P.punchSpring[1]);
+        if (P.punchAlt != 0.f) {
+            float sgn = (shots & 1u) ? 1.f : -1.f;
+            float side = sgn * s.punch[1] * (0.85f + 0.3f * rng.U());
+            float rl = sgn * (P.punchAlt > 0.f ? 1.f : -1.f) * s.punch[2] * (0.85f + 0.3f * rng.U());
+            v[1] += Impulse(side * scale, P.punchSpring[0], P.punchSpring[1]);
+            v[2] += Impulse(rl * scale, P.punchSpring[0], P.punchSpring[1]);
+        } else {
+            v[1] += Impulse(rng.Sym(s.punch[1]) * scale, P.punchSpring[0], P.punchSpring[1]);
+            v[2] += Impulse(rng.Sym(s.punch[2]) * scale, P.punchSpring[0], P.punchSpring[1]);
+        }
         ++shotIdx;
         ++shots;
         lastShot = now;
@@ -375,6 +385,7 @@ struct GunSpring {
     float pos[3] = {}, vpos[3] = {}, rot[3] = {}, vrot[3] = {};
     float pos2[3] = {}, vpos2[3] = {}, rot2[3] = {}, vrot2[3] = {};
     float rollSign = 1.f;
+    unsigned shots = 0;
     Rng rng;
     void OnShot(const Params& P, float adsW) {
         if (!P.enabled || P.gunScale <= 0.f) return;
@@ -385,6 +396,13 @@ struct GunSpring {
               r4 = 2.f * rng.U() - 1.f;
         if (rng.U() < 0.7f) rollSign = -rollSign;
         float r5 = 0.6f + 0.4f * rng.U();
+        if (P.punchAlt != 0.f) {
+            float sgn = (shots & 1u) ? 1.f : -1.f;
+            r4 = sgn * (0.85f + 0.3f * std::fabs(r4));
+            rollSign = sgn * (P.punchAlt > 0.f ? 1.f : -1.f);
+            r5 = 0.85f + 0.75f * (r5 - 0.6f);
+        }
+        ++shots;
         auto add = [&](const Set& s, float* vp, float* vr) {
             vp[2] += Impulse(s.gunMove[0] * g * r0, ps[0], ps[1]);
             vp[1] += Impulse(s.gunMove[1] * g * r1, ps[0], ps[1]);

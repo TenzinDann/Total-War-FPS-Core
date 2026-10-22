@@ -9,7 +9,7 @@ namespace {
 IXAudio2* g_xa = nullptr;
 IXAudio2MasteringVoice* g_master = nullptr;
 bool g_xaTried = false, g_xaOk = false;
-bool Engine(char* err, size_t errLen) {
+bool EngineLocked(char* err, size_t errLen) {
     if (g_xaTried) {
         if (!g_xaOk) snprintf(err, errLen, "xaudio2 unavailable");
         return g_xaOk;
@@ -43,6 +43,13 @@ bool Engine(char* err, size_t errLen) {
     }
     g_xaOk = true;
     return true;
+}
+SRWLOCK g_xaLock = SRWLOCK_INIT;
+bool Engine(char* err, size_t errLen) {
+    AcquireSRWLockExclusive(&g_xaLock);
+    bool ok = EngineLocked(err, errLen);
+    ReleaseSRWLockExclusive(&g_xaLock);
+    return ok;
 }
 double NowS() {
     static LARGE_INTEGER f = {};
@@ -131,6 +138,29 @@ void GunSound::ReleasePcm(unsigned char* pcm) {
     ReleaseSRWLockExclusive(&g_pcmLock);
     free(pcm);
 }
+int GunSound::Prefetch(const wchar_t* dir, const wchar_t* list, void** handles, int cap) {
+    wchar_t buf[1024];
+    wcsncpy(buf, list, 1023);
+    buf[1023] = 0;
+    int n = 0, files = 0;
+    for (wchar_t *tok = buf, *next = nullptr; tok && *tok && files < kMaxVariants && n < cap; tok = next) {
+        next = wcschr(tok, L';');
+        if (next) *next++ = 0;
+        while (*tok == L' ') ++tok;
+        if (!*tok) continue;
+        ++files;
+        wchar_t path[MAX_PATH * 2];
+        swprintf(path, MAX_PATH * 2, L"%ls\\%ls", dir, tok);
+        WAVEFORMATEX f = {};
+        unsigned char* pcm = nullptr;
+        unsigned bytes = 0;
+        char err[128];
+        if (AcquirePcm(path, &f, &pcm, &bytes, err, sizeof err)) handles[n++] = pcm;
+    }
+    return n;
+}
+void GunSound::Unprefetch(void* handle) { ReleasePcm(static_cast<unsigned char*>(handle)); }
+bool GunSound::WarmEngine(char* err, size_t errLen) { return Engine(err, errLen); }
 bool GunSound::Load(const wchar_t* dir, const wchar_t* list, int maxVoices, char* err, size_t errLen) {
     Release();
     wchar_t buf[1024];

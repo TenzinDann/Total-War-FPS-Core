@@ -12,6 +12,9 @@ public:
     void Update();
     void Release();
     static bool ReadPcm(const wchar_t* path, WAVEFORMATEX* fmt, unsigned char** pcm, unsigned* bytes, char* err, size_t errLen);
+    static int Prefetch(const wchar_t* dir, const wchar_t* list, void** handles, int cap);
+    static void Unprefetch(void* handle);
+    static bool WarmEngine(char* err, size_t errLen);
     bool Loaded() const { return nPcm_ > 0; }
     int Variants() const { return nPcm_; }
     float Seconds() const;
