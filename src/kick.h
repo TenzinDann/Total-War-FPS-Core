@@ -385,7 +385,6 @@ struct GunSpring {
     float pos[3] = {}, vpos[3] = {}, rot[3] = {}, vrot[3] = {};
     float pos2[3] = {}, vpos2[3] = {}, rot2[3] = {}, vrot2[3] = {};
     float rollSign = 1.f;
-    unsigned shots = 0;
     Rng rng;
     void OnShot(const Params& P, float adsW) {
         if (!P.enabled || P.gunScale <= 0.f) return;
@@ -396,13 +395,6 @@ struct GunSpring {
               r4 = 2.f * rng.U() - 1.f;
         if (rng.U() < 0.7f) rollSign = -rollSign;
         float r5 = 0.6f + 0.4f * rng.U();
-        if (P.punchAlt != 0.f) {
-            float sgn = (shots & 1u) ? 1.f : -1.f;
-            r4 = sgn * (0.85f + 0.3f * std::fabs(r4));
-            rollSign = sgn * (P.punchAlt > 0.f ? 1.f : -1.f);
-            r5 = 0.85f + 0.75f * (r5 - 0.6f);
-        }
-        ++shots;
         auto add = [&](const Set& s, float* vp, float* vr) {
             vp[2] += Impulse(s.gunMove[0] * g * r0, ps[0], ps[1]);
             vp[1] += Impulse(s.gunMove[1] * g * r1, ps[0], ps[1]);
