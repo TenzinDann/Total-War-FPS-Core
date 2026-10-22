@@ -74,6 +74,7 @@ struct Settings {
     wchar_t weaponId[64] = L"";
     bool weaponDefault = false;
     char projectile[64] = "";
+    float fireRange = 0.f;
     wchar_t animSounds[128] = L"";
     float animSoundVolume = 0.7f;
     wchar_t stepFoot[512] = L"";

@@ -951,6 +951,8 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
         GetPrivateProfileStringW(L"viewmodel", L"projectile", L"", pw, 64, ini);
         if (pw[0] && WideCharToMultiByte(CP_UTF8, 0, pw, -1, s.projectile, sizeof s.projectile, nullptr, nullptr) <= 0) s.projectile[0] = 0;
     }
+    s.fireRange = IniFloat(ini, L"fire_range", s.fireRange);
+    if (!(s.fireRange == 0.f || (s.fireRange >= 5.f && s.fireRange <= 2000.f))) s.fireRange = 0.f;
     if (!(s.fireLfeVolume >= 0.f && s.fireLfeVolume <= 2.f)) s.fireLfeVolume = 0.7f;
     if (!(s.fireAtmoVolume >= 0.f && s.fireAtmoVolume <= 2.f)) s.fireAtmoVolume = 0.7f;
     if (!(s.fireTailVolume >= 0.f && s.fireTailVolume <= 2.f)) s.fireTailVolume = 0.7f;

@@ -2070,7 +2070,8 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     } else {
         for (int i = 0; i < 3; ++i) ray[i] = fwd[i];
     }
-    for (int i = 0; i < 3; ++i) c.target[i] = eye[i] + fwd[i] * cfg.fireRange;
+    const float wRange = vmgame::WeaponFireRange(vmgame::CurrentWeapon()), range = wRange > 0.f ? wRange : cfg.fireRange;
+    for (int i = 0; i < 3; ++i) c.target[i] = eye[i] + fwd[i] * range;
     float d = muzzle ? cfg.muzzleDepth : cfg.fireForward, minGap = 0;
     bool clear = cfg.fireShooter != 0 || nBodies == 0;
     for (; !clear && d <= 6.0f; d += 0.1f) {
@@ -2114,7 +2115,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     QueryPerformanceCounter(&q0);
     float dispLag = cfg.displayLag - (period - toNext);
     if (dispLag < 0.f) dispLag = 0.f;
-    AimHit hit = TraceAim(eye, fwd, cfg.fireRange, dispLag);
+    AimHit hit = TraceAim(eye, fwd, range, dispLag);
     QueryPerformanceCounter(&q1);
     float aim[3] = {eye[0] + fwd[0] * hit.dist, eye[1] + fwd[1] * hit.dist, eye[2] + fwd[2] * hit.dist};
     float leadT = 0.f, lead[2] = {0.f, 0.f};
@@ -2130,7 +2131,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
         float dv[3] = {aim[0] - c.launch[0], aim[1] - c.launch[1], aim[2] - c.launch[2]};
         float dl = std::sqrt(dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]);
         if (dl > 0.5f)
-            for (int i = 0; i < 3; ++i) c.target[i] = c.launch[i] + dv[i] / dl * cfg.fireRange;
+            for (int i = 0; i < 3; ++i) c.target[i] = c.launch[i] + dv[i] / dl * range;
     }
     using FnIssue = unsigned char (*)(uintptr_t queue, FireCmd* cmd);
     unsigned char ok = 0;
