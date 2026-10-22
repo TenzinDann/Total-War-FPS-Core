@@ -22,7 +22,7 @@ bool g_enabled = false;
 UINT g_testKey = VK_F7, g_reloadKey = VK_F8, g_animKey = VK_F9, g_modelKey = VK_F10;
 UINT g_shieldKey = 'Q', g_shieldHitKey = 0;
 wchar_t g_ini[MAX_PATH];
-constexpr int kMaxModels = 200;
+constexpr int kMaxModels = 50;
 wchar_t g_models[kMaxModels][MAX_PATH * 2];
 int g_modelCount = 0;
 int g_modelIdx = 0;
@@ -121,53 +121,7 @@ void ModelDir(int idx, wchar_t* out) {
     wchar_t* slash = wcsrchr(out, L'\\');
     if (slash) *slash = 0;
 }
-struct IniStamp {
-    bool valid = false;
-    ULONGLONG size[3] = {};
-    FILETIME time[3] = {};
-};
-IniStamp g_setStamp[kMaxModels];
-void StampFile(const wchar_t* path, ULONGLONG* size, FILETIME* time) {
-    WIN32_FILE_ATTRIBUTE_DATA fa;
-    if (path[0] && GetFileAttributesExW(path, GetFileExInfoStandard, &fa)) {
-        *size = (static_cast<ULONGLONG>(fa.nFileSizeHigh) << 32) | fa.nFileSizeLow;
-        *time = fa.ftLastWriteTime;
-    } else {
-        *size = ~0ull;
-        *time = FILETIME{};
-    }
-}
-void ShieldIniOf(const vm::Settings& s, wchar_t* out) {
-    out[0] = 0;
-    if (!s.shieldModel[0]) return;
-    wcsncpy(out, s.shieldModel, MAX_PATH * 2 - 16);
-    out[MAX_PATH * 2 - 16] = 0;
-    if (wchar_t* sl = wcsrchr(out, L'\\')) wcscpy(sl, L"\\shield.ini");
-}
-bool SettingsUnchanged(int idx, const vm::Settings& s) {
-    const IniStamp& o = g_setStamp[idx];
-    if (!o.valid) return false;
-    wchar_t side[MAX_PATH * 2], sh[MAX_PATH * 2];
-    SidecarIni(idx, side);
-    ShieldIniOf(s, sh);
-    const wchar_t* files[3] = {g_ini, sh, side};
-    for (int k = 0; k < 3; ++k) {
-        ULONGLONG size;
-        FILETIME time;
-        StampFile(files[k], &size, &time);
-        if (size != o.size[k] || CompareFileTime(&time, &o.time[k])) return false;
-    }
-    return true;
-}
 void LoadAllSettings(int idx, vm::Settings& s) {
-    IniStamp st;
-    StampFile(g_ini, &st.size[0], &st.time[0]);
-    StampFile(L"", &st.size[1], &st.time[1]);
-    {
-        wchar_t side[MAX_PATH * 2];
-        SidecarIni(idx, side);
-        StampFile(side, &st.size[2], &st.time[2]);
-    }
     vm::CrosshairSettings cs;
     vm::LoadCrosshair(g_ini, cs);
     g_crossSet = cs;
@@ -190,7 +144,6 @@ void LoadAllSettings(int idx, vm::Settings& s) {
         wcsncpy(shIni, full, MAX_PATH * 2 - 16);
         shIni[MAX_PATH * 2 - 16] = 0;
         if (wchar_t* sl = wcsrchr(shIni, L'\\')) wcscpy(sl, L"\\shield.ini");
-        StampFile(shIni, &st.size[1], &st.time[1]);
         vm::LoadSettings(shIni, s);
         wcsncpy(s.shieldModel, full, 519);
     }
@@ -203,8 +156,6 @@ void LoadAllSettings(int idx, vm::Settings& s) {
     AcquireSRWLockExclusive(&g_kickLock);
     g_kickP[idx] = kp;
     ReleaseSRWLockExclusive(&g_kickLock);
-    st.valid = true;
-    g_setStamp[idx] = st;
     if (g_log)
         g_log("kick[%d]: %s cam x%.2f gun x%.2f | hip climb %.2f-%.2f punch %.2f gun back %.3f pitch %.2f | ads climb %.2f-%.2f punch %.2f "
               "gun back %.3f pitch %.2f | recover %.2f after %.2fs at %.0f deg/s | sustain x%.2f back %.3f pitch %.2f rise %.2fs | "
@@ -295,13 +246,6 @@ Weapon g_w[kMaxModels];
 inline Weapon& Wp() { return g_w[g_modelIdx]; }
 volatile LONG g_roster[kMaxModels] = {};
 volatile LONG g_rosterN = 0;
-constexpr int kSlots = 4;
-volatile LONG g_slot[kSlots] = {-1, -1, -1, -1};
-bool g_loadoutAll = false;
-volatile LONG g_rosterAll = 0;
-constexpr double kUnloadDelay = 3.0;
-double g_unloadAt[kMaxModels] = {};
-int g_unloadPending = 0;
 volatile LONG g_spent[kMaxModels] = {};
 FILETIME g_armoryTime = {};
 volatile LONG g_reqRoster = 0;
@@ -866,6 +810,14 @@ void AnimReset(double now) {
     int draw = Wp().rend.FindClip("draw");
     Play(draw >= 0 ? draw : g_an.idle, now, 0);
 }
+int BoltCycleStance(double now) {
+    const float* sp = Wp().set.fireStanceSync;
+    if (!(sp[0] > 0.f && sp[1] > 0.f) || g_an.cur < 0 || g_an.curveClip >= 0) return -1;
+    int hip = Wp().rend.FindClip("fire1"), ads = Wp().rend.FindClip("ads_fire");
+    int k = hip < 0 || ads < 0 ? -1 : g_an.cur == hip ? 0 : g_an.cur == ads ? 1 : -1;
+    if (k < 0 || ClipT(now) >= Wp().rend.ClipDuration(g_an.cur) - 0.05) return -1;
+    return k;
+}
 int StanceIdle() {
     int c = g_an.stance == 1 ? Wp().rend.FindClip("ads_idle") : g_an.stance == 2 ? Wp().rend.FindClip("sprint") : -1;
     if (g_an.stance == 3) {
@@ -880,7 +832,6 @@ int FindLastClip() {
 }
 #include "melee.inc"
 #include "ui_layer.inc"
-#include "launcher.inc"
 void AnimStep(vm::Look& l, double now) {
     bool fired = InterlockedExchange(&g_reqFire, 0) != 0;
     const bool lastFired = fired && InterlockedExchange(&g_reqFireLast, 0) != 0;
@@ -945,6 +896,24 @@ void AnimStep(vm::Look& l, double now) {
             if (g_spin.state == 2) {
                 int c = st == 1 ? Wp().rend.FindClip("ads_fire_loop") : -1;
                 Play(c >= 0 ? c : Wp().rend.FindClip("fire_loop"), now, 0.12);
+            }
+        } else if (st != g_an.stance && BoltCycleStance(now) >= 0) {
+            if (st < 2 && g_an.stance < 2) {
+                const int k = BoltCycleStance(now);
+                const float* sp = Wp().set.fireStanceSync;
+                const double t = ClipT(now);
+                double tTo = t < sp[k] ? t * sp[1 - k] / sp[k] : t - sp[k] + sp[1 - k];
+                const int c = Wp().rend.FindClip(st == 1 ? "ads_fire" : "fire1");
+                const double dTo = Wp().rend.ClipDuration(c);
+                if (tTo > dTo - 0.02) tTo = dTo - 0.02;
+                double fade = AdsTime(StanceAdsKind(raw));
+                if (!(fade > 0.05 && fade < 0.6)) fade = 0.2;
+                g_an.stance = st;
+                Play(c, now, fade);
+                g_an.curStart = now - tTo;
+                g_an.evClip = g_an.cur;
+                g_an.evStart = g_an.curStart;
+                g_an.evLast = tTo;
             }
         } else if (st != g_an.stance && reloadAnim) {
             g_an.stance = st;
@@ -1036,6 +1005,10 @@ void AnimStep(vm::Look& l, double now) {
         g_an.reloadAt = fired ? now + (lastFired && FindLastClip() >= 0 ? 0.2 : 0.12) : now;
         double exitEnd = g_an.stance >= 2 ? now + (g_an.stance == 3 ? 0.3 : 0.2) : g_an.sprintExitEnd;
         if (g_an.reloadAt < exitEnd) g_an.reloadAt = exitEnd;
+        if (BoltCycleStance(now) >= 0) {
+            double end = now + (Wp().rend.ClipDuration(g_an.cur) - ClipT(now)) / (g_an.curRate > 0 ? g_an.curRate : 1.0);
+            if (g_an.reloadAt < end) g_an.reloadAt = end;
+        }
         if (g_sh.w > 0.f) {
             double t = now + g_sh.w * Wp().set.shieldLowerTime;
             if (g_an.reloadAt < t) g_an.reloadAt = t;
@@ -1427,20 +1400,18 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
         }
     }
     w.flash.Release();
-    if (w.set.flashFx[0] || w.set.effectFx[0] || (w.set.flashGas && w.set.flashGasFx[0])) {
+    if (w.set.flashFx[0]) {
         err[0] = 0;
-        wchar_t eff[MAX_PATH * 2] = L"", gas[MAX_PATH * 2] = L"";
-        path[0] = 0;
-        if (w.set.flashFx[0]) swprintf(path, MAX_PATH * 2, L"%ls\\%ls", dir, w.set.flashFx);
-        if (w.set.effectFx[0]) swprintf(eff, MAX_PATH * 2, L"%ls\\%ls", dir, w.set.effectFx);
+        swprintf(path, MAX_PATH * 2, L"%ls\\%ls", dir, w.set.flashFx);
+        wchar_t gas[MAX_PATH * 2] = L"";
         if (w.set.flashGas && w.set.flashGasFx[0]) swprintf(gas, MAX_PATH * 2, L"%ls\\%ls", dir, w.set.flashGasFx);
-        if (w.flash.Load(dev, path, eff, gas, err, sizeof err))
-            g_log("viewmodel: [%d] muzzle fx: flame from %ls (scale %.2f, intensity %.2f, light %.2f, smoke %d, flame %d); "
-                  "tracer / hit mist from %ls; gas %d from %ls (scale %.2f, alpha %.2f)",
+        if (w.flash.Load(dev, path, gas, err, sizeof err))
+            g_log("viewmodel: [%d] muzzle flash = ref AK first-person layers from %ls (scale %.2f, intensity %.2f, light %.2f, "
+                  "smoke %d, flame %d); ref gas %d from %ls (scale %.2f, alpha %.2f)",
                   idx, w.set.flashFx, w.set.flashScale, w.set.flashIntensity, w.set.flashLight, w.set.flashSmoke, w.set.flashFlame,
-                  w.set.effectFx, w.flash.GasLoaded(), w.set.flashGasFx, w.set.flashGasScale, w.set.flashGasAlpha);
+                  w.flash.GasLoaded(), w.set.flashGasFx, w.set.flashGasScale, w.set.flashGasAlpha);
         else
-            g_log("viewmodel: [%d] muzzle fx failed: %s", idx, err);
+            g_log("viewmodel: [%d] muzzle flash %ls failed: %s", idx, w.set.flashFx, err);
     }
     w.shells.Release();
     if (w.set.shellEject) {
@@ -1455,216 +1426,15 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
     }
     g_log("viewmodel: [%d] sounds + muzzle fx loaded in %.1f ms", idx, (Now() - tFx) * 1000.0);
 }
-constexpr int kPrefetchAhead = 2;
-constexpr int kPrefetchPcmCap = 1024;
-struct PrefetchJob {
-    int state = 0;
-    bool cancel = false;
-    vm::Settings* set = nullptr;
-    void** pcm = nullptr;
-    int nPcm = 0;
-};
-PrefetchJob g_pfJob[kMaxModels];
-int g_pfOrder[kMaxModels];
-int g_pfOrderN = 0;
-SRWLOCK g_pfLock = SRWLOCK_INIT;
-HANDLE g_pfWake = nullptr;
-volatile LONG g_pfRunning = 0;
-volatile LONG64 g_pfProgressUs = 0;
-bool g_pfStallLogged = false;
-bool g_preloadOnBattle = true;
-volatile LONG g_warm = 0;
-double g_warmT0 = 0;
-wchar_t g_armoryPath[MAX_PATH];
-FILETIME g_armorySeen = {};
-void ArmoryWatch() {
-    WIN32_FILE_ATTRIBUTE_DATA fa;
-    if (!g_preloadOnBattle || !GetFileAttributesExW(g_armoryPath, GetFileExInfoStandard, &fa) ||
-        !CompareFileTime(&fa.ftLastWriteTime, &g_armorySeen))
-        return;
-    g_armorySeen = fa.ftLastWriteTime;
-    if (g_fp || g_warm) return;
-    double t0 = Now();
-    char err[128] = {};
-    bool audio = vm::GunSound::WarmEngine(err, sizeof err);
-    g_log("warm: audio engine %s in %.1f ms", audio ? "ready" : err, (Now() - t0) * 1000.0);
-    InterlockedExchange(&g_reqRoster, 1);
-    InterlockedExchange(&g_warm, 1);
-    bool hooked = InstallPresentHook();
-    g_log("warm: new battle (hero_fps_armory.txt rewritten) - %s",
-          hooked ? "loading weapons before first person" : "Present not hooked; weapons load at F6 as before");
-}
-int SoundListsOf(const vm::Settings& s, const wchar_t** out, int cap) {
-    const wchar_t* const all[] = {s.fireSound, s.fireSoundAds, s.fireMech, s.fireMechAds, s.fireLfe, s.fireAtmo,
-                                  s.fireTail, s.fireLastSound, s.fireCasing, s.fireCasingAds, s.shellLandSound, s.stepFoot,
-                                  s.stepClothRun, s.stepClothSprint, s.stepRattle, s.spinUpSound, s.spinLoopSound, s.spinDownSound};
-    int n = 0;
-    for (const wchar_t* l : all)
-        if (l[0] && n < cap) out[n++] = l;
-    for (int i = 0; i < vm::kMeleeSfx && n < cap; ++i)
-        if (s.meleeSfx[i][0]) out[n++] = s.meleeSfx[i];
-    return n;
-}
-void PrefetchWork(int idx, const vm::Settings& s, void** pcm, int* nPcm) {
-    double t0 = Now();
-    char err[256] = {};
-    int files = 0;
-    size_t bytes = 0;
-    bool ok = vm::prefetch::Model(idx, g_models[idx], &files, &bytes, err, sizeof err);
-    double t1 = Now();
-    wchar_t dir[MAX_PATH * 2];
-    ModelDir(idx, dir);
-    const wchar_t* lists[64];
-    int nl = SoundListsOf(s, lists, 64);
-    *nPcm = 0;
-    for (int k = 0; k < nl; ++k) *nPcm += vm::GunSound::Prefetch(dir, lists[k], pcm + *nPcm, kPrefetchPcmCap - *nPcm);
-    if (s.animSounds[0]) {
-        wchar_t path[MAX_PATH * 2];
-        swprintf(path, MAX_PATH * 2, L"%ls\\%ls", dir, s.animSounds);
-        if (FILE* f = _wfopen(path, L"r")) {
-            char line[512];
-            while (fgets(line, sizeof line, f) && *nPcm < kPrefetchPcmCap) {
-                char clip[64], file[256];
-                float t = 0, v = 1;
-                if (line[0] == '#' || sscanf(line, "%63s %f %255s %f", clip, &t, file, &v) < 3) continue;
-                wchar_t wf[256];
-                MultiByteToWideChar(CP_UTF8, 0, file, -1, wf, 256);
-                *nPcm += vm::GunSound::Prefetch(dir, wf, pcm + *nPcm, kPrefetchPcmCap - *nPcm);
-            }
-            fclose(f);
-        }
-    }
-    g_log("prefetch: [%d] model %s (%d files, %.1f MB) %.1f ms, %d sounds %.1f ms", idx, ok ? "ok" : err, files, bytes / 1048576.0,
-          (t1 - t0) * 1000.0, *nPcm, (Now() - t1) * 1000.0);
-}
-DWORD WINAPI PrefetchThread(void*) {
-    double t0 = Now();
-    int sh = vm::prefetch::WarmShaders();
-    g_log("prefetch: background thread up; %d shaders compiled in %.1f ms", sh, (Now() - t0) * 1000.0);
-    for (;;) {
-        int idx = -1;
-        vm::Settings* set = nullptr;
-        AcquireSRWLockExclusive(&g_pfLock);
-        int ready = 0;
-        for (int k = 0; k < g_pfOrderN; ++k) ready += g_pfJob[g_pfOrder[k]].state == 3;
-        for (int k = 0; k < g_pfOrderN && ready < kPrefetchAhead; ++k) {
-            PrefetchJob& j = g_pfJob[g_pfOrder[k]];
-            if (j.state != 1) continue;
-            idx = g_pfOrder[k];
-            j.state = 2;
-            j.cancel = false;
-            set = j.set;
-            j.set = nullptr;
-            break;
-        }
-        ReleaseSRWLockExclusive(&g_pfLock);
-        if (idx < 0) {
-            WaitForSingleObject(g_pfWake, 500);
-            ArmoryWatch();
-            continue;
-        }
-        void** pcm = new void*[kPrefetchPcmCap];
-        int nPcm = 0;
-        PrefetchWork(idx, *set, pcm, &nPcm);
-        delete set;
-        AcquireSRWLockExclusive(&g_pfLock);
-        PrefetchJob& j = g_pfJob[idx];
-        bool drop = j.cancel;
-        if (drop) {
-            j.state = 0;
-        } else {
-            j.state = 3;
-            j.pcm = pcm;
-            j.nPcm = nPcm;
-        }
-        ReleaseSRWLockExclusive(&g_pfLock);
-        InterlockedExchange64(&g_pfProgressUs, static_cast<LONG64>(Now() * 1e6));
-        if (drop) {
-            for (int k = 0; k < nPcm; ++k) vm::GunSound::Unprefetch(pcm[k]);
-            delete[] pcm;
-            vm::prefetch::Drop(idx);
-        }
-    }
-}
-void PrefetchDiscard(int i) {
-    if (!g_pfRunning || i < 0 || i >= kMaxModels) return;
-    vm::Settings* set = nullptr;
-    void** pcm = nullptr;
-    int nPcm = 0;
-    bool drop = false;
-    AcquireSRWLockExclusive(&g_pfLock);
-    PrefetchJob& j = g_pfJob[i];
-    if (j.state == 1) {
-        set = j.set;
-        j.set = nullptr;
-        j.state = 0;
-    } else if (j.state == 2) {
-        j.cancel = true;
-    } else if (j.state == 3) {
-        pcm = j.pcm;
-        nPcm = j.nPcm;
-        j.pcm = nullptr;
-        j.nPcm = 0;
-        j.state = 0;
-        drop = true;
-    }
-    ReleaseSRWLockExclusive(&g_pfLock);
-    delete set;
-    if (!drop) return;
-    for (int k = 0; k < nPcm; ++k) vm::GunSound::Unprefetch(pcm[k]);
-    delete[] pcm;
-    vm::prefetch::Drop(i);
-    SetEvent(g_pfWake);
-}
-void PrefetchQueue(const volatile LONG* order, LONG n) {
-    if (!g_pfRunning) return;
-    bool in[kMaxModels] = {};
-    int next[kMaxModels], nn = 0;
-    for (LONG k = 0; k < n; ++k) {
-        int i = order[k];
-        if (i < 0 || i >= g_modelCount || in[i] || (g_w[i].rend.Ready() && !g_w[i].fxDirty)) continue;
-        in[i] = true;
-        next[nn++] = i;
-    }
-    for (int i = 0; i < g_modelCount; ++i)
-        if (!in[i]) PrefetchDiscard(i);
-    AcquireSRWLockExclusive(&g_pfLock);
-    memcpy(g_pfOrder, next, sizeof(int) * nn);
-    g_pfOrderN = nn;
-    for (int k = 0; k < nn; ++k) {
-        PrefetchJob& j = g_pfJob[next[k]];
-        if (j.state == 0) {
-            j.set = new vm::Settings(g_w[next[k]].set);
-            j.state = 1;
-        } else if (j.state == 2) {
-            j.cancel = false;
-        }
-    }
-    ReleaseSRWLockExclusive(&g_pfLock);
-    InterlockedExchange64(&g_pfProgressUs, static_cast<LONG64>(Now() * 1e6));
-    SetEvent(g_pfWake);
-}
-bool PrefetchReady(int i) {
-    if (!g_pfRunning) return true;
-    AcquireSRWLockShared(&g_pfLock);
-    int st = g_pfJob[i].state;
-    ReleaseSRWLockShared(&g_pfLock);
-    if (st == 0 || st == 3) return true;
-    if (static_cast<LONG64>(Now() * 1e6) - g_pfProgressUs < 5000000) return false;
-    if (!g_pfStallLogged) g_log("prefetch: no progress for 5 s at model %d - loading on the render thread", i);
-    g_pfStallLogged = true;
-    return true;
-}
 bool EnsureWeapon(int idx, ID3D11Device* dev) {
     if (idx < 0 || idx >= g_modelCount) return false;
     Weapon& w = g_w[idx];
     if (!w.rend.Ready()) {
         double t0 = Now();
-        if (!SettingsUnchanged(idx, w.set)) LoadAllSettings(idx, w.set);
+        LoadAllSettings(idx, w.set);
         char err[512] = {};
         if (!w.rend.Init(dev, g_models[idx], err, sizeof err)) {
             g_log("viewmodel: init failed (%ls): %s", g_models[idx], err);
-            PrefetchDiscard(idx);
             return false;
         }
         g_log("viewmodel: [%d] ready on device %p: %u triangles, %u bones, %u clips, model %ls (init %.1f ms)", idx, (void*)dev,
@@ -1675,34 +1445,8 @@ bool EnsureWeapon(int idx, ID3D11Device* dev) {
             MagApply();
         }
     }
-    if (w.fxDirty) {
-        LoadWeaponFx(idx, dev);
-        PrefetchDiscard(idx);
-    }
+    if (w.fxDirty) LoadWeaponFx(idx, dev);
     return true;
-}
-bool Carried(int i) {
-    for (LONG k = 0; k < g_rosterN; ++k)
-        if (g_roster[k] == i) return true;
-    return false;
-}
-void UnloadWeapon(int i) {
-    Weapon& w = g_w[i];
-    bool had = w.rend.Ready();
-    w.rend.Release();
-    vm::GunSound* all[18] = {&w.gun, &w.gunAds, &w.mech, &w.mechAds, &w.lfe, &w.atmo, &w.tail,
-                             &w.stepFoot, &w.stepRun, &w.stepSprint, &w.stepRattle, &w.spinUp, &w.spinLoop, &w.spinDown,
-                             &w.lastShot, &w.casing, &w.casingAds, &w.shellLand};
-    for (vm::GunSound* gs : all) gs->Release();
-    for (int k = 0; k < w.nAnim; ++k) w.anim[k].snd.Release();
-    w.nAnim = 0;
-    for (vm::GunSound& m : w.meleeSfx) m.Release();
-    w.flash.Release();
-    w.shells.Release();
-    w.fxDirty = true;
-    w.tailPending = false;
-    PrefetchDiscard(i);
-    if (had) g_log("weapon: unloaded model %d %ls (not carried)", i, w.set.weaponId);
 }
 void RosterStep(ID3D11Device* dev) {
     if (!InterlockedExchange(&g_reqRoster, 0)) return;
@@ -1712,7 +1456,7 @@ void RosterStep(ID3D11Device* dev) {
     wchar_t* slash = wcsrchr(path, L'\\');
     wcscpy(slash ? slash + 1 : path, L"hero_fps_armory.txt");
     static char owned[kMaxModels * 64];
-    char mode[32] = "", loadout[kSlots * 64 + 8] = "";
+    char mode[32] = "";
     owned[0] = 0;
     if (FILE* f = _wfopen(path, L"r")) {
         static char line[kMaxModels * 64 + 64];
@@ -1721,7 +1465,6 @@ void RosterStep(ID3D11Device* dev) {
             while (n && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' ')) line[--n] = 0;
             if (!strncmp(line, "mode=", 5)) snprintf(mode, sizeof mode, "%s", line + 5);
             if (!strncmp(line, "owned=", 6)) snprintf(owned, sizeof owned, "%s", line + 6);
-            if (!strncmp(line, "loadout=", 8)) snprintf(loadout, sizeof loadout, "%s", line + 8);
         }
         fclose(f);
     }
@@ -1731,10 +1474,7 @@ void RosterStep(ID3D11Device* dev) {
         g_armoryTime = fa.ftLastWriteTime;
         RefillForNewBattle();
     }
-    bool iniAll = GetPrivateProfileIntW(L"viewmodel", L"loadout_all", 0, g_ini) != 0;
-    bool all = g_loadoutAll || iniAll;
-    InterlockedExchange(&g_rosterAll, all ? 1 : 0);
-    bool campaign = !strcmp(mode, "campaign") && !iniAll;
+    bool campaign = !strcmp(mode, "campaign");
     auto ownedHas = [&](const wchar_t* id) {
         char a[64];
         snprintf(a, sizeof a, "%ls", id);
@@ -1747,75 +1487,21 @@ void RosterStep(ID3D11Device* dev) {
         }
         return false;
     };
-    auto usable = [&](int i) {
-        const vm::Settings& s = g_w[i].set;
-        return s.weaponId[0] && (!campaign || s.weaponDefault || ownedHas(s.weaponId));
-    };
     LONG n = 0;
-    LONG slot[kSlots] = {-1, -1, -1, -1};
-    const char* from = iniAll ? "ini loadout_all (test: every weapon)" : "all usable";
-    if (all) {
-        for (int i = 0; i < g_modelCount; ++i)
-            if (usable(i)) g_roster[n++] = i;
-    } else {
-        if (!(campaign && loadout[0])) {
-            wchar_t w[kSlots * 64 + 8] = L"";
-            from = "ini loadout_default";
-            if (!campaign) {
-                GetPrivateProfileStringW(L"viewmodel", L"loadout_custom", L"", w, kSlots * 64 + 8, g_ini);
-                if (w[0]) from = "ini loadout_custom";
-            }
-            if (!w[0]) GetPrivateProfileStringW(L"viewmodel", L"loadout_default", L"", w, kSlots * 64 + 8, g_ini);
-            snprintf(loadout, sizeof loadout, "%ls", w);
-        } else {
-            from = "armory file";
-        }
-        const char* p = loadout;
-        for (int k = 0; k < kSlots; ++k) {
-            const char* e = p;
-            while (*e && *e != ',') ++e;
-            char id[64];
-            size_t len = static_cast<size_t>(e - p) < sizeof id - 1 ? static_cast<size_t>(e - p) : sizeof id - 1;
-            memcpy(id, p, len);
-            id[len] = 0;
-            while (len && id[len - 1] == ' ') id[--len] = 0;
-            const char* idp = id;
-            while (*idp == ' ') ++idp;
-            if (*idp) {
-                wchar_t wid[64];
-                MultiByteToWideChar(CP_UTF8, 0, idp, -1, wid, 64);
-                for (int i = 0; i < g_modelCount && slot[k] < 0; ++i) {
-                    bool dup = false;
-                    for (int j = 0; j < k; ++j) dup |= slot[j] == i;
-                    if (!dup && !wcscmp(g_w[i].set.weaponId, wid) && usable(i)) slot[k] = i;
-                }
-                if (slot[k] < 0) g_log("weapon: slot %d '%s' not usable here (not owned / not in models= / duplicate) - left empty", k + 1, idp);
-            }
-            p = *e ? e + 1 : e;
-        }
-        for (int k = 0; k < kSlots; ++k)
-            if (slot[k] >= 0) g_roster[n++] = slot[k];
-        if (!n) {
-            from = "first usable (no loadout resolved)";
-            for (int i = 0; i < g_modelCount && n < kSlots; ++i)
-                if (usable(i)) slot[n] = i, g_roster[n++] = i;
-        }
+    for (int i = 0; i < g_modelCount; ++i) {
+        const vm::Settings& s = g_w[i].set;
+        if (s.weaponId[0] && (!campaign || s.weaponDefault || ownedHas(s.weaponId))) g_roster[n++] = i;
     }
     if (!n) g_roster[n++] = g_modelIdx;
-    for (int k = 0; k < kSlots; ++k) InterlockedExchange(&g_slot[k], slot[k]);
     InterlockedExchange(&g_rosterN, n);
-    g_log("weapon: roster %ld from %s (armory file %s, mode '%s', owned '%s', loadout '%s')", n, from, mode[0] || owned[0] ? "found" : "missing",
-          mode, owned, loadout);
+    g_log("weapon: roster %ld (armory file %s, mode '%s', owned '%s')", n, mode[0] || owned[0] ? "found" : "missing", mode, owned);
     bool curOk = false;
     for (LONG k = 0; k < n; ++k) {
         int i = g_roster[k];
         g_log("weapon:   %ld = model %d %ls (%ls)", k + 1, i, g_models[i], g_w[i].set.weaponId);
         if (i == g_modelIdx) curOk = true;
     }
-    if (!all)
-        g_log("weapon: slots 1 primary %d / 2 primary %d / 3 pistol %d / 4 melee %d (model index, -1 = empty)", slot[0], slot[1], slot[2], slot[3]);
     g_preloadNext = 0;
-    PrefetchQueue(g_roster, n);
     if (!curOk && g_sw.phase == 0 && EnsureWeapon(g_roster[0], dev)) {
         g_modelIdx = g_roster[0];
         InterlockedExchange(&g_wantIdx, g_modelIdx);
@@ -1823,40 +1509,15 @@ void RosterStep(ID3D11Device* dev) {
         MagApply();
         g_log("weapon: current model not usable here -> %ls", g_models[g_modelIdx]);
     }
-    int keep = g_sw.phase ? g_sw.target : -1;
-    for (int i = 0; i < g_modelCount; ++i) {
-        if (i == g_modelIdx || i == keep || Carried(i)) continue;
-        g_unloadAt[i] = 0;
-        if (g_w[i].rend.Ready()) UnloadWeapon(i);
-    }
-}
-void UnloadStep() {
-    if (!g_unloadPending) return;
-    double now = Now();
-    int left = 0;
-    for (int i = 0; i < g_modelCount; ++i) {
-        if (g_unloadAt[i] <= 0) continue;
-        if (now < g_unloadAt[i]) {
-            ++left;
-            continue;
-        }
-        g_unloadAt[i] = 0;
-        if (i != g_modelIdx && !(g_sw.phase && g_sw.target == i) && !Carried(i)) UnloadWeapon(i);
-    }
-    g_unloadPending = left;
 }
 void PreloadStep(ID3D11Device* dev) {
-    UnloadStep();
     if (g_preloadNext < 0 || g_sw.phase) return;
     while (g_preloadNext < g_rosterN) {
-        int i = g_roster[g_preloadNext];
+        int i = g_roster[g_preloadNext++];
         if (!g_w[i].rend.Ready() || g_w[i].fxDirty) {
-            if (!PrefetchReady(i)) return;
-            ++g_preloadNext;
             EnsureWeapon(i, dev);
             return;
         }
-        ++g_preloadNext;
     }
     g_preloadNext = -1;
 }
@@ -1887,12 +1548,7 @@ void SwitchStep(ID3D11Device* dev) {
     if (g_sw.phase == 1 && now >= g_sw.until) {
         int k = g_sw.target;
         if (EnsureWeapon(k, dev)) {
-            int old = g_modelIdx;
             g_modelIdx = k;
-            if (old != k && !Carried(old)) {
-                g_unloadAt[old] = now + kUnloadDelay;
-                ++g_unloadPending;
-            }
             AnimReset(now);
             MagApply();
             int c = Wp().rend.FindClip("draw");
@@ -1910,43 +1566,8 @@ void SwitchStep(ID3D11Device* dev) {
         InterlockedExchange(&g_switching, 0);
     }
 }
-void CheckDevice(ID3D11Device* dev) {
-    if (!Wp().rend.Ready() || Wp().rend.Device() == dev) return;
-    g_log("viewmodel: device changed (%p -> %p); reloading", (void*)Wp().rend.Device(), (void*)dev);
-    for (int i = 0; i < g_modelCount; ++i) {
-        g_w[i].rend.Release();
-        g_w[i].fxDirty = true;
-    }
-    g_shieldR.Release();
-    InterlockedExchange(&g_reqRoster, 1);
-}
-void WarmStep(IDXGISwapChain* sc) {
-    ID3D11Device* dev = nullptr;
-    if (FAILED(sc->GetDevice(IID_ID3D11Device, reinterpret_cast<void**>(&dev))) || !dev) {
-        InterlockedExchange(&g_warm, 0);
-        return;
-    }
-    if (InterlockedCompareExchange(&g_warm, 2, 1) == 1) g_warmT0 = Now();
-    CheckDevice(dev);
-    bool ok = EnsureWeapon(g_modelIdx, dev);
-    if (ok) {
-        RosterStep(dev);
-        PreloadStep(dev);
-    }
-    if (!ok || (g_preloadNext < 0 && !g_reqRoster)) {
-        int ready = 0;
-        for (LONG k = 0; k < g_rosterN; ++k) ready += g_w[g_roster[k]].rend.Ready();
-        g_log("warm: %s in %.2f s before first person (%d of %ld weapons ready)", ok ? "preload done" : "stopped (current weapon failed)",
-              Now() - g_warmT0, ready, static_cast<long>(g_rosterN));
-        InterlockedExchange(&g_warm, 0);
-    }
-    dev->Release();
-}
 void DrawLayer(IDXGISwapChain* sc, int part) {
-    if (g_failed || !(g_testLayer || g_fp)) {
-        if (!g_failed && g_warm && part == kPartAll) WarmStep(sc);
-        return;
-    }
+    if (g_failed || !(g_testLayer || g_fp)) return;
     double t0 = Now();
     if (part != kPartCross && InterlockedExchange(&g_reqModelNext, 0) && g_modelCount > 1) {
         int next = ((g_sw.phase == 1 ? g_sw.target : g_modelIdx) + 1) % g_modelCount;
@@ -1958,7 +1579,6 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
         Wp().fxDirty = true;
         InterlockedExchange(&g_reqRoster, 1);
         if (Wp().rend.Ready()) MagApply();
-        LauncherReadTimes(), LauncherRelease();
         g_log("viewmodel: settings reloaded (fov %.1f offset %.3f,%.3f,%.3f rot %.1f,%.1f,%.1f scale %.3f mirror %d)",
               Wp().set.fovDeg, Wp().set.offset[0], Wp().set.offset[1], Wp().set.offset[2], Wp().set.rotDeg[0], Wp().set.rotDeg[1],
               Wp().set.rotDeg[2], Wp().set.scale, Wp().set.mirrorX);
@@ -1971,7 +1591,15 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
         return;
     }
     if (part != kPartCross) {
-        CheckDevice(dev);
+        if (Wp().rend.Ready() && Wp().rend.Device() != dev) {
+            g_log("viewmodel: device changed (%p -> %p); reloading", (void*)Wp().rend.Device(), (void*)dev);
+            for (int i = 0; i < g_modelCount; ++i) {
+                g_w[i].rend.Release();
+                g_w[i].fxDirty = true;
+            }
+            g_shieldR.Release();
+            InterlockedExchange(&g_reqRoster, 1);
+        }
         if (!EnsureWeapon(g_modelIdx, dev)) {
             g_failed = true;
             dev->Release();
@@ -2054,7 +1682,6 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                         if (hasMf || hasCam)
                             Wp().flash.Draw(ctx, rtv, Wp().rend.Depth(td.Width, td.Height), td.Width, td.Height, hw, Now(), hasMf ? &mf : nullptr,
                                          hasCam ? &wc : nullptr, Wp().set);
-                        LauncherDraw(dev, ctx, rtv, bb, td.Width, td.Height, hw, look);
                         if (part == kPartAll) HudCoverRestore(ctx, bb);
                     }
                     if (part != kPartGun && g_fp) {
@@ -2178,26 +1805,6 @@ void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
         "fov=%.1f offset=%.3f,%.3f,%.3f rot=%.1f,%.1f,%.1f",
         g_enabled, g_staticOk, g_testKey, g_reloadKey, g_animKey, g_modelKey, g_modelCount, g_models[0], Wp().set.fovDeg,
         Wp().set.offset[0], Wp().set.offset[1], Wp().set.offset[2], Wp().set.rotDeg[0], Wp().set.rotDeg[1], Wp().set.rotDeg[2]);
-    LauncherSetup(dllDir);
-    if (g_enabled && (g_staticOk || !exeBase)) {
-        g_preloadOnBattle = GetPrivateProfileIntW(L"viewmodel", L"preload_on_battle", 1, g_ini) != 0;
-        wcsncpy(g_armoryPath, g_ini, MAX_PATH - 1);
-        g_armoryPath[MAX_PATH - 1] = 0;
-        if (wchar_t* slash = wcsrchr(g_armoryPath, L'\\')) wcscpy(slash + 1, L"hero_fps_armory.txt");
-        WIN32_FILE_ATTRIBUTE_DATA fa;
-        if (GetFileAttributesExW(g_armoryPath, GetFileExInfoStandard, &fa)) g_armorySeen = fa.ftLastWriteTime;
-        g_pfWake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        HANDLE th = g_pfWake ? CreateThread(nullptr, 0, PrefetchThread, nullptr, 0, nullptr) : nullptr;
-        if (th) {
-            SetThreadPriority(th, THREAD_PRIORITY_BELOW_NORMAL);
-            CloseHandle(th);
-            InterlockedExchange(&g_pfRunning, 1);
-            const volatile LONG cur = g_modelIdx;
-            PrefetchQueue(&cur, 1);
-        } else {
-            log("prefetch: background thread not started (%lu) - weapons load on the render thread as before", GetLastError());
-        }
-    }
 }
 bool Enabled() { return g_enabled && g_staticOk; }
 bool LayerActive() { return Enabled() && (g_testLayer || g_fp); }
@@ -2442,16 +2049,9 @@ void Tracer(const float from[3], const float to[3]) {
 }
 void SelectWeapon(int n) {
     if (!Enabled() || !g_fp) return;
-    LONG idx;
-    if (g_rosterAll) {
-        LONG cnt = g_rosterN;
-        if (n < 1 || n > cnt) return;
-        idx = g_roster[n - 1];
-    } else {
-        if (n < 1 || n > kSlots) return;
-        idx = g_slot[n - 1];
-        if (idx < 0) return;
-    }
+    LONG cnt = g_rosterN;
+    if (n < 1 || n > cnt) return;
+    LONG idx = g_roster[n - 1];
     if (g_spent[idx]) return;
     InterlockedExchange(&g_wantIdx, idx);
     InterlockedExchange(&g_reqWeapon, idx + 1);
@@ -2459,11 +2059,10 @@ void SelectWeapon(int n) {
 void CycleWeapon(int dir) {
     if (!Enabled() || !g_fp) return;
     LONG cnt = g_rosterN;
-    if (cnt < 1) return;
-    LONG want = g_wantIdx, pos = -1;
+    if (cnt < 2) return;
+    LONG want = g_wantIdx, pos = 0;
     for (LONG k = 0; k < cnt; ++k)
         if (g_roster[k] == want) pos = k;
-    if (pos < 0) pos = dir > 0 ? cnt - 1 : 0;
     LONG idx = want;
     for (LONG step = 0; step < cnt; ++step) {
         pos = (pos + (dir > 0 ? 1 : cnt - 1)) % cnt;
@@ -2536,35 +2135,6 @@ void ShieldGame(float* weight, float* moveScale, float* zoomKeep) {
     *zoomKeep = 1.f - (1.f - g_sh.zoomMilli * 1e-3f) * w;
 }
 float ShieldCamKick() { return InterlockedExchange(&g_sh.camKickMdeg, 0) * 1e-3f; }
-bool LauncherConfigured() { return Enabled() && g_lc.configured; }
-UINT LauncherFireKey() { return g_lc.fireKey; }
-UINT LauncherSwitchKey() { return g_lc.switchKey; }
-UINT LauncherFlameKey() { return g_lc.flameKey; }
-int LauncherSelected() { return static_cast<int>(g_lc.selected); }
-void LauncherSwitch() {
-    LONG v = InterlockedXor(&g_lc.selected, 1) ^ 1;
-    InterlockedExchange(&g_lc.switchReq, 1);
-    g_log("launcher: selected %s", v == kLauncherIce ? "ice" : "frag");
-}
-const char* LauncherAbility(int kind) { return kind >= 0 && kind < kLauncherKinds ? g_lc.ability[kind] : ""; }
-float LauncherWindup(int kind) { return kind >= 0 && kind < kLauncherKinds ? g_lc.windup[kind] : 1.f; }
-bool LauncherBusy() { return g_lc.busy && static_cast<LONG>(Now() * 1000.0) < g_lc.busyUntilMs; }
-void LauncherCast(int kind, bool driven, float windup) {
-    if (!g_lc.configured || kind < 0 || kind >= kLauncherKinds) return;
-    double now = Now();
-    if (!(windup > 0.f && windup < 10.f)) windup = g_lc.windup[kind];
-    InterlockedExchange(&g_lc.windupMs, static_cast<LONG>(windup * 1000.f + 0.5f));
-    InterlockedExchange(&g_lc.driven, driven ? 1 : 0);
-    InterlockedExchange64(&g_lc.fireUs, 0);
-    InterlockedExchange64(&g_lc.abortUs, 0);
-    InterlockedExchange(&g_lc.busyUntilMs, static_cast<LONG>((now + kLcMaxHold + 1.0) * 1000.0));
-    InterlockedExchange(&g_lc.busy, 1);
-    InterlockedExchange64(&g_lc.reqUs, static_cast<LONG64>(now * 1e6));
-    MemoryBarrier();
-    InterlockedExchange(&g_lc.req, kind + 1);
-}
-void LauncherFire() { InterlockedExchange64(&g_lc.fireUs, static_cast<LONG64>(Now() * 1e6)); }
-void LauncherAbort() { InterlockedExchange64(&g_lc.abortUs, static_cast<LONG64>(Now() * 1e6)); }
 bool MeleeActive() { return g_meleeOn != 0; }
 void MeleeInput(bool attack, bool block) { InterlockedExchange(&g_meleeIn, (attack ? 1 : 0) | (block ? 2 : 0)); }
 int TakeMeleeStrike() { return static_cast<int>(InterlockedExchange(&g_meleeStrike, 0)) - 1; }
