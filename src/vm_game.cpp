@@ -272,6 +272,7 @@ struct AnimSound {
     int clip;
     float t, vol;
     vm::GunSound snd;
+    bool shell = false;
 };
 constexpr int kMaxAnimSounds = 48;
 struct Weapon {
@@ -921,7 +922,7 @@ void AnimStep(vm::Look& l, double now) {
         Wp().lastShotAt = now;
         Wp().tailPending = Wp().tail.Loaded();
         Wp().flash.Trigger(g_mo.adsW);
-        Wp().shells.Trigger(g_mo.adsW);
+        if (!Wp().set.shellEjectAnim) Wp().shells.Trigger(g_mo.adsW);
         g_mo.crossKick = std::fmin(g_mo.crossKick + g_crossSet.spreadShot, g_crossSet.spreadMax);
         g_mo.crossLastShot = now;
     }
@@ -1101,11 +1102,15 @@ void AnimStep(vm::Look& l, double now) {
         for (int i = 0; i < w.nAnim; ++i) {
             AnimSound& a = w.anim[i];
             if (a.clip == g_an.cur && a.t > g_an.evLast && a.t <= t && a.t > t - 0.2) {
-                a.snd.Play(a.vol * w.set.animSoundVolume);
+                if (a.shell) {
+                    if (w.set.shellEject) w.shells.Trigger(g_mo.adsW);
+                } else {
+                    a.snd.Play(a.vol * w.set.animSoundVolume);
+                }
                 static int logs = 0;
                 if (logs < 80) {
                     ++logs;
-                    g_log("anim sound: clip %d at %.2f s (event %.2f s)", a.clip, t, a.t);
+                    g_log("anim %s: clip %d at %.2f s (event %.2f s)", a.shell ? "shell" : "sound", a.clip, t, a.t);
                 }
             }
         }
@@ -1440,6 +1445,14 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
                     a.clip = w.rend.FindClip(clip);
                     a.t = t;
                     a.vol = v;
+                    a.shell = !strcmp(file, "!shell");
+                    if (a.shell) {
+                        if (a.clip >= 0)
+                            ++w.nAnim;
+                        else if (bad++ < 4)
+                            g_log("viewmodel: [%d] anim shell '%s': no such clip", idx, clip);
+                        continue;
+                    }
                     wchar_t wf[256];
                     MultiByteToWideChar(CP_UTF8, 0, file, -1, wf, 256);
                     err[0] = 0;

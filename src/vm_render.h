@@ -127,6 +127,7 @@ struct Settings {
     float flashGasBarrelSmokeFade = 0.9f;
     float flashGasLinger = 1.0f;
     bool shellEject = true;
+    bool shellEjectAnim = false;
     float shellScale = 1.0f;
     float shellSpeed = 1.0f;
     float shellLife = 1.0f;

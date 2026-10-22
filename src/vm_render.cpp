@@ -1126,6 +1126,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.flashGasAds = IniFloat(ini, L"flash_gas_ads", s.flashGasAds);
     if (!(s.flashGasAds >= 0.f && s.flashGasAds <= 1.f)) s.flashGasAds = 1.f;
     s.shellEject = IniFloat(ini, L"shell_eject", s.shellEject ? 1.f : 0.f) != 0.f;
+    s.shellEjectAnim = IniFloat(ini, L"shell_eject_anim", s.shellEjectAnim ? 1.f : 0.f) != 0.f;
     s.shellScale = IniFloat(ini, L"shell_scale", s.shellScale);
     s.shellSpeed = IniFloat(ini, L"shell_speed", s.shellSpeed);
     s.shellLife = IniFloat(ini, L"shell_life", s.shellLife);
@@ -3067,7 +3068,7 @@ void MuzzleFlash::Spawn(const Settings& s) {
     n_ = 0;
     if (s.flashFlame) SpawnFlame(s);
     if (s.flashGas) SpawnGas(s);
-    if (s.shellEject) SpawnShellFx(s);
+    if (s.shellEject && !s.shellEjectAnim) SpawnShellFx(s);
 }
 void MuzzleFlash::SpawnGas(const Settings& s) {
     if (!GasLoaded()) return;
