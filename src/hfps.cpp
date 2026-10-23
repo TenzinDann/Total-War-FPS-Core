@@ -425,7 +425,7 @@ struct Config {
     bool fireShooter = true;
     bool unlimitedAmmo = true;
     float bulletSpeed = 2000.f;
-    char fireProjectile[64] = "hero_fps_rifle_projectile";
+    char fireProjectile[64] = "tenzin_fps_rifle_projectile";
     float muzzleDepth = 1.2f;
     float fireClearance = 1.6f;
     float fireLookahead = 0.2f;
@@ -529,12 +529,12 @@ void OpenLog() {
     wchar_t path[MAX_PATH];
     DWORD n = GetEnvironmentVariableW(L"APPDATA", path, MAX_PATH);
     if (n && n < MAX_PATH - 80) {
-        wcscat(path, L"\\The Creative Assembly\\Warhammer3\\logs\\hero_fps_native.log");
+        wcscat(path, L"\\The Creative Assembly\\Warhammer3\\logs\\tenzin_fps_native.log");
         g_log = _wfopen(path, L"a");
     }
     if (!g_log) {
         wcscpy(path, g_dir);
-        wcscat(path, L"\\hero_fps_native.log");
+        wcscat(path, L"\\tenzin_fps_native.log");
         g_log = _wfopen(path, L"a");
     }
 }
@@ -567,16 +567,10 @@ float IniF(const wchar_t* sec, const wchar_t* key, float def, const wchar_t* ini
     return (end != buf && std::isfinite(v)) ? static_cast<float>(v) : def;
 }
 LONG g_cfgGen = 0;
-const wchar_t* MainIniName() {
-#ifdef HFPS_PACK_ASSETS
-    return packx::MainIniName();
-#else
-    return L"hero_fps.ini";
-#endif
-}
 void LoadConfig() {
     wchar_t ini[MAX_PATH];
-    swprintf(ini, MAX_PATH, L"%ls\\%ls", g_dir, MainIniName());
+    wcscpy(ini, g_dir);
+    wcscat(ini, L"\\tenzin_fps.ini");
     InterlockedIncrement(&g_cfgGen);
     cfg.enabled = GetPrivateProfileIntW(L"general", L"enabled", 1, ini) != 0;
     UINT key = GetPrivateProfileIntW(L"general", L"toggle_key", VK_F6, ini);
@@ -599,7 +593,7 @@ void LoadConfig() {
     cfg.unlimitedAmmo = GetPrivateProfileIntW(L"fire", L"unlimited_ammo", 1, ini) != 0;
     {
         wchar_t w[64] = {};
-        GetPrivateProfileStringW(L"fire", L"projectile", L"hero_fps_rifle_projectile", w, 64, ini);
+        GetPrivateProfileStringW(L"fire", L"projectile", L"tenzin_fps_rifle_projectile", w, 64, ini);
         int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, cfg.fireProjectile, sizeof cfg.fireProjectile, nullptr, nullptr);
         if (n <= 0) cfg.fireProjectile[0] = 0;
     }
@@ -990,7 +984,6 @@ struct State {
     double tLastTp = 0;
     unsigned tpSent = 0, tpFailed = 0, tpLogs = 0, leashHits = 0;
     int lastMode = -1;
-    float eyeHeight = 1.75f;
     bool flyer = false;
     TpRec tpHist[8] = {};
     unsigned tpHead = 0;
@@ -1257,36 +1250,6 @@ void Exit(uintptr_t mgr, const char* why, bool release = true) {
     Log("FPS exit reason=%s restoredPrev=%d active=%p prev=%p", why, restored, (void*)active,
         (void*)S.prevActive);
 }
-struct UnitKeyRec {
-    uintptr_t unit;
-    char key[48];
-};
-UnitKeyRec g_unitKeyTab[64];
-int g_unitKeyNext = 0;
-SRWLOCK g_unitKeyLock = SRWLOCK_INIT;
-void RememberUnitKey(uintptr_t unit, const char* key) {
-    AcquireSRWLockExclusive(&g_unitKeyLock);
-    int slot = -1;
-    for (int i = 0; i < 64 && slot < 0; ++i)
-        if (g_unitKeyTab[i].unit == unit) slot = i;
-    if (slot < 0) slot = g_unitKeyNext, g_unitKeyNext = (g_unitKeyNext + 1) % 64;
-    g_unitKeyTab[slot].unit = unit;
-    snprintf(g_unitKeyTab[slot].key, sizeof g_unitKeyTab[slot].key, "%s", key);
-    ReleaseSRWLockExclusive(&g_unitKeyLock);
-}
-void ForgetUnitKeys() {
-    AcquireSRWLockExclusive(&g_unitKeyLock);
-    memset(g_unitKeyTab, 0, sizeof g_unitKeyTab);
-    g_unitKeyNext = 0;
-    ReleaseSRWLockExclusive(&g_unitKeyLock);
-}
-void UnitKeyOf(uintptr_t unit, char* out, size_t n) {
-    out[0] = 0;
-    AcquireSRWLockShared(&g_unitKeyLock);
-    for (int i = 0; i < 64; ++i)
-        if (unit && g_unitKeyTab[i].unit == unit) snprintf(out, n, "%s", g_unitKeyTab[i].key);
-    ReleaseSRWLockShared(&g_unitKeyLock);
-}
 void Enter(uintptr_t mgr) {
     uintptr_t battle = Ptr(mgr + oMgrBattle);
     uintptr_t ui = Ptr(g_base + kGlobalUi);
@@ -1330,13 +1293,6 @@ void Enter(uintptr_t mgr) {
             return;
         }
         Log("enter: lord / hero check passed (IsCharacter key len %d, IsGeneral %d)", keyLen, general ? 1 : 0);
-    }
-    char heroKey[48];
-    UnitKeyOf(unit, heroKey, sizeof heroKey);
-    if (!vmgame::UnitAllowed(heroKey)) {
-        Log("enter refused: unit %p (unit key '%s') is not a weapon pack's hero - without hero_fps.pack only those heroes may enter (allowed: %s)",
-            (void*)unit, heroKey, vmgame::UnitKeys());
-        return;
     }
     bool flyer = false, flyAlways = false;
     if (cfg.fly && g_flyOk && g_moveOk && cfg.moveEnabled) {
@@ -1435,9 +1391,6 @@ void Enter(uintptr_t mgr) {
     SetupMouse();
     CastReset();
     S.active = true;
-    vmgame::SetHeroKey(heroKey);
-    S.eyeHeight = vmgame::EyeHeightFor(heroKey, cfg.eyeHeight);
-    if (S.eyeHeight != cfg.eyeHeight) Log("enter: eye height %.3f m for '%s' (weapon pack [character]; config %.2f)", S.eyeHeight, heroKey, cfg.eyeHeight);
     vmgame::SetFirstPerson(true);
     if (S.exitStage == 2) {
         Log("ghost: pending release cancelled - first person entered again");
@@ -1845,11 +1798,11 @@ struct MeleeKind {
 const float kMeleeFlight = 1.5f;
 const float kMeleeBurstUp = 0.4f;
 const MeleeKind kMeleeKinds[vmgame::kStrikeKinds] = {
-    {"hero_fps_melee_stab", 2.0f},
-    {"hero_fps_melee_sweep", 1.6f},
-    {"hero_fps_melee_heavy_sweep", 1.7f},
-    {"hero_fps_melee_heavy", 2.0f},
-    {"hero_fps_melee_bash", 1.3f},
+    {"tenzin_fps_melee_stab", 2.0f},
+    {"tenzin_fps_melee_sweep", 1.6f},
+    {"tenzin_fps_melee_heavy_sweep", 1.7f},
+    {"tenzin_fps_melee_heavy", 2.0f},
+    {"tenzin_fps_melee_bash", 1.3f},
 };
 bool MeleeStrike(int kind, const float eye[3], const float fwd[3]) {
     if (kind < 0 || kind >= vmgame::kStrikeKinds) return false;
@@ -4852,7 +4805,7 @@ void Apply(uintptr_t mgr) {
     const float* vRight = kv.right;
     const float* vUp = kv.up;
     vmgame::PublishView(S.yaw, S.pitch, (S.flyer || (mode == 0 && S.air)) ? 0.f : S.camSpeed);
-    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : S.eyeHeight),
+    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : cfg.eyeHeight),
                     camPos[2] + cy * cfg.eyeForward};
     float target[3] = {eye[0] + vFwd[0] * 10.f, eye[1] + vFwd[1] * 10.f, eye[2] + vFwd[2] * 10.f};
     float up[3] = {0.f, 1.f, 0.f};
@@ -5441,7 +5394,7 @@ DWORD WINAPI InitThread(LPVOID) {
     if (!HostIsWh3()) return 0;
     OpenLog();
 #ifdef HFPS_LUA_MODULE
-    Log("==== hero_fps native loaded (hero_fps.pack Lua loader, require hero_fps_native) pid=%lu", GetCurrentProcessId());
+    Log("==== tenzin_fps native loaded (hero_fps.pack Lua loader, require tenzin_fps_native) pid=%lu", GetCurrentProcessId());
     {
         wchar_t vp[MAX_PATH] = {}, want[MAX_PATH];
         HMODULE vm = GetModuleHandleW(L"version.dll");
@@ -5453,30 +5406,20 @@ DWORD WINAPI InitThread(LPVOID) {
         }
         Log("loader: version.dll = %ls (not ours), module dir %ls", vp[0] ? vp : L"(none)", g_dir);
     }
-    {
-        wchar_t name[64];
-        swprintf(name, 64, L"Local\\hero_fps_native_%lu", GetCurrentProcessId());
-        HANDLE mx = CreateMutexW(nullptr, FALSE, name);
-        if (mx && GetLastError() == ERROR_ALREADY_EXISTS) {
-            Log("loader: another hero_fps_native is already running in this process - this copy stays idle");
-            return 0;
-        }
-    }
 #ifdef HFPS_PACK_ASSETS
     if (!packx::ExtractFromPack(g_dir, &Log)) {
         Log("onepack: assets not available - first person stays off");
         return 0;
     }
-    vmgame::SetPayloads(packx::MainIniName(), packx::FullMod(), packx::AddonIds());
 #endif
 #else
-    Log("==== hero_fps native M1 + viewmodel test loaded (version.dll proxy) pid=%lu", GetCurrentProcessId());
+    Log("==== tenzin_fps native M1 + viewmodel test loaded (version.dll proxy) pid=%lu", GetCurrentProcessId());
 #endif
     QueryPerformanceFrequency(&g_qpf);
     if (!VerifyGame()) return 0;
     LoadConfig();
     if (!cfg.enabled) {
-        Log("disabled by %ls", MainIniName());
+        Log("disabled by tenzin_fps.ini");
         return 0;
     }
     vmgame::Setup(g_base, g_dir, &Log);
@@ -5679,7 +5622,6 @@ struct Fns {
     float (*tonumber)(void*, int);
     int (*type)(void*, int);
     size_t (*objlen)(void*, int);
-    const char* (*tolstring)(void*, int, size_t*);
 } f;
 int g_state = -1;
 char g_missing[48] = "";
@@ -5701,44 +5643,12 @@ bool Resolve() {
         }
         memcpy(e.slot, &p, sizeof p);
     }
-    if (FARPROC p = exe ? GetProcAddress(exe, "lua_tolstring") : nullptr) memcpy(&f.tolstring, &p, sizeof p);
     g_state = 1;
     return true;
 }
 int Api(void* L) {
     f.pushnumber(L, 4.f);
     return 1;
-}
-int UnitKeysFn(void* L) {
-    f.pushstring(L, vmgame::UnitKeys());
-    return 1;
-}
-int AccessAll(void* L) {
-    f.pushboolean(L, vmgame::UnitAllowed("") ? 1 : 0);
-    return 1;
-}
-int SetUnit(void* L) {
-    bool ok = false;
-    if (f.tolstring && f.type(L, 1) == kTUserdata && f.objlen(L, 1) >= sizeof(uintptr_t)) {
-        const void* blk = f.touserdata(L, 1);
-        uintptr_t wrap = 0;
-        if (blk) memcpy(&wrap, blk, sizeof wrap);
-        const uintptr_t p = wrap ? Ptr(wrap + 8) : 0;
-        size_t n = 0;
-        const char* key = f.tolstring(L, 2, &n);
-        if (p && key && n > 0 && n < 48) {
-            RememberUnitKey(p, key);
-            ok = true;
-        }
-    }
-    f.pushboolean(L, ok ? 1 : 0);
-    return 1;
-}
-int BattleStarted(void*) {
-    ForgetUnitKeys();
-    vmgame::NoteNewBattle();
-    Log("lua-api: battle started (unit keys cleared)");
-    return 0;
 }
 int Active(void* L) {
     f.pushboolean(L, S.active && S.unit ? 1 : 0);
@@ -5848,26 +5758,26 @@ int PushTable(void* L) {
         Log("lua-api: %s not exported by the game - no interface table (luaopen #%ld)", g_missing, n);
         return 0;
     }
-    f.createtable(L, 0, 15);
+    f.createtable(L, 0, 11);
     const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_enabled", HudEnabled},
-                                                        {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"unit_keys", UnitKeysFn}, {"access_all", AccessAll},
-                                                        {"set_unit", SetUnit}, {"battle_started", BattleStarted}, {"cast_event", CastEvent}, {"set_armed", SetArmed},
-                                                        {"view", View}, {"exit_first_person", ExitFirstPerson}, {"tac_stamina", TacStaminaApi}};
+                                                        {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"cast_event", CastEvent},
+                                                        {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson},
+                                                        {"tac_stamina", TacStaminaApi}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);
     }
-    Log("lua-api: interface table v4 returned (luaopen #%ld, lua state %p%s)", n, L, f.tolstring ? "" : ", lua_tolstring missing - set_unit off");
+    Log("lua-api: interface table v4 returned (luaopen #%ld, lua state %p)", n, L);
     return 1;
 }
 }
 static volatile LONG g_luaStarted = 0;
 static bool g_pinned = false;
-extern "C" __declspec(dllexport) int luaopen_hero_fps_native(void* L) {
+extern "C" __declspec(dllexport) int luaopen_tenzin_fps_native(void* L) {
     if (InterlockedCompareExchange(&g_luaStarted, 1, 0) == 0) {
         HMODULE self = nullptr;
         g_pinned = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-                                      reinterpret_cast<LPCWSTR>(&luaopen_hero_fps_native), &self) != FALSE;
+                                      reinterpret_cast<LPCWSTR>(&luaopen_tenzin_fps_native), &self) != FALSE;
         if (!g_pinned) return 0;
         HANDLE t = CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr);
         if (t) CloseHandle(t);

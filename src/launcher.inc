@@ -41,11 +41,9 @@ void LauncherResolve(const wchar_t* dllDir, const wchar_t* rel, wchar_t* out) {
     swprintf(alt, MAX_PATH * 2, L"%ls\\assets\\%ls", dllDir, rel);
     if (GetFileAttributesW(alt) != INVALID_FILE_ATTRIBUTES) wcscpy(out, alt);
 }
-wchar_t g_lcIni[MAX_PATH * 2] = L"";
 float LcIniFloat(const wchar_t* k, float def) {
     wchar_t b[64];
-    b[0] = 0;
-    if (g_lcIni[0]) GetPrivateProfileStringW(L"launcher", k, L"", b, 64, g_lcIni);
+    GetPrivateProfileStringW(L"launcher", k, L"", b, 64, g_ini);
     return b[0] ? static_cast<float>(_wtof(b)) : def;
 }
 void LauncherReadTimes() {
@@ -64,24 +62,11 @@ void LauncherSetup(const wchar_t* dllDir) {
     LauncherState& L = g_lc;
     const wchar_t* sec = L"launcher";
     L.configured = false;
-    wcscpy(g_lcIni, g_ini);
-    if (!GetPrivateProfileIntW(sec, L"enabled", 0, g_lcIni)) {
-        g_lcIni[0] = 0;
-        wchar_t ids[1024];
-        wcscpy(ids, g_addonIds);
-        wchar_t* ctx = nullptr;
-        for (wchar_t* id = wcstok(ids, L";", &ctx); id && !g_lcIni[0]; id = wcstok(nullptr, L";", &ctx)) {
-            wchar_t p[MAX_PATH * 2];
-            swprintf(p, MAX_PATH * 2, L"%ls\\hero_fps_addons\\%ls.ini", dllDir, id);
-            if (GetPrivateProfileIntW(sec, L"enabled", 0, p)) wcscpy(g_lcIni, p);
-        }
-        if (!g_lcIni[0]) return;
-    }
-    g_log("launcher: [launcher] from %ls", g_lcIni);
+    if (!GetPrivateProfileIntW(sec, L"enabled", 0, g_ini)) return;
     const wchar_t* mk[2] = {L"model_frag", L"model_ice"};
     for (int i = 0; i < 2; ++i) {
         wchar_t rel[MAX_PATH];
-        GetPrivateProfileStringW(sec, mk[i], L"", rel, MAX_PATH, g_lcIni);
+        GetPrivateProfileStringW(sec, mk[i], L"", rel, MAX_PATH, g_ini);
         if (!rel[0]) {
             g_log("launcher: [launcher] %ls not set - off", mk[i]);
             return;
@@ -91,7 +76,7 @@ void LauncherSetup(const wchar_t* dllDir) {
         if (wchar_t* sl = wcsrchr(L.side[i], L'\\')) wcscpy(sl + 1, L"viewmodel.ini");
     }
     auto key = [&](const wchar_t* k, UINT def) {
-        UINT v = GetPrivateProfileIntW(sec, k, def, g_lcIni);
+        UINT v = GetPrivateProfileIntW(sec, k, def, g_ini);
         return (v > 0 && v < 0xFF) ? v : def;
     };
     L.fireKey = key(L"fire_key", 'G');
@@ -100,7 +85,7 @@ void LauncherSetup(const wchar_t* dllDir) {
     const wchar_t* ak[kLauncherKinds] = {L"ability_frag", L"ability_ice", L"ability_flame"};
     for (int k = 0; k < kLauncherKinds; ++k) {
         wchar_t b[64];
-        GetPrivateProfileStringW(sec, ak[k], L"", b, 64, g_lcIni);
+        GetPrivateProfileStringW(sec, ak[k], L"", b, 64, g_ini);
         WideCharToMultiByte(CP_UTF8, 0, b, -1, L.ability[k], sizeof L.ability[k], nullptr, nullptr);
     }
     LauncherReadTimes();

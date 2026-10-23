@@ -67,7 +67,6 @@ struct Settings {
     float fireStanceSync[2] = {0.f, 0.f};
     float fireRpm = 0.f;
     int magSize = 0;
-    int ammoPerShot = 1;
     bool magDisposable = false;
     int ammoTotal = 0;
     int ammoUpgrade = 0;
@@ -75,7 +74,6 @@ struct Settings {
     float reloadEmptyRefill = 0.f;
     wchar_t weaponId[64] = L"";
     bool weaponDefault = false;
-    wchar_t weaponOwner[160] = L"";
     char projectile[64] = "";
     float fireRange = 0.f;
     wchar_t animSounds[128] = L"";
@@ -193,12 +191,6 @@ struct Settings {
     float meleeStrikeLead = 0.25f;
     int wh3Emissive = 0;
     bool wh3Iridescent = false;
-    wchar_t counterPart[64] = L"";
-    float counterRect[4] = {0, 0, 0, 0};
-    wchar_t counterGlyphs[260] = L"";
-    float counterColour[3] = {1.f, 1.f, 1.f};
-    int counterDigits = 2;
-    bool counterLeadZero = true;
     wchar_t wh3Part[256] = L"";
     wchar_t wh3Mask[260] = L"";
     wchar_t emissiveTexture[260] = L"";
@@ -219,11 +211,6 @@ struct Settings {
     float iridescenceColourB[3] = {0.26f, 0.82f, 0.96f};
     float emissiveScale = 1.f;
     bool emissiveSoft = false;
-    float emissiveGlow = 0.f;
-    float emissiveGlowRadius = 30.f;
-    float emissiveGlowInner = 0.3f;
-    float emissiveLight = 0.f;
-    float emissiveLightRadius = 0.6f;
     wchar_t meleeSfx[kMeleeSfx][512] = {};
     float meleeSfxVolume[kMeleeSfx] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f,
                                        -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
@@ -537,7 +524,6 @@ public:
     bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11Texture2D* sceneTex, UINT w, UINT h,
               bool rtvEncodesSrgb, const Settings& s, const Look& look);
     void Release();
-    void SetCounterValue(int v) { counterValue_ = v; }
     bool Ready() const { return ready_; }
     ID3D11Device* Device() const { return dev_; }
     unsigned Triangles() const { return indexCount_ / 3; }
@@ -592,9 +578,6 @@ private:
         int tex[3];
         uint32_t normalMode, materialMode, flags;
         bool wh3 = false;
-        bool counter = false;
-        float ctr[3] = {0, 0, 0};
-        int ctrBone = -1;
     };
     struct Bone {
         int parent;
@@ -659,21 +642,6 @@ private:
     ID3D11ShaderResourceView* wh3Srv_[3] = {};
     uint64_t wh3Key_ = 0;
     bool wh3On_ = false;
-    void SetupCounter(const Settings& s);
-    ID3D11ShaderResourceView* counterSrv_ = nullptr;
-    uint64_t counterKey_ = 0;
-    bool counterOn_ = false;
-    int counterValue_ = -1;
-    ID3D11VertexShader* vsFull_ = nullptr;
-    ID3D11PixelShader *psGlowSrc_ = nullptr, *psBlur_ = nullptr, *psComp_ = nullptr;
-    ID3D11BlendState *bsAdd_ = nullptr, *bsSrc_ = nullptr;
-    ID3D11DepthStencilState *dssRead_ = nullptr, *dssOff_ = nullptr;
-    ID3D11SamplerState* sampClamp_ = nullptr;
-    ID3D11Texture2D* glowTex_[3] = {};
-    ID3D11RenderTargetView* glowRtv_[3] = {};
-    ID3D11ShaderResourceView* glowSrv_[3] = {};
-    UINT glowW_ = 0, glowH_ = 0;
-    bool EnsureGlow(UINT w, UINT h);
     Bone* bones_ = nullptr;
     unsigned boneCount_ = 0;
     Clip* clips_ = nullptr;
@@ -700,9 +668,6 @@ private:
     bool muzzleFrameValid_ = false;
     MuzzleFrame muzzleFrame_ = {};
 };
-void SetArmsOverride(const wchar_t* list);
-int ArmsOverrideCount();
-const char* ArmsOverrideLog();
 void AnimStatePush();
 void AnimStatePop();
 namespace prefetch {
