@@ -272,6 +272,7 @@ struct AnimSound {
     int clip;
     float t, vol;
     vm::GunSound snd;
+    bool shell = false;
 };
 constexpr int kMaxAnimSounds = 48;
 struct Weapon {
@@ -304,6 +305,7 @@ double g_unloadAt[kMaxModels] = {};
 int g_unloadPending = 0;
 volatile LONG g_spent[kMaxModels] = {};
 LONG g_ammoLevel[kMaxModels] = {};
+volatile LONG g_infAmmo = 0;
 FILETIME g_armoryTime = {};
 volatile LONG g_reqRoster = 0;
 volatile LONG g_reqWeapon = 0;
@@ -921,7 +923,7 @@ void AnimStep(vm::Look& l, double now) {
         Wp().lastShotAt = now;
         Wp().tailPending = Wp().tail.Loaded();
         Wp().flash.Trigger(g_mo.adsW);
-        Wp().shells.Trigger(g_mo.adsW);
+        if (!Wp().set.shellEjectAnim) Wp().shells.Trigger(g_mo.adsW);
         g_mo.crossKick = std::fmin(g_mo.crossKick + g_crossSet.spreadShot, g_crossSet.spreadMax);
         g_mo.crossLastShot = now;
     }
@@ -1101,11 +1103,15 @@ void AnimStep(vm::Look& l, double now) {
         for (int i = 0; i < w.nAnim; ++i) {
             AnimSound& a = w.anim[i];
             if (a.clip == g_an.cur && a.t > g_an.evLast && a.t <= t && a.t > t - 0.2) {
-                a.snd.Play(a.vol * w.set.animSoundVolume);
+                if (a.shell) {
+                    if (w.set.shellEject) w.shells.Trigger(g_mo.adsW);
+                } else {
+                    a.snd.Play(a.vol * w.set.animSoundVolume);
+                }
                 static int logs = 0;
                 if (logs < 80) {
                     ++logs;
-                    g_log("anim sound: clip %d at %.2f s (event %.2f s)", a.clip, t, a.t);
+                    g_log("anim %s: clip %d at %.2f s (event %.2f s)", a.shell ? "shell" : "sound", a.clip, t, a.t);
                 }
             }
         }
@@ -1440,6 +1446,14 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
                     a.clip = w.rend.FindClip(clip);
                     a.t = t;
                     a.vol = v;
+                    a.shell = !strcmp(file, "!shell");
+                    if (a.shell) {
+                        if (a.clip >= 0)
+                            ++w.nAnim;
+                        else if (bad++ < 4)
+                            g_log("viewmodel: [%d] anim shell '%s': no such clip", idx, clip);
+                        continue;
+                    }
                     wchar_t wf[256];
                     MultiByteToWideChar(CP_UTF8, 0, file, -1, wf, 256);
                     err[0] = 0;
@@ -1747,6 +1761,7 @@ void RosterStep(ID3D11Device* dev) {
     owned[0] = 0;
     static char ammoUp[kMaxModels * 72];
     ammoUp[0] = 0;
+    char infAmmo[16] = "";
     if (FILE* f = _wfopen(path, L"r")) {
         static char line[kMaxModels * 64 + 64];
         while (fgets(line, sizeof line, f)) {
@@ -1756,6 +1771,7 @@ void RosterStep(ID3D11Device* dev) {
             if (!strncmp(line, "owned=", 6)) snprintf(owned, sizeof owned, "%s", line + 6);
             if (!strncmp(line, "loadout=", 8)) snprintf(loadout, sizeof loadout, "%s", line + 8);
             if (!strncmp(line, "ammo_up=", 8)) snprintf(ammoUp, sizeof ammoUp, "%s", line + 8);
+            if (!strncmp(line, "inf_ammo=", 9)) snprintf(infAmmo, sizeof infAmmo, "%s", line + 9);
         }
         fclose(f);
     }
@@ -1777,6 +1793,9 @@ void RosterStep(ID3D11Device* dev) {
             nUp += g_ammoLevel[i] > 0;
         }
         if (ammoUp[0] || nUp) g_log("weapon: ammo upgrades '%s' (%s) -> %d weapons upgraded", ammoUp, camp ? "campaign" : "not campaign, ignored", nUp);
+        LONG inf = camp && !strcmp(infAmmo, "1") ? 1 : 0;
+        if (InterlockedExchange(&g_infAmmo, inf) != inf || inf)
+            g_log("weapon: infinite ammo (MCT) %s ('%s', %s)", inf ? "ON" : "off", infAmmo, camp ? "campaign" : "not campaign");
     }
     WIN32_FILE_ATTRIBUTE_DATA fa;
     if (GetFileAttributesExW(path, GetFileExInfoStandard, &fa) &&
@@ -2060,7 +2079,6 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                     if (gun) {
                         vm::Look look = ComputeLook();
                         if (part == kPartAll) HudCoverSave(dev, ctx, bb, td);
-                        Wp().rend.SetCounterValue(g_mag.size > 0 ? static_cast<int>(g_mag.ammo) : -1);
                         if (Wp().rend.Draw(ctx, rtv, bb, td.Width, td.Height, hw, Wp().set, look)) ++g_st.draws;
                         mv = Wp().rend.Muzzle(&mx, &my, &ma);
                         vm::MuzzleFrame mf;
@@ -2281,7 +2299,7 @@ void SpendCurrent() {
 }
 void Fire() {
     if (!Enabled() || !g_fp) return;
-    bool empty = g_mag.size > 0 && InterlockedDecrement(&g_mag.ammo) <= 0;
+    bool empty = g_mag.size > 0 && !(g_infAmmo && g_mag.disposable) && InterlockedDecrement(&g_mag.ammo) <= 0;
     if (empty) InterlockedExchange(&g_reqFireLast, 1);
     InterlockedExchange(&g_reqFire, 1);
     InterlockedIncrement(&g_kickShots);
@@ -2337,7 +2355,7 @@ void RefillForNewBattle() {
             LONG size = EffMagSize(i);
             InterlockedExchange(&g_mag.size, size);
             InterlockedExchange(&g_mag.ammo, size);
-            if (total) InterlockedExchange(&g_mag.reserve, tot > size ? tot - size : 0);
+            if (total) InterlockedExchange(&g_mag.reserve, g_infAmmo ? -1 : tot > size ? tot - size : 0);
         }
         g_log("weapon: new battle -> %ls refilled%s (ammo level %ld: magazine %ld, total %ld)", s.weaponId,
               total ? " (magazine + reserve)" : "", g_ammoLevel[i], EffMagSize(i), tot);
@@ -2352,7 +2370,7 @@ void AmmoInfo(int* ammo, int* size, bool* reloading, int* reserve) {
     *size = s > 0 ? static_cast<int>(s) : 0;
     *ammo = s > 0 ? static_cast<int>(a < 0 ? 0 : a > s ? s : a) : 0;
     *reloading = s > 0 && g_mag.reload != 0;
-    *reserve = s <= 0 ? -1 : g_mag.disposable ? 0 : r < 0 ? -1 : static_cast<int>(r);
+    *reserve = s <= 0 ? -1 : g_mag.disposable ? (g_infAmmo ? -1 : 0) : r < 0 ? -1 : static_cast<int>(r);
 }
 bool StartMagReload() {
     if (!Enabled() || !g_fp || g_mag.disposable) return false;
@@ -2412,7 +2430,9 @@ void MagApply() {
     {
         LONG total = size > 0 ? EffAmmoTotal(g_modelIdx) : 0;
         LONG res = -1;
-        if (total > 0) {
+        if (total > 0 && g_infAmmo) {
+            g_log("viewmodel: ammo total %ld per battle -> reserve infinite (MCT)", total);
+        } else if (total > 0) {
             LONG kept = g_modelIdx < kMaxModels ? g_mag.reserveByModel[g_modelIdx] : -2;
             if (same && g_mag.reserve >= 0) kept = g_mag.reserve;
             res = kept >= 0 ? kept : (total > ammo ? total - ammo : 0);
@@ -2635,9 +2655,6 @@ void LauncherCast(int kind, bool driven, float windup) {
 }
 void LauncherFire() { InterlockedExchange64(&g_lc.fireUs, static_cast<LONG64>(Now() * 1e6)); }
 void LauncherAbort() { InterlockedExchange64(&g_lc.abortUs, static_cast<LONG64>(Now() * 1e6)); }
-void LauncherCue(int cue, int kind) {
-    if (cue >= 0 && cue < 2 && kind >= 0 && kind < kLauncherKinds) InterlockedOr(&g_lc.cueReq, 1L << (cue * kLauncherKinds + kind));
-}
 bool MeleeActive() { return g_meleeOn != 0; }
 void MeleeInput(bool attack, bool block) { InterlockedExchange(&g_meleeIn, (attack ? 1 : 0) | (block ? 2 : 0)); }
 int TakeMeleeStrike() { return static_cast<int>(InterlockedExchange(&g_meleeStrike, 0)) - 1; }
