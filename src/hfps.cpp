@@ -463,6 +463,7 @@ struct Config {
     bool hidePaths = true;
     bool hideEdgeArrows = true;
     bool hudEnabled = true;
+    bool castKeys = true;
     bool hudCover = true;
     char hideNames[kMaxHideUi][48] = {};
     int hideCount = 0;
@@ -695,6 +696,7 @@ void LoadConfig() {
     cfg.hideEdgeArrows = GetPrivateProfileIntW(L"ui", L"hide_edge_arrows", 1, ini) != 0;
     cfg.hudEnabled = GetPrivateProfileIntW(L"hud", L"enabled", 1, ini) != 0;
     cfg.hudCover = GetPrivateProfileIntW(L"hud", L"cover_viewmodel", 1, ini) != 0;
+    cfg.castKeys = GetPrivateProfileIntW(L"hud", L"cast_keys", 1, ini) != 0;
     if (!cfg.hudCover) vmgame::SetHudCover(0, 0, 0, 0);
     {
         wchar_t list[512];
@@ -982,6 +984,55 @@ struct State {
     long sumDx = 0, sumDy = 0;
 } S;
 volatile LONG g_reqToggle = 0, g_reqExit = 0;
+struct CastState {
+    volatile LONG armed = 0;
+    volatile LONG q[16] = {};
+    volatile LONG head = 0, tail = 0;
+    bool lPrev = false, rPrev = false;
+    bool lHeld = false, rHeld = false;
+    bool lmb = false, rmb = false;
+    volatile LONG unswallow = 0;
+    volatile LONG viewSeq = 0;
+    float eye[3] = {}, fwd[3] = {};
+    LONG events = 0;
+} g_cast;
+void CastPush(LONG e) {
+    LONG h = g_cast.head;
+    if (h - g_cast.tail >= 16) return;
+    g_cast.q[h & 15] = e;
+    InterlockedExchange(&g_cast.head, h + 1);
+    if (++g_cast.events <= 6) Log("cast: input event %ld (%s)", e, e == 101 ? "click while armed" : e == 102 ? "cancel while armed" : "Alt+slot key");
+}
+void CastReset() {
+    InterlockedExchange(&g_cast.armed, 0);
+    InterlockedExchange(&g_cast.tail, g_cast.head);
+}
+int CastSlotKey(WPARAM w) {
+    if (w >= '1' && w <= '9') return static_cast<int>(w - '0');
+    if (w == '0') return 10;
+    if (w == VK_OEM_MINUS) return 11;
+    if (w == VK_OEM_PLUS) return 12;
+    return 0;
+}
+void CastMouse(bool l, bool r) {
+    bool armed = g_cast.armed != 0;
+    if (armed && l && !g_cast.lPrev && !g_cast.lHeld) CastPush(101);
+    if (armed && r && !g_cast.rPrev && !g_cast.rHeld) CastPush(102);
+    if (armed && l) g_cast.lHeld = true;
+    if (armed && r) g_cast.rHeld = true;
+    if (!l) g_cast.lHeld = false;
+    if (!r) g_cast.rHeld = false;
+    g_cast.lPrev = l;
+    g_cast.rPrev = r;
+    g_cast.lmb = l && !g_cast.lHeld;
+    g_cast.rmb = r && !g_cast.rHeld;
+}
+void CastView(const float eye[3], const float fwd[3]) {
+    InterlockedIncrement(&g_cast.viewSeq);
+    memcpy(g_cast.eye, eye, sizeof g_cast.eye);
+    memcpy(g_cast.fwd, fwd, sizeof g_cast.fwd);
+    InterlockedIncrement(&g_cast.viewSeq);
+}
 volatile LONG g_rawDx = 0, g_rawDy = 0;
 HWND g_hwnd = nullptr;
 WNDPROC g_prevProc = nullptr;
@@ -1101,6 +1152,7 @@ void Exit(uintptr_t mgr, const char* why, bool release = true) {
     }
     S.moving = false;
     S.ghost = S.ghostWanted = false;
+    CastReset();
     S.active = false;
     uintptr_t active = Ptr(mgr + oMgrActive);
     bool restored = false;
@@ -1249,6 +1301,7 @@ void Enter(uintptr_t mgr) {
     InterlockedExchange(&g_rawDx, 0);
     InterlockedExchange(&g_rawDy, 0);
     SetupMouse();
+    CastReset();
     S.active = true;
     vmgame::SetFirstPerson(true);
     if (S.exitStage == 2) {
@@ -3951,8 +4004,9 @@ void Apply(uintptr_t mgr) {
     }
     bool wantMove = mx != 0 || mz != 0;
     {
-        bool rmb = fg && (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
-        bool lmb = fg && (GetAsyncKeyState(VK_LBUTTON) & 0x8000);
+        CastMouse(fg && (GetAsyncKeyState(VK_LBUTTON) & 0x8000), fg && (GetAsyncKeyState(VK_RBUTTON) & 0x8000));
+        bool rmb = g_cast.rmb;
+        bool lmb = g_cast.lmb;
         bool shift = fg && KeyDown(VK_SHIFT);
         bool tap = shift && !S.shiftPrev;
         S.shiftPrev = shift;
@@ -4238,6 +4292,7 @@ void Apply(uintptr_t mgr) {
         float fov = 0;
         if (!Rd(S.cam + oCamFov, fov) || !(fov > 0.2f && fov < 2.8f)) fov = 1.1345f;
         vmgame::PublishCamera(eye, vRight, vUp, vFwd, fov);
+        CastView(eye, vFwd);
     }
     CamSetVec(S.cam, vtSetTarget, target);
     uintptr_t active = Ptr(mgr + oMgrActive);
@@ -4334,9 +4389,9 @@ void Apply(uintptr_t mgr) {
         VelStep(bp, eye, vFwd);
         FastFireStats(false);
     }
-    bool held = Foreground() && (GetAsyncKeyState(VK_LBUTTON) & 0x8000);
+    bool held = g_cast.lmb;
     if (vmgame::MeleeActive()) {
-        bool blockKey = Foreground() && (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
+        bool blockKey = g_cast.rmb;
         vmgame::MeleeInput(held && !S.sprint && now >= S.fireBlock, blockKey && !S.sprint);
         int strike = vmgame::TakeMeleeStrike();
         if (strike >= 0 && g_fireOk && cfg.fireEnabled) {
@@ -4513,6 +4568,13 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (!(l & (1L << 30))) vmgame::StartMagReload();
             return 0;
         }
+        if (S.active && cfg.castKeys && (GetKeyState(VK_MENU) & 0x8000)) {
+            if (int slot = CastSlotKey(w)) {
+                if (!(l & (1L << 30))) CastPush(slot);
+                InterlockedOr(&g_cast.unswallow, 1L << slot);
+                return 0;
+            }
+        }
         if (S.active && w >= '1' && w <= '9') {
             if (!(l & (1L << 30))) vmgame::SelectWeapon(static_cast<int>(w - '0'));
             return 0;
@@ -4544,11 +4606,20 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (vmgame::Enabled() && w == vmgame::TestKey()) return 0;
         if (vmgame::LayerActive() && (w == vmgame::ReloadKey() || w == vmgame::AnimKey() || w == vmgame::ModelKey()))
             return 0;
+        if (int slot = CastSlotKey(w)) {
+            if (g_cast.unswallow & (1L << slot)) {
+                InterlockedAnd(&g_cast.unswallow, ~(1L << slot));
+                return 0;
+            }
+        }
         if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D' || w == 'R' || (w >= '1' && w <= '9'))) return 0;
         if (S.active && ((vmgame::ShieldKey() && w == vmgame::ShieldKey()) || (vmgame::ShieldHitKey() && w == vmgame::ShieldHitKey()))) return 0;
         if (S.active && g_heroLauncher && vmgame::LauncherConfigured() &&
             (w == vmgame::LauncherFireKey() || w == vmgame::LauncherSwitchKey() || w == vmgame::LauncherFlameKey()))
             return 0;
+        break;
+    case WM_SYSCHAR:
+        if (S.active && cfg.castKeys && ((w >= '0' && w <= '9') || w == '-' || w == '=')) return 0;
         break;
     case WM_MOUSEWHEEL:
         if (S.active) {
@@ -5041,7 +5112,7 @@ bool Resolve() {
     return true;
 }
 int Api(void* L) {
-    f.pushnumber(L, 3.f);
+    f.pushnumber(L, 4.f);
     return 1;
 }
 int Active(void* L) {
@@ -5099,20 +5170,61 @@ int Ammo(void* L) {
     f.pushnumber(L, static_cast<float>(reserve));
     return 5;
 }
+int CastEvent(void* L) {
+    LONG t = g_cast.tail, e = 0;
+    if (t != g_cast.head) {
+        e = g_cast.q[t & 15];
+        InterlockedExchange(&g_cast.tail, t + 1);
+    }
+    f.pushnumber(L, static_cast<float>(S.active ? e : 0));
+    return 1;
+}
+int SetArmed(void* L) {
+    bool on = f.type(L, 1) == kTNumber && f.tonumber(L, 1) != 0.f;
+    InterlockedExchange(&g_cast.armed, on && S.active ? 1 : 0);
+    return 0;
+}
+int View(void* L) {
+    float e[3] = {}, d[3] = {};
+    LONG s1 = 0, s2 = 0;
+    for (int i = 0; i < 4; ++i) {
+        s1 = g_cast.viewSeq;
+        memcpy(e, g_cast.eye, sizeof e);
+        memcpy(d, g_cast.fwd, sizeof d);
+        s2 = g_cast.viewSeq;
+        if (s1 == s2 && !(s1 & 1)) break;
+    }
+    if (!S.active || s1 <= 0 || s1 != s2 || (s1 & 1)) {
+        f.pushnil(L);
+        return 1;
+    }
+    for (float v : e) f.pushnumber(L, v);
+    for (float v : d) f.pushnumber(L, v);
+    return 6;
+}
+int ExitFirstPerson(void* L) {
+    (void)L;
+    if (S.active) {
+        InterlockedExchange(&g_reqExit, 1);
+        Log("cast: script asked to leave first person (transformation ability)");
+    }
+    return 0;
+}
 int PushTable(void* L) {
     LONG n = InterlockedIncrement(&g_opens);
     if (!Resolve()) {
         Log("lua-api: %s not exported by the game - no interface table (luaopen #%ld)", g_missing, n);
         return 0;
     }
-    f.createtable(L, 0, 6);
+    f.createtable(L, 0, 10);
     const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_enabled", HudEnabled},
-                                                        {"set_hud_rect", SetHudRect}, {"ammo", Ammo}};
+                                                        {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"cast_event", CastEvent},
+                                                        {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);
     }
-    Log("lua-api: interface table v3 returned (luaopen #%ld, lua state %p)", n, L);
+    Log("lua-api: interface table v4 returned (luaopen #%ld, lua state %p)", n, L);
     return 1;
 }
 }
