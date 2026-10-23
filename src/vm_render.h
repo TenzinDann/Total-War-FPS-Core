@@ -127,7 +127,6 @@ struct Settings {
     float flashGasBarrelSmokeFade = 0.9f;
     float flashGasLinger = 1.0f;
     bool shellEject = true;
-    bool shellEjectAnim = false;
     float shellScale = 1.0f;
     float shellSpeed = 1.0f;
     float shellLife = 1.0f;
@@ -191,6 +190,12 @@ struct Settings {
     float meleeStrikeLead = 0.25f;
     int wh3Emissive = 0;
     bool wh3Iridescent = false;
+    wchar_t counterPart[64] = L"";
+    float counterRect[4] = {0, 0, 0, 0};
+    wchar_t counterGlyphs[260] = L"";
+    float counterColour[3] = {1.f, 1.f, 1.f};
+    int counterDigits = 2;
+    bool counterLeadZero = true;
     wchar_t wh3Part[256] = L"";
     wchar_t wh3Mask[260] = L"";
     wchar_t emissiveTexture[260] = L"";
@@ -519,6 +524,7 @@ public:
     bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11Texture2D* sceneTex, UINT w, UINT h,
               bool rtvEncodesSrgb, const Settings& s, const Look& look);
     void Release();
+    void SetCounterValue(int v) { counterValue_ = v; }
     bool Ready() const { return ready_; }
     ID3D11Device* Device() const { return dev_; }
     unsigned Triangles() const { return indexCount_ / 3; }
@@ -572,6 +578,7 @@ private:
         int tex[3];
         uint32_t normalMode, materialMode, flags;
         bool wh3 = false;
+        bool counter = false;
     };
     struct Bone {
         int parent;
@@ -632,6 +639,11 @@ private:
     ID3D11ShaderResourceView* wh3Srv_[3] = {};
     uint64_t wh3Key_ = 0;
     bool wh3On_ = false;
+    void SetupCounter(const Settings& s);
+    ID3D11ShaderResourceView* counterSrv_ = nullptr;
+    uint64_t counterKey_ = 0;
+    bool counterOn_ = false;
+    int counterValue_ = -1;
     Bone* bones_ = nullptr;
     unsigned boneCount_ = 0;
     Clip* clips_ = nullptr;

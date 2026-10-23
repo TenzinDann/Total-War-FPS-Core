@@ -24,16 +24,21 @@ struct LauncherState {
     int logs = 0;
     struct Snd {
         int clip;
+        int kind;
         float t, vol;
         vm::GunSound snd;
-    } snd[2][24];
+    } snd[2][40];
     int nSnd[2] = {0, 0};
+    bool flameRows[2] = {false, false};
+    int sndKind = 0;
+    int castSel = 0;
     int sndClip = -2;
     float sndLast = -1.f;
     volatile LONG switchReq = 0;
+    volatile LONG cueReq = 0;
 } g_lc;
 enum { kLcDormant, kLcActive, kLcFire, kLcDeact, kLcActivate };
-constexpr int kLcSndSwitch = -10;
+constexpr int kLcSndSwitch = -10, kLcSndFail = -11, kLcSndReady = -12;
 void LauncherResolve(const wchar_t* dllDir, const wchar_t* rel, wchar_t* out) {
     swprintf(out, MAX_PATH * 2, L"%ls\\%ls", dllDir, rel);
     if (GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES) return;
@@ -137,23 +142,33 @@ bool LauncherEnsure(int v, ID3D11Device* dev) {
         int bad = 0;
         if (f) {
             char line[512];
-            while (fgets(line, sizeof line, f) && L.nSnd[v] < 24) {
-                char clip[64], file[256];
+            while (fgets(line, sizeof line, f) && L.nSnd[v] < 40) {
+                char clip[64], file[512];
                 float tt = 0, vol = 1;
-                if (line[0] == '#' || sscanf(line, "%63s %f %255s %f", clip, &tt, file, &vol) < 3) continue;
+                if (line[0] == '#' || sscanf(line, "%63s %f %511s %f", clip, &tt, file, &vol) < 3) continue;
                 LauncherState::Snd& a = L.snd[v][L.nSnd[v]];
-                a.clip = !strcmp(clip, "switch") ? kLcSndSwitch : L.rend[v].FindClip(clip);
+                a.kind = -1;
+                if (char* dot = strchr(clip, '.')) {
+                    *dot = 0;
+                    a.kind = !strcmp(dot + 1, "frag") ? kLauncherFrag : !strcmp(dot + 1, "ice") ? kLauncherIce : !strcmp(dot + 1, "flame") ? kLauncherFlame : -2;
+                }
+                a.clip = !strcmp(clip, "switch") ? kLcSndSwitch : !strcmp(clip, "fail") ? kLcSndFail : !strcmp(clip, "ready") ? kLcSndReady
+                                                                                                                                 : L.rend[v].FindClip(clip);
+                if (a.kind == -2) a.clip = -1;
                 a.t = tt, a.vol = vol;
-                wchar_t wf[256];
-                MultiByteToWideChar(CP_UTF8, 0, file, -1, wf, 256);
+                wchar_t wf[512];
+                MultiByteToWideChar(CP_UTF8, 0, file, -1, wf, 512);
                 err[0] = 0;
-                if ((a.clip >= 0 || a.clip == kLcSndSwitch) && a.snd.Load(dir, wf, 2, err, sizeof err))
+                if ((a.clip >= 0 || a.clip <= kLcSndSwitch) && a.snd.Load(dir, wf, 2, err, sizeof err))
                     ++L.nSnd[v];
                 else if (bad++ < 4)
                     g_log("launcher: anim sound '%s' %s: %s", clip, file, a.clip == -1 ? "no such clip" : err);
             }
             fclose(f);
-            g_log("launcher: anim sounds %ls: %d loaded, %d skipped", L.set[v].animSounds, L.nSnd[v], bad);
+            L.flameRows[v] = false;
+            for (int i = 0; i < L.nSnd[v]; ++i) L.flameRows[v] = L.flameRows[v] || L.snd[v][i].kind == kLauncherFlame;
+            g_log("launcher: anim sounds %ls: %d loaded, %d skipped%s", L.set[v].animSounds, L.nSnd[v], bad,
+                  L.flameRows[v] ? "" : " (no .flame rows: the flame belch uses the selected grenade's sounds)");
         } else {
             g_log("launcher: anim sounds %ls not found", path);
         }
@@ -169,14 +184,24 @@ void LauncherRelease() {
 }
 void LauncherSounds(ID3D11Device* dev, const vm::Look* l, int v) {
     LauncherState& L = g_lc;
-    if (InterlockedExchange(&L.switchReq, 0) && g_fp && LauncherEnsure(0, dev))
-        for (int i = 0; i < L.nSnd[0]; ++i)
-            if (L.snd[0][i].clip == kLcSndSwitch) L.snd[0][i].snd.Play(L.snd[0][i].vol * L.set[0].animSoundVolume);
+    auto cue = [&](int clip, int kind) {
+        if (!g_fp || !LauncherEnsure(0, dev)) return;
+        if (kind == kLauncherFlame && !L.flameRows[0]) kind = static_cast<int>(L.selected);
+        for (int i = 0; i < L.nSnd[0]; ++i) {
+            LauncherState::Snd& a = L.snd[0][i];
+            if (a.clip == clip && (a.kind < 0 || a.kind == kind)) a.snd.Play(a.vol * L.set[0].animSoundVolume);
+        }
+    };
+    if (InterlockedExchange(&L.switchReq, 0)) cue(kLcSndSwitch, static_cast<int>(L.selected));
+    if (LONG cr = InterlockedExchange(&L.cueReq, 0))
+        for (int b = 0; b < 2 * kLauncherKinds; ++b)
+            if (cr & (1L << b)) cue(b / kLauncherKinds ? kLcSndReady : kLcSndFail, b % kLauncherKinds);
     if (l && v >= 0) {
         if (l->clip != L.sndClip) L.sndClip = l->clip, L.sndLast = -1.f;
         for (int i = 0; i < L.nSnd[v]; ++i) {
             LauncherState::Snd& a = L.snd[v][i];
-            if (a.clip == l->clip && a.t > L.sndLast && a.t <= l->clipTime && a.t > l->clipTime - 0.2f)
+            if (a.clip == l->clip && (a.kind < 0 || a.kind == L.sndKind) && a.t > L.sndLast && a.t <= l->clipTime &&
+                a.t > l->clipTime - 0.2f)
                 a.snd.Play(a.vol * L.set[v].animSoundVolume);
         }
         L.sndLast = l->clipTime;
@@ -251,6 +276,7 @@ void LauncherDraw(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11RenderTarge
         L.active = (L.kind == kLauncherIce || (L.kind == kLauncherFlame && sel == kLauncherIce)) ? 1 : 0;
         if (!_wcsicmp(L.model[0], L.model[1])) L.active = 0;
         L.t0 = static_cast<double>(L.reqUs) * 1e-6;
+        L.castSel = sel;
         if (L.logs < 40) ++L.logs, g_log("launcher: cast %d -> model %s, %.0f ms after the command", L.kind, L.active ? "ice" : "frag", (Now() - L.t0) * 1000.0);
     }
     if (L.active >= 0 && !g_fp) L.active = -1, InterlockedExchange(&L.busy, 0);
@@ -261,6 +287,7 @@ void LauncherDraw(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11RenderTarge
         InterlockedExchange(&L.busy, 0);
         return LauncherSounds(dev, nullptr, -1);
     }
+    L.sndKind = L.kind == kLauncherFlame && !L.flameRows[v] ? L.castSel : L.kind;
     vm::Look l = gunLook;
     for (int k = 0; k < 3; ++k) l.kickPos[k] = l.kickRot[k] = l.kickPivot[k] = l.gunShift[k] = 0.f;
     l.kick = 0.f;

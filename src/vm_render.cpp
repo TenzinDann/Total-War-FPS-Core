@@ -407,6 +407,7 @@ cbuffer CMat : register(b2) {
     float4 uEmStop;
     float4 uEmC1, uEmC2, uEmC3, uEmC4;
     float4 uIrA, uIrB;
+    float4 uCnt0, uCnt1, uCnt2, uCnt3;
 };
 Texture2D tAlbedo : register(t0);
 Texture2D tNormal : register(t1);
@@ -415,6 +416,7 @@ Texture2D tScene : register(t3);
 Texture2D tEmMask : register(t4);
 Texture2D tEmTex : register(t5);
 Texture2D tEmDist : register(t6);
+Texture2D tCounter : register(t7);
 SamplerState sLinear : register(s0);
 struct VSIn {
     float3 pos : POSITION; float3 nrm : NORMAL; float4 tan : TANGENT; float2 uv : TEXCOORD0;
@@ -486,7 +488,16 @@ float Reticle(float2 d, float R) {
 }
 float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
     float4 alb = tAlbedo.Sample(sLinear, i.uv);
-    if (uMat3.y > 0.5 && alb.a < 0.5) discard;
+    float2 cntF = (i.uv - uCnt1.xy) / (abs(uCnt1.zw) > 1e-8 ? uCnt1.zw : 1);
+    float2 cntDx = ddx(cntF) * float2(0.1, 1), cntDy = ddy(cntF) * float2(0.1, 1);
+    if (uCnt0.x > 0.5 && cntF.x >= 0 && cntF.x < uCnt0.x && cntF.y >= 0 && cntF.y < 1) {
+        int cj = (int)cntF.x;
+        float cd = cj == 0 ? uCnt2.x : cj == 1 ? uCnt2.y : cj == 2 ? uCnt2.z : uCnt2.w;
+        if (cd >= 0) {
+            float cov = tCounter.SampleGrad(sLinear, float2((cd + frac(cntF.x)) * 0.1, cntF.y), cntDx, cntDy).r;
+            alb.rgb = lerp(alb.rgb, uCnt3.rgb, saturate(cov));
+        }
+    }
     float3 N = normalize(i.n);
     float3 V = normalize(-i.vpos);
     if (dot(N, V) < 0) N = -N;
@@ -686,7 +697,7 @@ struct StateBackup {
     UINT sampleMask = 0;
     UINT stencilRef = 0;
     ID3D11DepthStencilState* dss = nullptr;
-    ID3D11ShaderResourceView* psSrv[7] = {};
+    ID3D11ShaderResourceView* psSrv[8] = {};
     ID3D11SamplerState* psSampler = nullptr;
     ID3D11PixelShader* ps = nullptr;
     ID3D11VertexShader* vs = nullptr;
@@ -711,7 +722,7 @@ struct StateBackup {
         c->OMGetBlendState(&bs, blendFactor, &sampleMask);
         c->OMGetDepthStencilState(&dss, &stencilRef);
         c->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, &dsv);
-        c->PSGetShaderResources(0, 7, psSrv);
+        c->PSGetShaderResources(0, 8, psSrv);
         c->PSGetSamplers(0, 1, &psSampler);
         psInstCount = vsInstCount = gsInstCount = hsInstCount = dsInstCount = 256;
         c->PSGetShader(&ps, psInst, &psInstCount);
@@ -738,7 +749,7 @@ struct StateBackup {
         c->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, dsv);
         for (auto*& r : rtv) SafeRelease(r);
         SafeRelease(dsv);
-        c->PSSetShaderResources(0, 7, psSrv);
+        c->PSSetShaderResources(0, 8, psSrv);
         for (auto*& s : psSrv) SafeRelease(s);
         c->PSSetSamplers(0, 1, &psSampler);
         SafeRelease(psSampler);
@@ -852,6 +863,17 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (GetFileAttributesW(ini) == INVALID_FILE_ATTRIBUTES) return false;
     s.fovDeg = IniFloat(ini, L"fov", s.fovDeg);
     IniVec3(ini, L"offset", s.offset);
+    GetPrivateProfileStringW(L"viewmodel", L"counter_part", s.counterPart, s.counterPart, 64, ini);
+    GetPrivateProfileStringW(L"viewmodel", L"counter_glyphs", s.counterGlyphs, s.counterGlyphs, 260, ini);
+    {
+        float r[4];
+        if (IniFloatList(ini, L"counter_rect", r, 4) == 4) memcpy(s.counterRect, r, sizeof r);
+    }
+    IniVec3(ini, L"counter_colour", s.counterColour);
+    s.counterDigits = static_cast<int>(IniFloat(ini, L"counter_digits", static_cast<float>(s.counterDigits)));
+    if (s.counterDigits < 1) s.counterDigits = 1;
+    if (s.counterDigits > 4) s.counterDigits = 4;
+    s.counterLeadZero = IniFloat(ini, L"counter_lead_zero", s.counterLeadZero ? 1.f : 0.f) > 0.5f;
     IniVec3(ini, L"rotation", s.rotDeg);
     IniVec3(ini, L"tilt", s.tiltDeg);
     s.scale = IniFloat(ini, L"scale", s.scale);
@@ -1126,7 +1148,6 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.flashGasAds = IniFloat(ini, L"flash_gas_ads", s.flashGasAds);
     if (!(s.flashGasAds >= 0.f && s.flashGasAds <= 1.f)) s.flashGasAds = 1.f;
     s.shellEject = IniFloat(ini, L"shell_eject", s.shellEject ? 1.f : 0.f) != 0.f;
-    s.shellEjectAnim = IniFloat(ini, L"shell_eject_anim", s.shellEjectAnim ? 1.f : 0.f) != 0.f;
     s.shellScale = IniFloat(ini, L"shell_scale", s.shellScale);
     s.shellSpeed = IniFloat(ini, L"shell_speed", s.shellSpeed);
     s.shellLife = IniFloat(ini, L"shell_life", s.shellLife);
@@ -1555,7 +1576,7 @@ bool Renderer::CreatePipeline(char* err, size_t errLen) {
     ok = SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbFrame_));
     bd.ByteWidth = kMaxBones * 3 * 16;
     ok = ok && SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbBones_));
-    bd.ByteWidth = 48 + 11 * 16;
+    bd.ByteWidth = 48 + 11 * 16 + 4 * 16;
     ok = ok && SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbMat_));
     D3D11_RASTERIZER_DESC rd = {};
     rd.FillMode = D3D11_FILL_SOLID;
@@ -2514,6 +2535,28 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
     ID3D11ShaderResourceView* sceneView = haveScene ? sceneSrv_ : white_;
     ctx->PSSetShaderResources(3, 1, &sceneView);
     SetupWh3Material(s);
+    SetupCounter(s);
+    float cnt[16] = {};
+    if (counterOn_) {
+        int v = counterValue_ >= 0 ? counterValue_ : (s.magSize > 0 ? s.magSize : 0);
+        int top = 1;
+        for (int k = 0; k < s.counterDigits; ++k) top *= 10;
+        if (v > top - 1) v = top - 1;
+        cnt[0] = static_cast<float>(s.counterDigits);
+        float cw = (s.counterRect[2] - s.counterRect[0]) / s.counterDigits;
+        cnt[4] = s.counterRect[0], cnt[5] = s.counterRect[1], cnt[6] = cw, cnt[7] = s.counterRect[3] - s.counterRect[1];
+        for (int k = 0; k < 4; ++k) cnt[8 + k] = -1.f;
+        int div = top / 10;
+        bool lead = true;
+        for (int k = 0; k < s.counterDigits; ++k, div /= 10) {
+            int d = (v / div) % 10;
+            lead = lead && d == 0 && k < s.counterDigits - 1;
+            cnt[8 + k] = (lead && !s.counterLeadZero) ? -1.f : static_cast<float>(d);
+        }
+        for (int j = 0; j < 3; ++j) cnt[12 + j] = s.counterColour[j];
+    }
+    ID3D11ShaderResourceView* t7 = counterOn_ ? counterSrv_ : white_;
+    ctx->PSSetShaderResources(7, 1, &t7);
     float em[44] = {};
     if (wh3On_) {
         if (s.wh3Emissive) {
@@ -2552,11 +2595,13 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
                          static_cast<float>(sm.materialMode),
                          hasDef ? (sm.flags & 0xff) / 255.f : 0.55f, hasDef ? ((sm.flags >> 8) & 0xff) / 255.f : 0.f,
                          ((sm.flags >> 18) & 1) ? 1.f : 0.f, ((sm.flags >> 16) & 1) ? 1.f : 0.f,
-                         ((sm.flags >> 19) & 1) ? 1.f : 0.f, ((sm.flags >> 20) & 1) ? 1.f : 0.f, 0.f, 0.f};
+                         ((sm.flags >> 19) & 1) ? 1.f : 0.f, 0.f, 0.f, 0.f};
         if (SUCCEEDED(ctx->Map(cbMat_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mp))) {
             memcpy(mp.pData, mat, sizeof mat);
             if (wh3On_ && sm.wh3) memcpy(static_cast<char*>(mp.pData) + sizeof mat, em, sizeof em);
             else memset(static_cast<char*>(mp.pData) + sizeof mat, 0, sizeof em);
+            if (counterOn_ && sm.counter) memcpy(static_cast<char*>(mp.pData) + sizeof mat + sizeof em, cnt, sizeof cnt);
+            else memset(static_cast<char*>(mp.pData) + sizeof mat + sizeof em, 0, sizeof cnt);
             ctx->Unmap(cbMat_, 0);
         }
         ID3D11ShaderResourceView* srv[3];
@@ -2613,9 +2658,38 @@ void Renderer::SetupWh3Material(const Settings& s) {
     }
     wh3On_ = true;
 }
+void Renderer::SetupCounter(const Settings& s) {
+    bool any = s.counterPart[0] && s.counterGlyphs[0] && s.counterRect[2] != s.counterRect[0] && s.counterRect[3] != s.counterRect[1];
+    uint64_t key = any ? Fnv64(s.counterPart, sizeof s.counterPart) ^ Fnv64(s.counterGlyphs, sizeof s.counterGlyphs) * 3 : 0;
+    if (key == counterKey_) return;
+    counterKey_ = key;
+    counterOn_ = false;
+    SafeRelease(counterSrv_);
+    for (unsigned i = 0; i < subCount_; ++i) subs_[i].counter = false;
+    if (!any || !dev_) return;
+    wchar_t part[64];
+    wcsncpy(part, s.counterPart, 63);
+    part[63] = 0;
+    _wcslwr(part);
+    unsigned hit = 0;
+    for (unsigned i = 0; i < subCount_; ++i) {
+        int a = subs_[i].tex[0];
+        if (a < 0 || a >= static_cast<int>(kMaxTextures) || !texName_[a][0]) continue;
+        if (!wcscmp(part, texName_[a])) subs_[i].counter = true, ++hit;
+    }
+    if (!hit) return;
+    wchar_t full[MAX_PATH * 2];
+    swprintf(full, MAX_PATH * 2, L"%ls%ls", hvmDir_, s.counterGlyphs);
+    char err[256];
+    if (!LoadDds(dev_, full, false, &counterSrv_, err, sizeof err)) return;
+    counterOn_ = true;
+}
 void Renderer::Release() {
     ready_ = false;
     for (auto*& v : wh3Srv_) SafeRelease(v);
+    SafeRelease(counterSrv_);
+    counterKey_ = 0;
+    counterOn_ = false;
     wh3Key_ = 0;
     wh3On_ = false;
     SafeRelease(vb_);
@@ -3068,7 +3142,7 @@ void MuzzleFlash::Spawn(const Settings& s) {
     n_ = 0;
     if (s.flashFlame) SpawnFlame(s);
     if (s.flashGas) SpawnGas(s);
-    if (s.shellEject && !s.shellEjectAnim) SpawnShellFx(s);
+    if (s.shellEject) SpawnShellFx(s);
 }
 void MuzzleFlash::SpawnGas(const Settings& s) {
     if (!GasLoaded()) return;
