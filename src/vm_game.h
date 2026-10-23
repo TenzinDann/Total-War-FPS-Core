@@ -39,6 +39,7 @@ double FireInterval();
 bool CanFire();
 bool Reloading();
 void AmmoInfo(int* ammo, int* size, bool* reloading, int* reserve);
+bool InfTacStamina();
 bool StartMagReload();
 void SelectWeapon(int n);
 void CycleWeapon(int dir);

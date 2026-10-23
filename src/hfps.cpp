@@ -444,6 +444,10 @@ struct Config {
     float runSpeed = 6.0f;
     float walkSpeed = 2.5f;
     float sprintSpeed = 10.0f;
+    float tacStamina = 15.f;
+    float tacStaminaRegen = 5.f;
+    float tacStaminaDelay = 1.f;
+    float tacStaminaMin = 0.25f;
     float tacSprintSpeed = 12.5f;
     float tacSprintToFire = 0.3f;
     float adsMoveScale = 0.6f;
@@ -621,6 +625,14 @@ void LoadConfig() {
     cfg.sprintToFire = IniF(L"fire", L"sprint_to_fire", cfg.sprintToFire, ini);
     cfg.tacSprintSpeed = IniF(L"move", L"tac_sprint_speed", cfg.tacSprintSpeed, ini);
     cfg.tacSprintToFire = IniF(L"fire", L"tac_sprint_to_fire", cfg.tacSprintToFire, ini);
+    cfg.tacStamina = IniF(L"move", L"tac_stamina", cfg.tacStamina, ini);
+    cfg.tacStaminaRegen = IniF(L"move", L"tac_stamina_regen", cfg.tacStaminaRegen, ini);
+    cfg.tacStaminaDelay = IniF(L"move", L"tac_stamina_delay", cfg.tacStaminaDelay, ini);
+    cfg.tacStaminaMin = IniF(L"move", L"tac_stamina_min", cfg.tacStaminaMin, ini);
+    if (!(cfg.tacStamina > 0.2f && cfg.tacStamina < 600.f)) cfg.tacStamina = 15.f;
+    if (!(cfg.tacStaminaRegen > 0.2f && cfg.tacStaminaRegen < 600.f)) cfg.tacStaminaRegen = 5.f;
+    if (!(cfg.tacStaminaDelay >= 0.f && cfg.tacStaminaDelay < 30.f)) cfg.tacStaminaDelay = 1.f;
+    if (!(cfg.tacStaminaMin >= 0.f && cfg.tacStaminaMin <= 1.f)) cfg.tacStaminaMin = 0.25f;
     if (cfg.tacSprintSpeed < 0.5f || cfg.tacSprintSpeed > 40.f) cfg.tacSprintSpeed = 12.5f;
     if (cfg.tacSprintToFire < 0.f || cfg.tacSprintToFire > 2.f) cfg.tacSprintToFire = 0.3f;
     cfg.adsZoom = IniF(L"camera", L"ads_zoom", cfg.adsZoom, ini);
@@ -1017,6 +1029,35 @@ struct State {
     long sumDx = 0, sumDy = 0;
 } S;
 volatile LONG g_reqToggle = 0, g_reqExit = 0;
+struct TacStamina {
+    float st = 1.f;
+    double lastTac = -1e9;
+    uintptr_t unit = 0;
+    int logs = 0;
+} g_tac;
+bool TacStaminaOk() { return vmgame::InfTacStamina() || g_tac.st >= cfg.tacStaminaMin; }
+void TacStaminaStep(double now, float dt) {
+    if (S.unit != g_tac.unit) g_tac.unit = S.unit, g_tac.st = 1.f, g_tac.lastTac = -1e9;
+    if (dt < 0.f) dt = 0.f;
+    if (dt > 0.25f) dt = 0.25f;
+    if (vmgame::InfTacStamina()) {
+        g_tac.st = 1.f;
+        if (S.tac) g_tac.lastTac = now;
+        return;
+    }
+    if (S.tac) {
+        g_tac.lastTac = now;
+        g_tac.st -= dt / cfg.tacStamina;
+        if (g_tac.st <= 0.f) {
+            g_tac.st = 0.f;
+            S.tac = false;
+            if (g_tac.logs++ < 6) Log("stance: tactical sprint stamina empty - back to sprint (%.0f s to refill)", cfg.tacStaminaRegen);
+        }
+    } else if (now - g_tac.lastTac >= cfg.tacStaminaDelay) {
+        g_tac.st += dt / cfg.tacStaminaRegen;
+        if (g_tac.st > 1.f) g_tac.st = 1.f;
+    }
+}
 struct CastState {
     volatile LONG armed = 0;
     volatile LONG q[16] = {};
@@ -4191,9 +4232,10 @@ void Apply(uintptr_t mgr) {
         } else if (tap && canSprint) {
             if (!S.sprint)
                 S.sprint = true;
-            else if (!vmgame::ShieldWanted())
+            else if (!vmgame::ShieldWanted() && TacStaminaOk())
                 S.tac = true;
         }
+        TacStaminaStep(now, dt);
         S.ads = rmb && !S.sprint && !reloading && !vmgame::MeleeActive();
         if (S.ads && !wasAds) S.adsKind = now < S.fireBlock ? (S.exitTac ? 2 : 1) : 0;
         if (!S.ads) S.adsKind = 0;
@@ -5492,6 +5534,13 @@ int Ammo(void* L) {
     f.pushnumber(L, static_cast<float>(reserve));
     return 5;
 }
+int TacStaminaApi(void* L) {
+    f.pushnumber(L, S.active ? g_tac.st : 1.f);
+    f.pushboolean(L, TacStaminaOk() ? 1 : 0);
+    f.pushboolean(L, vmgame::InfTacStamina() ? 1 : 0);
+    f.pushboolean(L, S.active && S.tac ? 1 : 0);
+    return 4;
+}
 int CastEvent(void* L) {
     LONG t = g_cast.tail, e = 0;
     if (t != g_cast.head) {
@@ -5538,10 +5587,11 @@ int PushTable(void* L) {
         Log("lua-api: %s not exported by the game - no interface table (luaopen #%ld)", g_missing, n);
         return 0;
     }
-    f.createtable(L, 0, 10);
+    f.createtable(L, 0, 11);
     const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_enabled", HudEnabled},
                                                         {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"cast_event", CastEvent},
-                                                        {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson}};
+                                                        {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson},
+                                                        {"tac_stamina", TacStaminaApi}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);
