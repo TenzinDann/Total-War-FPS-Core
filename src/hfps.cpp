@@ -2607,6 +2607,16 @@ bool BlockNear(uintptr_t blk, float x, float z, float margin) {
     const float xz[2] = {x, z};
     return reinterpret_cast<FnContains>(g_base + kFnBlockContains904)(poly, xz, margin) == 1;
 }
+bool DropMinProgress(float pos[2], const float p0[2], const float dir[2], float target, float speed, float t) {
+    float along = (pos[0] - p0[0]) * dir[0] + (pos[1] - p0[1]) * dir[1];
+    float need = std::fmin(target, speed * t);
+    if (along < need) {
+        pos[0] += dir[0] * (need - along);
+        pos[1] += dir[1] * (need - along);
+        along = need;
+    }
+    return along >= target - 1e-4f;
+}
 template <class InGap, class Surfs>
 float FindDropPush(float x0, float z0, float dx, float dz, float foot, float stepDown, float maxPush, InGap inGap, Surfs surfs, float* landH) {
     for (float s = 0.f; s <= maxPush + 1e-3f; s += 0.25f) {
@@ -3925,8 +3935,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -3997,7 +4005,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4080,26 +4087,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -4430,12 +4428,6 @@ void Apply(uintptr_t mgr) {
             S.kinPos[0] += (S.outPos[0] - S.kinPos[0]) * kp;
             S.kinPos[1] += (S.outPos[2] - S.kinPos[1]) * kp;
             S.kinVel[0] = S.kinVel[1] = 0;
-        } else if (S.dropActive && dt > 0.f && !paused) {
-            S.dropS = std::fmin(S.dropTarget, S.dropS + S.dropSpeed * dt);
-            S.kinPos[0] = S.dropP0[0] + S.dropDir[0] * S.dropS;
-            S.kinPos[1] = S.dropP0[1] + S.dropDir[1] * S.dropS;
-            S.kinVel[0] = S.kinVel[1] = 0;
-            if (S.dropS >= S.dropTarget) S.dropActive = false;
         } else if (dt > 0.f && !paused) {
             float tau = S.air ? cfg.airControl : cfg.accelTau;
             float a = tau > 0.001f ? 1.f - std::exp(-dt / tau) : 1.f;
@@ -4447,6 +4439,8 @@ void Apply(uintptr_t mgr) {
         } else if (paused) {
             S.kinVel[0] = S.kinVel[1] = 0;
         }
+        if (S.dropActive && dt > 0.f && !paused && !pinned)
+            S.dropActive = !DropMinProgress(S.kinPos, S.dropP0, S.dropDir, S.dropTarget, S.dropSpeed, static_cast<float>(now - S.tAir));
         float leash = S.stuck ? cfg.stuckLeash : cfg.leash;
         float ex = S.kinPos[0] - raw[0], ez = S.kinPos[1] - raw[2];
         float ed = std::sqrt(ex * ex + ez * ez);
@@ -4501,15 +4495,17 @@ void Apply(uintptr_t mgr) {
                 dx /= dl;
                 dz /= dl;
                 float drop0 = S.footY - sf[si].h, gap = std::fmin(cfg.dropClearance, 0.5f + 0.3f * drop0), landH = sf[si].h;
+                float v0 = std::sqrt(S.kinVel[0] * S.kinVel[0] + S.kinVel[1] * S.kinVel[1]);
+                float range = std::fmax(cfg.dropMaxPush, v0 * std::sqrt(2.f * std::fmax(drop0, 0.1f) / cfg.gravity));
                 float push = cfg.dropClearance <= 0.f ? 0.f
-                           : FindDropPush(S.kinPos[0], S.kinPos[1], dx, dz, S.footY, cfg.stepDown, cfg.dropMaxPush,
+                           : FindDropPush(S.kinPos[0], S.kinPos[1], dx, dz, S.footY, cfg.stepDown, range,
                                           [&](float px, float pz) { return BlockNear(S.footBlk, px, pz, gap); },
                                           [&](float px, float pz, Surf* o) { return SurfacesAt(px, pz, o); }, &landH);
                 bool clear = push >= 0.f;
                 if (!clear) {
                     if (S.blocks++ < 20)
                         Log("wall: edge at %.2f,%.2f (foot %.2f, drop %.1f m) but no clear landing within %.1f m (wall / tower below) - held",
-                            S.kinPos[0], S.kinPos[1], S.footY, drop0, cfg.dropMaxPush);
+                            S.kinPos[0], S.kinPos[1], S.footY, drop0, range);
                     S.kinPos[0] = prevKin[0];
                     S.kinPos[1] = prevKin[1];
                     S.kinVel[0] = S.kinVel[1] = 0;
@@ -4529,12 +4525,42 @@ void Apply(uintptr_t mgr) {
                     S.dropS = 0;
                     S.dropTarget = push;
                     S.dropSpeed = std::fmin(20.f, std::fmax(cfg.dropPushSpeed, push / (0.8f * tFall)));
-                    S.kinVel[0] = S.kinVel[1] = 0;
                     if (S.wallLogs++ < 80)
-                        Log("wall: walked off the edge at %.2f,%.2f foot %.2f (%s) -> lands on %s at %.2f, pushed %.2f m out (clearance %.2f) at %.1f m/s",
-                            S.kinPos[0], S.kinPos[1], S.footY, S.footBlk ? "block" : "terrain", sf[si].blk ? "block" : "terrain", landH, push, gap,
-                            S.dropSpeed);
+                        Log("wall: walked off the edge at %.2f,%.2f foot %.2f (%s) at %.1f m/s -> clear ground %.2f m out (clearance %.2f, below %.2f), "
+                            "min push %.1f m/s", S.kinPos[0], S.kinPos[1], S.footY, S.footBlk ? "block" : "terrain", v0, push, gap, landH, S.dropSpeed);
                 }
+            }
+        }
+        if (S.air && !S.dropActive && ns) {
+            auto covered = [&](const Surf* s, int n) {
+                for (int j = 0; j < n; ++j)
+                    if (s[j].h > S.footY + 0.3f) return true;
+                return false;
+            };
+            if (covered(sf, ns)) {
+                const float tryPos[2][2] = {{S.kinPos[0], prevKin[1]}, {prevKin[0], S.kinPos[1]}};
+                bool slid = false;
+                for (int k = 0; k < 2 && !slid; ++k) {
+                    if (tryPos[k][0] == prevKin[0] && tryPos[k][1] == prevKin[1]) continue;
+                    Surf s5[kMaxSurf];
+                    int n5 = SurfacesAt(tryPos[k][0], tryPos[k][1], s5);
+                    if (n5 && !covered(s5, n5)) {
+                        S.kinPos[0] = tryPos[k][0];
+                        S.kinPos[1] = tryPos[k][1];
+                        S.kinVel[k == 0 ? 1 : 0] = 0;
+                        memcpy(sf, s5, sizeof sf);
+                        ns = n5;
+                        slid = true;
+                    }
+                }
+                if (!slid) {
+                    S.kinPos[0] = prevKin[0];
+                    S.kinPos[1] = prevKin[1];
+                    S.kinVel[0] = S.kinVel[1] = 0;
+                    ns = SurfacesAt(S.kinPos[0], S.kinPos[1], sf);
+                }
+                if (S.blocks++ < 20) Log("wall: in the air, ran into a structure at %.2f,%.2f (foot %.2f) - %s", prevKin[0], prevKin[1], S.footY,
+                                         slid ? "slid along one axis" : "held");
             }
         }
         if (S.air) {
@@ -4564,9 +4590,9 @@ void Apply(uintptr_t mgr) {
                 S.landPunch -= 0.4f + 2.0f * s;
                 vmgame::MoveImpulse(0.f, s > 0.05f ? s : 0.05f);
                 if (S.wallLogs++ < 80)
-                    Log("wall: landed on %s %p at %.2f,%.2f h %.2f after %.2f s (from %.2f, impact %.1f m/s, strength %.2f)%s",
+                    Log("wall: landed on %s %p at %.2f,%.2f h %.2f after %.2f s (from %.2f, impact %.1f m/s, strength %.2f), %.1f m from the edge%s",
                         S.footBlk ? "block" : "terrain", (void*)S.footBlk, S.kinPos[0], S.kinPos[1], S.footY, now - S.tAir, S.airStartY,
-                        impact, s, timeout ? " [timeout]" : "");
+                        impact, s, std::hypot(S.kinPos[0] - S.dropP0[0], S.kinPos[1] - S.dropP0[1]), timeout ? " [timeout]" : "");
             }
         } else if (si >= 0) {
             if (sf[si].blk != S.footBlk && S.wallLogs++ < 80)
