@@ -474,9 +474,8 @@ struct Config {
     float dropClearance = 3.5f, dropPushSpeed = 6.f, dropMaxPush = 6.f;
     bool building = true;
     float bldLow = 1.f, bldHigh = 2.05f, bldSkin = 0.4f;
-    bool ladder = true;
-    unsigned ladderKey = 'E';
-    float ladderSpeed = 2.5f, ladderMaxH = 30.f, ladderBack = 0.4f;
+    bool wallBody = true;
+    float wallBodyMargin = 1.f;
     bool ghost = false;
     bool revealEnemies = true;
     bool noMelee = true;
@@ -718,17 +717,10 @@ void LoadConfig() {
     if (!(cfg.bldHigh >= cfg.bldLow && cfg.bldHigh <= 6.f)) cfg.bldHigh = 2.05f;
     if (!(cfg.bldSkin >= 0.f && cfg.bldSkin <= 2.f)) cfg.bldSkin = 0.4f;
     Log("wall: building=%d building_low=%.2f building_high=%.2f building_skin=%.2f", cfg.building, cfg.bldLow, cfg.bldHigh, cfg.bldSkin);
-    cfg.ladder = GetPrivateProfileIntW(L"ladder", L"enabled", 1, ini) != 0;
-    cfg.ladderKey = GetPrivateProfileIntW(L"ladder", L"key", 'E', ini);
-    if (!(cfg.ladderKey > 0 && cfg.ladderKey < 0xFF)) cfg.ladderKey = 'E';
-    cfg.ladderSpeed = IniF(L"ladder", L"climb_speed", 2.5f, ini);
-    cfg.ladderMaxH = IniF(L"ladder", L"max_height", 30.f, ini);
-    cfg.ladderBack = IniF(L"ladder", L"back", 0.4f, ini);
-    if (!(cfg.ladderSpeed >= 0.3f && cfg.ladderSpeed <= 10.f)) cfg.ladderSpeed = 2.5f;
-    if (!(cfg.ladderMaxH >= 4.f && cfg.ladderMaxH <= 60.f)) cfg.ladderMaxH = 30.f;
-    if (!(cfg.ladderBack >= 0.f && cfg.ladderBack <= 1.5f)) cfg.ladderBack = 0.4f;
-    Log("ladder: enabled=%d key=0x%02X climb_speed=%.2f max_height=%.1f back=%.2f", cfg.ladder, cfg.ladderKey, cfg.ladderSpeed, cfg.ladderMaxH,
-        cfg.ladderBack);
+    cfg.wallBody = GetPrivateProfileIntW(L"move", L"wall_body", 1, ini) != 0;
+    cfg.wallBodyMargin = IniF(L"move", L"wall_body_margin", 1.f, ini);
+    if (!(cfg.wallBodyMargin >= 0.f && cfg.wallBodyMargin <= 3.f)) cfg.wallBodyMargin = 1.f;
+    Log("wall: wall_body=%d wall_body_margin=%.2f", cfg.wallBody, cfg.wallBodyMargin);
     Log("wall: drop_clearance=%.2f drop_push_speed=%.1f drop_max_push=%.1f", cfg.dropClearance, cfg.dropPushSpeed, cfg.dropMaxPush);
     Log("wall: wall=%d step_up=%.2f step_down=%.2f gravity=%.1f jump_height=%.2f air_control=%.2f air_teleport_max=%.2f land_dip=%.3f",
         cfg.wall, cfg.stepUp, cfg.stepDown, cfg.gravity, cfg.jumpHeight, cfg.airControl, cfg.airTpMax, cfg.landDip);
@@ -1019,10 +1011,8 @@ struct State {
     bool bldInside = false, bldRecheck = false;
     double tBldCheck = 0;
     int bldBlocks = 0, bldLogs = 0;
-    int ladMode = 0, ladIdx = 0, ladRung = -1, prompt = 0, ladLogs = 0;
-    float ladS = 0, ladFrom[3] = {}, ladTo[3] = {};
-    double tLadMount = 0, tLadScan = 0;
-    bool ePrev = false;
+    bool bodyInside = false;
+    int bodyLogs = 0, censusLogs = 0;
     double tLastTp = 0;
     unsigned tpSent = 0, tpFailed = 0, tpLogs = 0, leashHits = 0;
     int lastMode = -1;
@@ -2719,6 +2709,22 @@ bool BlockNear(uintptr_t blk, float x, float z, float margin) {
     const float xz[2] = {x, z};
     return reinterpret_cast<FnContains>(g_base + kFnBlockContains904)(poly, xz, margin) == 1;
 }
+bool StructureOver(const Surf* s, int n, float foot, float up, float down) {
+    bool high = false, stand = false;
+    for (int i = 0; i < n; ++i) {
+        if (!s[i].blk) continue;
+        if (s[i].h > foot + up)
+            high = true;
+        else if (s[i].h >= foot - down)
+            stand = true;
+    }
+    return high && !stand;
+}
+bool InsideStructure(float x, float z, float foot) {
+    Surf s[kMaxSurf];
+    int n = SurfacesAt(x, z, s);
+    return StructureOver(s, n, foot, cfg.stepUp, cfg.stepDown);
+}
 struct SegQuery {
     int32_t kind;
     float a[3], b[3];
@@ -2755,6 +2761,115 @@ bool SegHitsBuilding(const float a[3], const float b[3], uint32_t* hitType, floa
     }
     hits.count = 0;
     return solid;
+}
+bool SegNearestHit(const float a[3], const float b[3], uint32_t mask, uint32_t* hitType, float hitPos[3], float* dist) {
+    if (!g_buildOk) return false;
+    uintptr_t battle = 0;
+    if (!CmdQueue(&battle)) return false;
+    uintptr_t world = Ptr(battle + oBattlePath), mgr = world ? Ptr(world + oWorldCollide) : 0;
+    if (!mgr) return false;
+    static HitList hits = {0, 0, nullptr};
+    const SegQuery q = {2, {a[0], a[1], a[2]}, {b[0], b[1], b[2]}};
+    using FnSeg = uint32_t (*)(uintptr_t, HitList*, const SegQuery*, uint32_t, uint8_t, uint32_t, uintptr_t);
+    hits.count = 0;
+    reinterpret_cast<FnSeg>(g_base + kFnSegQuery904)(mgr, &hits, &q, 0, 1, mask, 0);
+    bool any = false;
+    float best = 1e30f;
+    for (uint32_t i = 0; i < hits.count && hits.data; ++i) {
+        const uint8_t* r = hits.data + static_cast<size_t>(i) * 0xe0;
+        uintptr_t e = 0, obj = 0;
+        uint64_t link = 0;
+        memcpy(&e, r, 8);
+        if (!e || !Rd(e + 0x10, link) || !Rd(e + 8, obj) || !obj) continue;
+        uint32_t type = static_cast<uint32_t>(link & 0xffff);
+        uintptr_t mat = type == 0x800 ? Ptr(Ptr(obj + 0x60) + 200) : type == 0x4000 ? Ptr(Ptr(obj + 0x10) + 0x18) : 0;
+        int32_t mt = 0;
+        if (mat && Rd(mat + 0x7c, mt) && mt == 5) continue;
+        float p[3];
+        memcpy(p, r + 8, 12);
+        float d = std::sqrt((p[0] - a[0]) * (p[0] - a[0]) + (p[1] - a[1]) * (p[1] - a[1]) + (p[2] - a[2]) * (p[2] - a[2]));
+        if (!(d < best)) continue;
+        best = d;
+        *hitType = type;
+        memcpy(hitPos, p, 12);
+        any = true;
+    }
+    hits.count = 0;
+    if (any && dist) *dist = best;
+    return any;
+}
+void CollisionCensus(const char* why, float x, float z, float foot) {
+    uintptr_t battle = 0;
+    if (!CmdQueue(&battle)) return;
+    uintptr_t world = Ptr(battle + oBattlePath);
+    uintptr_t grid = world ? Ptr(world + 0x140) : 0, pool = world ? Ptr(world + oWorldNavEntries) : 0;
+    uintptr_t cells = grid ? Ptr(grid) : 0, ents = pool ? Ptr(pool + 8) : 0;
+    float scale = 0;
+    int32_t off = 0;
+    uint32_t maxIdx = 0, shift = 0;
+    Log("census (%s) at %.2f,%.2f foot %.2f: building grid %p cells %p entries %p", why, x, z, foot, (void*)grid, (void*)cells, (void*)ents);
+    const float r = 20.f;
+    if (cells && ents && Rd(grid + 0x2c, scale) && Rd(grid + 0x18, off) && Rd(grid + 0x1c, maxIdx) && Rd(grid + 0x10, shift) &&
+        scale > 0.f && scale < 100.f && maxIdx <= (1u << 20)) {
+        shift &= 31;
+        auto idx = [&](float v) {
+            int32_t i = static_cast<int32_t>(std::floor(scale * v)) + off;
+            return i < 0 ? 0u : static_cast<uint32_t>(i) > maxIdx ? maxIdx : static_cast<uint32_t>(i);
+        };
+        uint32_t x0 = idx(x - r), x1 = idx(x + r), z0 = idx(z - r), z1 = idx(z + r);
+        Log("census: grid %.3f cells/m offset %d max %u shift %u, cells x %u..%u z %u..%u", scale, off, maxIdx, shift, x0, x1, z0, z1);
+        static uintptr_t seen[256];
+        int nSeen = 0, logged = 0;
+        for (uint32_t zi = z0; zi <= z1 && zi - z0 < 200; ++zi)
+            for (uint32_t xi = x0; xi <= x1 && xi - x0 < 200; ++xi) {
+                uint32_t head = 0;
+                if (!Rd(cells + (static_cast<uintptr_t>(xi) + (static_cast<uintptr_t>(zi) << shift)) * 4, head)) continue;
+                for (int guard = 0; head != 0xffffff && guard < 256; ++guard) {
+                    uintptr_t e = ents + static_cast<uintptr_t>(head) * 0x18;
+                    uint64_t link = 0;
+                    if (!Rd(e + 0x10, link)) break;
+                    head = static_cast<uint32_t>(link >> 40);
+                    uint32_t type = static_cast<uint32_t>(link & 0xffff);
+                    uintptr_t obj = Ptr(e + 8);
+                    if (!obj || !(type & 0x4800)) continue;
+                    bool dup = false;
+                    for (int k = 0; k < nSeen && !dup; ++k) dup = seen[k] == obj;
+                    if (dup || nSeen >= 256) continue;
+                    seen[nSeen++] = obj;
+                    if (logged >= 48) continue;
+                    ++logged;
+                    if (type == 0x800) {
+                        float bb[6] = {};
+                        Rd(obj + 0xb8, bb);
+                        uintptr_t m = Ptr(Ptr(obj + 0x60) + 200);
+                        uint8_t on = 0;
+                        int32_t mt = -1;
+                        if (m) Rd(m + 0x59, on), Rd(m + 0x7c, mt);
+                        Log("census:   0x800 obj %p (vt +%llx) box x %.1f..%.1f y %.1f..%.1f z %.1f..%.1f collide %u body %p material %d", (void*)obj,
+                            (unsigned long long)(Ptr(obj) - g_base), bb[0], bb[3], bb[1], bb[4], bb[2], bb[5], on, (void*)Ptr(obj + 0x90), mt);
+                    } else {
+                        Log("census:   0x%x obj %p (vt +%llx) body %p", type, (void*)obj, (unsigned long long)(Ptr(obj) - g_base),
+                            (void*)Ptr(obj + 0x28));
+                    }
+                }
+            }
+        Log("census: %d building objects within %.0f m (%d logged)", nSeen, r, logged);
+    }
+    for (int lv = 0; lv < 2; ++lv) {
+        char line[600];
+        int len = snprintf(line, sizeof line, "census: rays at foot+%.1f:", lv ? 2.5f : 1.f);
+        for (int k = 0; k < 16 && len > 0 && len < static_cast<int>(sizeof line) - 24; ++k) {
+            float ang = static_cast<float>(k) * 3.14159265f / 8.f, h = foot + (lv ? 2.5f : 1.f);
+            const float a[3] = {x, h, z}, b[3] = {x + std::sin(ang) * 12.f, h, z + std::cos(ang) * 12.f};
+            uint32_t t = 0;
+            float hp[3] = {}, d = 0;
+            if (SegNearestHit(a, b, 0xeb05, &t, hp, &d))
+                len += snprintf(line + len, sizeof line - len, " %d:0x%x@%.1f", k, t, d);
+            else
+                len += snprintf(line + len, sizeof line - len, " %d:-", k);
+        }
+        Log("%s", line);
+    }
 }
 bool TallWallBetween(const float p0[2], const float p1[2], float foot, uint32_t* hitType, float hitPos[3]) {
     float dx = p1[0] - p0[0], dz = p1[1] - p0[1], d = std::sqrt(dx * dx + dz * dz);
@@ -4012,7 +4127,6 @@ void PathStep() {
     }
 }
 bool KeyDown(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
-#include "ladder_game.inc"
 void RecordTp(double now, float x, float z) {
     TpRec& r = S.tpHist[S.tpHead++ % (sizeof S.tpHist / sizeof S.tpHist[0])];
     r.t = now;
@@ -4148,8 +4262,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4220,7 +4332,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4303,26 +4414,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -4493,7 +4595,7 @@ void Apply(uintptr_t mgr) {
         S.shiftPrev = shift;
         bool reloading = vmgame::Busy();
         bool canSprint = canMove && fg && mode == 0 && wantMove && KeyDown('W') && !KeyDown('S') && !rmb && !lmb && !reloading &&
-                         !S.pinned && !S.stuck && !S.ladMode;
+                         !S.pinned && !S.stuck;
         bool wasSprint = S.sprint, wasTac = S.tac, wasAds = S.ads;
         if (S.sprint && !canSprint) {
             S.fireBlock = now + (S.tac ? cfg.tacSprintToFire : cfg.sprintToFire);
@@ -4506,7 +4608,7 @@ void Apply(uintptr_t mgr) {
                 S.tac = true;
         }
         TacStaminaStep(now, dt);
-        S.ads = rmb && !S.sprint && !reloading && !vmgame::MeleeActive() && !S.ladMode;
+        S.ads = rmb && !S.sprint && !reloading && !vmgame::MeleeActive();
         if (S.ads && !wasAds) S.adsKind = now < S.fireBlock ? (S.exitTac ? 2 : 1) : 0;
         if (!S.ads) S.adsKind = 0;
         float adsTime = vmgame::CurrentAdsTime(S.adsKind);
@@ -4538,7 +4640,6 @@ void Apply(uintptr_t mgr) {
             S.air = S.airFar = S.dropActive = false;
             S.vy = S.airGap = S.landY = S.landV = S.landPunch = 0;
             S.tLand = -1;
-            S.ladMode = 0, S.prompt = 0;
             {
                 Surf sf[kMaxSurf];
                 int ns = SurfacesAt(raw[0], raw[2], sf), bi = -1;
@@ -4553,6 +4654,9 @@ void Apply(uintptr_t mgr) {
                 S.bldInside = cfg.building && g_buildOk && InsideBuilding(raw[0], raw[2], S.footY);
                 S.tBldCheck = now;
                 if (S.bldInside && S.bldLogs++ < 30) Log("wall: entered inside a building - its walls let through until out");
+                S.bodyInside = cfg.wallBody && cfg.wall && g_wallOk && InsideStructure(raw[0], raw[2], S.footY);
+                if (S.bodyInside && S.bodyLogs++ < 20) Log("wall: entered inside a wall body / tower footprint - let through until out");
+                if (S.censusLogs++ < 6) CollisionCensus("enter", raw[0], raw[2], S.footY);
             }
             if (MakeDestAt(raw[0], raw[2], dest, S.footBlk) && IssueTeleport(dest)) {
                 ++S.tpSent;
@@ -4598,7 +4702,7 @@ void Apply(uintptr_t mgr) {
             S.pinned = pinned;
         }
         bool judged = false, follow = false;
-        bool unbound = S.ghostWanted || S.airFar || S.air || S.ladMode || (S.tLand > 0 && now - S.tLand < 0.5);
+        bool unbound = S.ghostWanted || S.airFar || S.air || (S.tLand > 0 && now - S.tLand < 0.5);
         if (unbound || pinned) judged = true, follow = true;
         for (const TpRec& r : S.tpHist) {
             if (unbound || pinned) break;
@@ -4649,8 +4753,6 @@ void Apply(uintptr_t mgr) {
                     S.vy);
         }
         S.spacePrev = space;
-        LadderFrame(now, dt, fg, paused, pinned, sy, cy, cfg.eyeHeight);
-        const bool onLadder = S.ladMode != 0;
         if (pinned && S.air) {
             S.air = S.airFar = S.dropActive = false;
             S.vy = 0;
@@ -4661,7 +4763,7 @@ void Apply(uintptr_t mgr) {
             S.kinPos[0] += (S.outPos[0] - S.kinPos[0]) * kp;
             S.kinPos[1] += (S.outPos[2] - S.kinPos[1]) * kp;
             S.kinVel[0] = S.kinVel[1] = 0;
-        } else if (dt > 0.f && !paused && !onLadder) {
+        } else if (dt > 0.f && !paused) {
             float tau = S.air ? cfg.airControl : cfg.accelTau;
             float a = tau > 0.001f ? 1.f - std::exp(-dt / tau) : 1.f;
             S.kinVel[0] += (mx * spd - S.kinVel[0]) * a;
@@ -4686,7 +4788,7 @@ void Apply(uintptr_t mgr) {
                 ++S.dropKept;
             }
         }
-        if (cfg.building && g_buildOk && !pinned && !paused && dt > 0.f && !S.flyer && !onLadder) {
+        if (cfg.building && g_buildOk && !pinned && !paused && dt > 0.f && !S.flyer) {
             if (S.bldRecheck || (S.bldInside && now - S.tBldCheck > 0.5)) {
                 bool was = S.bldInside;
                 S.bldInside = InsideBuilding(S.kinPos[0], S.kinPos[1], S.footY);
@@ -4737,7 +4839,7 @@ void Apply(uintptr_t mgr) {
         if (ns && pinned) {
             for (int i = 0; i < ns; ++i)
                 if (si < 0 || std::fabs(sf[i].h - S.outPos[1]) < std::fabs(sf[si].h - S.outPos[1])) si = i;
-        } else if (ns && !S.air && !onLadder) {
+        } else if (ns && !S.air) {
             bool edge = false;
             si = WalkPick(sf, ns, S.footBlk, S.footY, cfg.stepUp, cfg.stepDown, &edge);
             if (si < 0) {
@@ -4770,6 +4872,53 @@ void Apply(uintptr_t mgr) {
                 if (S.blocks++ < 20) Log("wall: blocked at %.2f,%.2f (foot %.2f, nothing within step_up %.2f) - %s", prevKin[0], prevKin[1],
                                          S.footY, cfg.stepUp, slid ? "slid along one axis" : "held");
             }
+            if (si >= 0 && !edge && cfg.wallBody && cfg.wall && g_wallOk) {
+                float bx = S.kinPos[0] - prevKin[0], bz = S.kinPos[1] - prevKin[1], bl = std::sqrt(bx * bx + bz * bz);
+                if (S.bodyInside) {
+                    if (!InsideStructure(S.kinPos[0], S.kinPos[1], S.footY)) {
+                        S.bodyInside = false;
+                        if (S.bodyLogs++ < 20) Log("wall: out of the wall body / tower footprint at %.2f,%.2f - solid again", S.kinPos[0], S.kinPos[1]);
+                    }
+                } else if (bl > 1e-4f) {
+                    auto bodyAt = [&](float px, float pz, float ux, float uz) {
+                        return InsideStructure(px, pz, S.footY) ||
+                               (cfg.wallBodyMargin > 0.f && InsideStructure(px + ux * cfg.wallBodyMargin, pz + uz * cfg.wallBodyMargin, S.footY));
+                    };
+                    if (bodyAt(S.kinPos[0], S.kinPos[1], bx / bl, bz / bl)) {
+                        const float tryPos[2][2] = {{S.kinPos[0], prevKin[1]}, {prevKin[0], S.kinPos[1]}};
+                        const float tryDir[2][2] = {{bx > 0.f ? 1.f : -1.f, 0.f}, {0.f, bz > 0.f ? 1.f : -1.f}};
+                        bool slid = false;
+                        for (int t = 0; t < 2 && !slid; ++t) {
+                            if (tryPos[t][0] == prevKin[0] && tryPos[t][1] == prevKin[1]) continue;
+                            if (bodyAt(tryPos[t][0], tryPos[t][1], tryDir[t][0], tryDir[t][1])) continue;
+                            Surf s2[kMaxSurf];
+                            bool e2 = false;
+                            int n2 = SurfacesAt(tryPos[t][0], tryPos[t][1], s2);
+                            int i2 = n2 ? WalkPick(s2, n2, S.footBlk, S.footY, cfg.stepUp, cfg.stepDown, &e2) : -1;
+                            if (i2 >= 0 && !e2) {
+                                S.kinPos[0] = tryPos[t][0];
+                                S.kinPos[1] = tryPos[t][1];
+                                S.kinVel[t == 0 ? 1 : 0] = 0;
+                                memcpy(sf, s2, sizeof sf);
+                                ns = n2;
+                                si = i2;
+                                slid = true;
+                            }
+                        }
+                        if (!slid) {
+                            S.kinPos[0] = prevKin[0];
+                            S.kinPos[1] = prevKin[1];
+                            S.kinVel[0] = S.kinVel[1] = 0;
+                            ns = SurfacesAt(S.kinPos[0], S.kinPos[1], sf);
+                            si = ns ? WalkPick(sf, ns, S.footBlk, S.footY, cfg.stepUp, cfg.stepDown, &edge) : -1;
+                        }
+                        if (S.bodyLogs++ < 20)
+                            Log("wall: wall body / tower footprint (nav block overhead, ground under it) at %.2f,%.2f going from %.2f,%.2f (foot %.2f) - %s",
+                                S.kinPos[0], S.kinPos[1], prevKin[0], prevKin[1], S.footY, slid ? "slid along one axis" : "held");
+                        if (S.bodyLogs == 1 && S.censusLogs++ < 6) CollisionCensus("first wall body block", prevKin[0], prevKin[1], S.footY);
+                    }
+                }
+            }
             if (si >= 0 && edge) {
                 float dx = S.kinPos[0] - prevKin[0], dz = S.kinPos[1] - prevKin[1], dl = std::sqrt(dx * dx + dz * dz);
                 if (dl < 1e-4f) dx = S.kinVel[0], dz = S.kinVel[1], dl = std::sqrt(dx * dx + dz * dz);
@@ -4784,6 +4933,18 @@ void Apply(uintptr_t mgr) {
                                           [&](float px, float pz) { return BlockNear(S.footBlk, px, pz, gap); },
                                           [&](float px, float pz, Surf* o) { return SurfacesAt(px, pz, o); }, &landH);
                 bool clear = push >= 0.f;
+                if (clear && cfg.building && g_buildOk && !S.bldInside) {
+                    float ahead = std::fmax(push, 1.5f) + 0.5f;
+                    const float q2[2] = {S.kinPos[0] + dx * ahead, S.kinPos[1] + dz * ahead};
+                    uint32_t t3 = 0;
+                    float h3[3] = {};
+                    if (TallWallBetween(S.kinPos, q2, S.footY, &t3, h3)) {
+                        clear = false;
+                        if (S.blocks++ < 20)
+                            Log("wall: edge at %.2f,%.2f (foot %.2f) runs into a tall building wall (type 0x%x) at %.2f,%.2f - treated as a wall, not a drop",
+                                S.kinPos[0], S.kinPos[1], S.footY, t3, h3[0], h3[2]);
+                    }
+                }
                 if (!clear) {
                     if (S.blocks++ < 20)
                         Log("wall: edge at %.2f,%.2f (foot %.2f, drop %.1f m) but no clear landing within %.1f m (wall / tower below) - held",
@@ -4871,6 +5032,7 @@ void Apply(uintptr_t mgr) {
                 S.tLastTp = 0;
                 S.tLand = now;
                 S.bldRecheck = true;
+                S.bodyInside = cfg.wallBody && cfg.wall && g_wallOk && InsideStructure(S.kinPos[0], S.kinPos[1], S.footY);
                 ++S.lands;
                 S.landV += kick::Impulse(-cfg.landDip * (0.25f + 0.75f * s), 5.f, 0.55f);
                 S.landPunch -= 0.4f + 2.0f * s;
@@ -4881,15 +5043,15 @@ void Apply(uintptr_t mgr) {
                         S.kinPos[1], S.footY, now - S.tAir, S.airStartY, impact, s, std::hypot(S.kinPos[0] - S.dropP0[0], S.kinPos[1] - S.dropP0[1]),
                         S.dropPolyN ? PolyDist(S.dropPoly, S.dropPolyN, S.kinPos[0], S.kinPos[1]) : -1.f, S.dropKept, timeout ? " [timeout]" : "");
             }
-        } else if (si >= 0 && !onLadder) {
+        } else if (si >= 0) {
             if (sf[si].blk != S.footBlk && S.wallLogs++ < 80)
                 Log("wall: now on %s %p h %.2f (was %s %p h %.2f) at %.2f,%.2f", sf[si].blk ? "block" : "terrain", (void*)sf[si].blk, sf[si].h,
                     S.footBlk ? "block" : "terrain", (void*)S.footBlk, S.footY, S.kinPos[0], S.kinPos[1]);
             S.footY = sf[si].h;
             S.footBlk = sf[si].blk;
         }
-        S.airFar = (S.air && S.airGap > cfg.airTpMax) || onLadder;
-        if (S.footBlk && !S.air && !pinned && !onLadder && std::fabs(raw[1] - S.footY) > 1.5f && now - S.tWallCheck > 1.0 && S.wallLogs < 80) {
+        S.airFar = S.air && S.airGap > cfg.airTpMax;
+        if (S.footBlk && !S.air && !pinned && std::fabs(raw[1] - S.footY) > 1.5f && now - S.tWallCheck > 1.0 && S.wallLogs < 80) {
             S.tWallCheck = now;
             ++S.wallLogs;
             Log("wall: hero entity y %.2f but camera foot %.2f on block %p at %.2f,%.2f (hero not on the block?)", raw[1], S.footY,
@@ -4897,7 +5059,7 @@ void Apply(uintptr_t mgr) {
         }
         uintptr_t hint = S.air ? (si >= 0 ? sf[si].blk : 0) : S.footBlk;
         bool haveDest = MakeDestAt(S.kinPos[0], S.kinPos[1], dest, hint);
-        if (S.air || onLadder)
+        if (S.air)
             S.kinY = S.footY;
         else
             S.kinY += (S.footY - S.kinY) * (dt > 0.f ? 1.f - std::exp(-dt / 0.05f) : 1.f);
@@ -5149,9 +5311,9 @@ void Apply(uintptr_t mgr) {
         VelStep(bp, eye, vFwd);
         FastFireStats(false);
     }
-    bool held = g_cast.lmb && !S.ladMode;
+    bool held = g_cast.lmb;
     if (vmgame::MeleeActive()) {
-        bool blockKey = g_cast.rmb && !S.ladMode;
+        bool blockKey = g_cast.rmb;
         vmgame::MeleeInput(held && !S.sprint && now >= S.fireBlock, blockKey && !S.sprint);
         int strikeCat = vmgame::kMeleeCatSword;
         int strike = vmgame::TakeMeleeStrike(&strikeCat);
@@ -5360,7 +5522,6 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
         }
         if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D')) return 0;
-        if (S.active && cfg.ladder && w == cfg.ladderKey) return 0;
         if (S.active && w == VK_SPACE && cfg.jumpHeight > 0.f) return 0;
         break;
     case WM_KEYUP:
@@ -5977,10 +6138,6 @@ int View(void* L) {
     for (float v : d) f.pushnumber(L, v);
     return 6;
 }
-int Prompt(void* L) {
-    f.pushnumber(L, S.active && S.lastMode == 0 ? static_cast<float>(S.prompt) : 0.f);
-    return 1;
-}
 int ExitFirstPerson(void* L) {
     (void)L;
     if (S.active) {
@@ -5995,11 +6152,11 @@ int PushTable(void* L) {
         Log("lua-api: %s not exported by the game - no interface table (luaopen #%ld)", g_missing, n);
         return 0;
     }
-    f.createtable(L, 0, 12);
+    f.createtable(L, 0, 11);
     const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_enabled", HudEnabled},
                                                         {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"cast_event", CastEvent},
                                                         {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson},
-                                                        {"tac_stamina", TacStaminaApi}, {"prompt", Prompt}};
+                                                        {"tac_stamina", TacStaminaApi}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);

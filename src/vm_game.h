@@ -98,16 +98,4 @@ bool LauncherBusy();
 void LauncherCast(int kind, bool driven = false, float windup = 0.f);
 void LauncherFire();
 void LauncherAbort();
-void LauncherCue(int cue, int kind);
-constexpr int kLadderMax = 4;
-struct LadderView {
-    float base[3];
-    float dir[2];
-    float tiltDeg;
-    float scaleY;
-    float clipLo, clipHi;
-};
-void LadderPublish(const LadderView* v, int n, bool gunDown);
-void LadderSound(int kind);
-bool LadderReady();
 }
