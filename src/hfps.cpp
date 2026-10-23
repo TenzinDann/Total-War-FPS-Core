@@ -228,6 +228,15 @@ const CodePrint kWallPrints904[] = {
 constexpr uintptr_t kFnNavEntryValid904 = 0x30b3cf8, kFnBlockContains904 = 0x183327c;
 constexpr uintptr_t oWorldNavEntries = 0x108, oWorldNavGrid = 0x138, oBlkPoly = 0x10, oBlkPlane = 0x6c;
 bool g_wallOk = false;
+const CodePrint kBuildPrints904[] = {
+    {0x2db3470, 0x1e0, 0x3c8867f0744bc1a9ull},
+    {0x30a6f80, 0x529, 0xd8d80fffc173bed8ull},
+    {0x2f6eb34, 0xb78, 0xd1396ee29531e84full},
+    {0x316d79c, 0x295, 0x1986cd8c729b5bf0ull},
+    {0x1bc048c, 0xd9, 0xa04e459ecba56bccull}};
+constexpr uintptr_t kFnSegQuery904 = 0x2db3470, oWorldCollide = 0x150;
+constexpr uint32_t kBuildMask = 0x4800;
+bool g_buildOk = false;
 constexpr uintptr_t oUnitAbilityMgr = 0x3d48, oAbMgrEnd = 0x20, oAbMgrFirst = 0x28, oAbNodeNext = 0x8, oAbNodeDef = 0x70, oAbNodeInst = 0x10;
 constexpr uintptr_t oAbDefId = 0x8, oAbDefWindup = 0x30, oAbDefRange = 0x54, oAbRecId = 0x50;
 constexpr uintptr_t oAbWindSteps = 0x120, oAbCooldown = 0x134, oAbUses = 0xb4, oAbFlags = 0x170;
@@ -463,6 +472,8 @@ struct Config {
     bool wall = true;
     float stepUp = 0.6f, stepDown = 0.8f, gravity = 20.3f, jumpHeight = 0.f, airControl = 0.35f, airTpMax = 1.5f, landDip = 0.12f;
     float dropClearance = 3.5f, dropPushSpeed = 6.f, dropMaxPush = 6.f;
+    bool building = true;
+    float bldLow = 1.f, bldHigh = 2.05f, bldSkin = 0.4f;
     bool ghost = false;
     bool revealEnemies = true;
     bool noMelee = true;
@@ -695,6 +706,14 @@ void LoadConfig() {
     if (!(cfg.dropPushSpeed >= 1.f && cfg.dropPushSpeed <= 30.f)) cfg.dropPushSpeed = 6.f;
     if (!(cfg.dropMaxPush >= 0.5f && cfg.dropMaxPush <= 20.f)) cfg.dropMaxPush = 6.f;
     if (cfg.dropMaxPush < cfg.dropClearance) cfg.dropMaxPush = cfg.dropClearance + 1.f;
+    cfg.building = GetPrivateProfileIntW(L"move", L"building", 1, ini) != 0;
+    cfg.bldLow = IniF(L"move", L"building_low", 1.f, ini);
+    cfg.bldHigh = IniF(L"move", L"building_high", 2.05f, ini);
+    cfg.bldSkin = IniF(L"move", L"building_skin", 0.4f, ini);
+    if (!(cfg.bldLow >= 0.3f && cfg.bldLow <= 3.f)) cfg.bldLow = 1.f;
+    if (!(cfg.bldHigh >= cfg.bldLow && cfg.bldHigh <= 6.f)) cfg.bldHigh = 2.05f;
+    if (!(cfg.bldSkin >= 0.f && cfg.bldSkin <= 2.f)) cfg.bldSkin = 0.4f;
+    Log("wall: building=%d building_low=%.2f building_high=%.2f building_skin=%.2f", cfg.building, cfg.bldLow, cfg.bldHigh, cfg.bldSkin);
     Log("wall: drop_clearance=%.2f drop_push_speed=%.1f drop_max_push=%.1f", cfg.dropClearance, cfg.dropPushSpeed, cfg.dropMaxPush);
     Log("wall: wall=%d step_up=%.2f step_down=%.2f gravity=%.1f jump_height=%.2f air_control=%.2f air_teleport_max=%.2f land_dip=%.3f",
         cfg.wall, cfg.stepUp, cfg.stepDown, cfg.gravity, cfg.jumpHeight, cfg.airControl, cfg.airTpMax, cfg.landDip);
@@ -981,6 +1000,9 @@ struct State {
     float dropPoly[16][2] = {};
     int dropPolyN = 0, dropKept = 0;
     float dropGap = 0;
+    bool bldInside = false, bldRecheck = false;
+    double tBldCheck = 0;
+    int bldBlocks = 0, bldLogs = 0;
     double tLastTp = 0;
     unsigned tpSent = 0, tpFailed = 0, tpLogs = 0, leashHits = 0;
     int lastMode = -1;
@@ -2610,6 +2632,67 @@ bool BlockNear(uintptr_t blk, float x, float z, float margin) {
     const float xz[2] = {x, z};
     return reinterpret_cast<FnContains>(g_base + kFnBlockContains904)(poly, xz, margin) == 1;
 }
+struct SegQuery {
+    int32_t kind;
+    float a[3], b[3];
+};
+struct HitList {
+    uint32_t cap, count;
+    uint8_t* data;
+};
+bool SegHitsBuilding(const float a[3], const float b[3], uint32_t* hitType, float hitPos[3]) {
+    if (!g_buildOk) return false;
+    uintptr_t battle = 0;
+    if (!CmdQueue(&battle)) return false;
+    uintptr_t world = Ptr(battle + oBattlePath), mgr = world ? Ptr(world + oWorldCollide) : 0;
+    if (!mgr) return false;
+    static HitList hits = {0, 0, nullptr};
+    const SegQuery q = {2, {a[0], a[1], a[2]}, {b[0], b[1], b[2]}};
+    using FnSeg = uint32_t (*)(uintptr_t, HitList*, const SegQuery*, uint32_t, uint8_t, uint32_t, uintptr_t);
+    hits.count = 0;
+    reinterpret_cast<FnSeg>(g_base + kFnSegQuery904)(mgr, &hits, &q, 0, 1, kBuildMask, 0);
+    bool solid = false;
+    for (uint32_t i = 0; i < hits.count && hits.data && !solid; ++i) {
+        const uint8_t* r = hits.data + static_cast<size_t>(i) * 0xe0;
+        uintptr_t e = 0, obj = 0;
+        uint64_t link = 0;
+        memcpy(&e, r, 8);
+        if (!e || !Rd(e + 0x10, link) || !Rd(e + 8, obj) || !obj) continue;
+        uint32_t type = static_cast<uint32_t>(link & 0xffff);
+        uintptr_t mat = type == 0x800 ? Ptr(Ptr(obj + 0x60) + 200) : type == 0x4000 ? Ptr(Ptr(obj + 0x10) + 0x18) : 0;
+        int32_t mt = 0;
+        if (mat && Rd(mat + 0x7c, mt) && mt == 5) continue;
+        *hitType = type;
+        memcpy(hitPos, r + 8, 12);
+        solid = true;
+    }
+    hits.count = 0;
+    return solid;
+}
+bool TallWallBetween(const float p0[2], const float p1[2], float foot, uint32_t* hitType, float hitPos[3]) {
+    float dx = p1[0] - p0[0], dz = p1[1] - p0[1], d = std::sqrt(dx * dx + dz * dz);
+    if (d < 1e-4f) return false;
+    float k = (d + cfg.bldSkin) / d, lo = foot + cfg.bldLow, hi = foot + std::fmax(cfg.bldHigh, cfg.eyeHeight + 0.3f);
+    const float a1[3] = {p0[0], lo, p0[1]}, b1[3] = {p0[0] + dx * k, lo, p0[1] + dz * k};
+    if (!SegHitsBuilding(a1, b1, hitType, hitPos)) return false;
+    const float a2[3] = {p0[0], hi, p0[1]}, b2[3] = {p0[0] + dx * k, hi, p0[1] + dz * k};
+    uint32_t t2 = 0;
+    float h2[3] = {};
+    return SegHitsBuilding(a2, b2, &t2, h2);
+}
+bool InsideBuilding(float x, float z, float foot) {
+    uint32_t t = 0;
+    float h[3] = {};
+    const float up0[3] = {x, foot + cfg.bldLow, z}, up1[3] = {x, foot + 40.f, z};
+    if (!SegHitsBuilding(up0, up1, &t, h)) return false;
+    static const float kDirs[4][2] = {{1.f, 0.f}, {-1.f, 0.f}, {0.f, 1.f}, {0.f, -1.f}};
+    const float p[2] = {x, z};
+    for (const auto& dir : kDirs) {
+        const float q[2] = {x + dir[0] * 30.f, z + dir[1] * 30.f};
+        if (!TallWallBetween(p, q, foot, &t, h)) return false;
+    }
+    return true;
+}
 float PolyDist(const float (*pts)[2], int n, float x, float z) {
     float d = -1e30f;
     for (int i = 0; i < n; ++i) {
@@ -3977,8 +4060,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4049,7 +4130,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4132,26 +4212,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -4376,6 +4447,11 @@ void Apply(uintptr_t mgr) {
                 if (S.wallLogs++ < 80)
                     Log("wall: enter at %.2f,%.2f,%.2f on %s %p (h %.2f, %d layer(s) here%s)", raw[0], raw[1], raw[2],
                         S.footBlk ? "block" : "terrain", (void*)S.footBlk, S.footY, ns, g_wallOk && cfg.wall ? "" : ", nav blocks OFF");
+                S.bldBlocks = 0;
+                S.bldRecheck = false;
+                S.bldInside = cfg.building && g_buildOk && InsideBuilding(raw[0], raw[2], S.footY);
+                S.tBldCheck = now;
+                if (S.bldInside && S.bldLogs++ < 30) Log("wall: entered inside a building - its walls let through until out");
             }
             if (MakeDestAt(raw[0], raw[2], dest, S.footBlk) && IssueTeleport(dest)) {
                 ++S.tpSent;
@@ -4505,6 +4581,43 @@ void Apply(uintptr_t mgr) {
                     S.kinVel[1] -= vn * nrm[1];
                 }
                 ++S.dropKept;
+            }
+        }
+        if (cfg.building && g_buildOk && !pinned && !paused && dt > 0.f && !S.flyer) {
+            if (S.bldRecheck || (S.bldInside && now - S.tBldCheck > 0.5)) {
+                bool was = S.bldInside;
+                S.bldInside = InsideBuilding(S.kinPos[0], S.kinPos[1], S.footY);
+                S.tBldCheck = now;
+                S.bldRecheck = false;
+                if (was != S.bldInside && S.bldLogs++ < 30)
+                    Log("wall: %s a building at %.2f,%.2f (foot %.2f) - its walls %s", S.bldInside ? "landed inside" : "out of",
+                        S.kinPos[0], S.kinPos[1], S.footY, S.bldInside ? "let through until out" : "solid again");
+            }
+            uint32_t ht = 0;
+            float hp[3] = {};
+            if (!S.bldInside && TallWallBetween(prevKin, S.kinPos, S.footY, &ht, hp)) {
+                const float tryPos[2][2] = {{S.kinPos[0], prevKin[1]}, {prevKin[0], S.kinPos[1]}};
+                bool slid = false;
+                for (int k = 0; k < 2 && !slid; ++k) {
+                    if (tryPos[k][0] == prevKin[0] && tryPos[k][1] == prevKin[1]) continue;
+                    uint32_t t2 = 0;
+                    float h2[3] = {};
+                    if (!TallWallBetween(prevKin, tryPos[k], S.footY, &t2, h2)) {
+                        S.kinPos[0] = tryPos[k][0];
+                        S.kinPos[1] = tryPos[k][1];
+                        S.kinVel[k == 0 ? 1 : 0] = 0;
+                        slid = true;
+                    }
+                }
+                if (!slid) {
+                    S.kinPos[0] = prevKin[0];
+                    S.kinPos[1] = prevKin[1];
+                    S.kinVel[0] = S.kinVel[1] = 0;
+                }
+                ++S.bldBlocks;
+                if (S.bldLogs++ < 30)
+                    Log("wall: building wall (type 0x%x) hit at %.2f,%.2f,%.2f going from %.2f,%.2f (foot %.2f%s) - %s", ht, hp[0], hp[1], hp[2],
+                        prevKin[0], prevKin[1], S.footY, S.air ? ", in the air" : "", slid ? "slid along one axis" : "held");
             }
         }
         float leash = S.stuck ? cfg.stuckLeash : cfg.leash;
@@ -4654,6 +4767,7 @@ void Apply(uintptr_t mgr) {
                 S.vy = S.airGap = 0;
                 S.tLastTp = 0;
                 S.tLand = now;
+                S.bldRecheck = true;
                 ++S.lands;
                 S.landV += kick::Impulse(-cfg.landDip * (0.25f + 0.75f * s), 5.f, 0.55f);
                 S.landPunch -= 0.4f + 2.0f * s;
@@ -5396,6 +5510,8 @@ bool VerifyGame() {
             g_flyOk ? "ok" : "OFF - flying heroes use the normal movement", cfg.fly, cfg.flyTakeoff, cfg.flyAhead, cfg.flyInterval,
             cfg.flyTurnDeg, cfg.flyEyeHeight);
         g_wallOk = PrintsMatch(Prints(kWallPrints904), "wall nav blocks (teleport hint)");
+        g_buildOk = PrintsMatch(Prints(kBuildPrints904), "building collision (segment query)");
+        Log("wall: building walls %s (building=%d)", g_buildOk ? "solid" : "OFF - can walk through buildings", cfg.building);
         Log("wall: city walls / building nav blocks %s (wall=%d)", g_wallOk ? "ok" : "OFF - terrain only, jumping still works", cfg.wall);
         Log("move: unit orders %s, entity halt %s, entity move %s, entity teleport %s (unavailable modes fall back to unit orders)",
             m ? "ok" : "OFF", h ? "ok" : "OFF", o ? "ok" : "OFF", t ? "ok" : "OFF");
