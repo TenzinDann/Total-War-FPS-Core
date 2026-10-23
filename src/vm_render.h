@@ -298,7 +298,11 @@ public:
     float LightLevel(double now) const;
     bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* depth, UINT w, UINT h,
               bool rtvEncodesSrgb, double now, const MuzzleFrame* f, const WorldCam* cam, const Settings& s);
-    void SetScene(ID3D11ShaderResourceView* srv, bool gamma) { scene_ = srv; sceneGamma_ = gamma; }
+    void SetScene(ID3D11ShaderResourceView* srv, bool gamma, ID3D11ShaderResourceView* depth = nullptr) {
+        scene_ = srv;
+        sceneGamma_ = gamma;
+        sceneDepth_ = depth;
+    }
     bool HasDistortion() const;
     void Release();
     bool Loaded() const { return vs_ != nullptr; }
@@ -364,6 +368,7 @@ private:
     ID3D11ShaderResourceView* tex_[11] = {};
     Sheet sheet_[11];
     ID3D11ShaderResourceView* scene_ = nullptr;
+    ID3D11ShaderResourceView* sceneDepth_ = nullptr;
     bool sceneGamma_ = false;
     int burst_ = 0;
     double tLastShot_ = -1.0;
@@ -572,6 +577,7 @@ public:
     ID3D11ShaderResourceView* SceneSrv() const { return sceneFresh_ ? sceneSrv_ : nullptr; }
     bool SceneGamma() const { return sceneGammaEnc_; }
     ID3D11ShaderResourceView* CopyForDistort(ID3D11DeviceContext* ctx, ID3D11Texture2D* backBuffer, UINT w, UINT h, bool* gamma);
+    ID3D11ShaderResourceView* DistortDepth() const { return distDepthOk_ ? distDepthSrv_ : nullptr; }
 private:
     struct Submesh {
         uint32_t firstIndex, indexCount;
@@ -626,6 +632,10 @@ private:
     UINT distW_ = 0, distH_ = 0;
     DXGI_FORMAT distFmt_ = DXGI_FORMAT_UNKNOWN;
     bool distBroken_ = false;
+    ID3D11Texture2D* distDepthTex_ = nullptr;
+    ID3D11ShaderResourceView* distDepthSrv_ = nullptr;
+    UINT distDepthW_ = 0, distDepthH_ = 0;
+    bool distDepthOk_ = false;
     static constexpr unsigned kMaxTextures = 64;
     ID3D11ShaderResourceView* srv_[kMaxTextures] = {};
     ID3D11ShaderResourceView* white_ = nullptr;

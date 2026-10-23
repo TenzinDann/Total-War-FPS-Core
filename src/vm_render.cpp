@@ -1635,12 +1635,15 @@ bool Renderer::EnsureDepth(UINT w, UINT h) {
     td.Width = w;
     td.Height = h;
     td.MipLevels = td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_D32_FLOAT;
+    td.Format = DXGI_FORMAT_R32_TYPELESS;
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    D3D11_DEPTH_STENCIL_VIEW_DESC dvd = {};
+    dvd.Format = DXGI_FORMAT_D32_FLOAT;
+    dvd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
     if (FAILED(dev_->CreateTexture2D(&td, nullptr, &depthTex_)) ||
-        FAILED(dev_->CreateDepthStencilView(depthTex_, nullptr, &dsv_))) {
+        FAILED(dev_->CreateDepthStencilView(depthTex_, &dvd, &dsv_))) {
         SafeRelease(dsv_);
         SafeRelease(depthTex_);
         return false;
@@ -1686,6 +1689,35 @@ ID3D11ShaderResourceView* Renderer::CopyForDistort(ID3D11DeviceContext* ctx, ID3
         distFmt_ = f;
     }
     ctx->CopySubresourceRegion(distTex_, 0, 0, 0, 0, backBuffer, 0, nullptr);
+    distDepthOk_ = false;
+    if (depthTex_ && depthW_ == w && depthH_ == h) {
+        if (!distDepthSrv_ || distDepthW_ != w || distDepthH_ != h) {
+            SafeRelease(distDepthSrv_);
+            SafeRelease(distDepthTex_);
+            D3D11_TEXTURE2D_DESC dd = {};
+            dd.Width = w;
+            dd.Height = h;
+            dd.MipLevels = dd.ArraySize = 1;
+            dd.Format = DXGI_FORMAT_R32_TYPELESS;
+            dd.SampleDesc.Count = 1;
+            dd.Usage = D3D11_USAGE_DEFAULT;
+            dd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            D3D11_SHADER_RESOURCE_VIEW_DESC vd = {};
+            vd.Format = DXGI_FORMAT_R32_FLOAT;
+            vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            vd.Texture2D.MipLevels = 1;
+            if (FAILED(dev_->CreateTexture2D(&dd, nullptr, &distDepthTex_)) || FAILED(dev_->CreateShaderResourceView(distDepthTex_, &vd, &distDepthSrv_))) {
+                SafeRelease(distDepthSrv_);
+                SafeRelease(distDepthTex_);
+            }
+            distDepthW_ = w;
+            distDepthH_ = h;
+        }
+        if (distDepthSrv_) {
+            ctx->CopyResource(distDepthTex_, depthTex_);
+            distDepthOk_ = true;
+        }
+    }
     if (gamma)
         *gamma = !(f == DXGI_FORMAT_R16G16B16A16_FLOAT || f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
     return distSrv_;
@@ -2717,6 +2749,10 @@ void Renderer::Release() {
     distW_ = distH_ = 0;
     distFmt_ = DXGI_FORMAT_UNKNOWN;
     distBroken_ = false;
+    SafeRelease(distDepthSrv_);
+    SafeRelease(distDepthTex_);
+    distDepthW_ = distDepthH_ = 0;
+    distDepthOk_ = false;
     for (auto*& s : srv_) SafeRelease(s);
     texCount_ = 0;
     delete[] subs_;
@@ -2832,7 +2868,7 @@ bool LoadCrosshair(const wchar_t* ini, CrosshairSettings& s) {
     return true;
 }
 namespace {
-const char kFlashShader[] = R"(cbuffer C : register(b0) { float4 opt; };
+const char kFlashShader[] = R"(cbuffer C : register(b0) { float4 opt; float4 opt2; };
 Texture2D T : register(t0);
 SamplerState S : register(s0);
 struct V { float2 p : POSITION; float2 uv : TEXCOORD0; float4 c : COLOR0; float3 m : TEXCOORD1; };
@@ -2846,6 +2882,7 @@ float4 PS(P i) : SV_TARGET {
     return i.m.x > 0.5 ? float4(c * a, 0) : float4(c * a, a);
 }
 Texture2D Sc : register(t1);
+Texture2D<float> Dp : register(t2);
 float4 PSD(P i) : SV_TARGET {
     float2 q = i.uv * 2 - 1;
     float r = length(q);
@@ -2856,7 +2893,12 @@ float4 PSD(P i) : SV_TARGET {
     float2 d = r > 1e-3 ? q / r : float2(0, 0);
     float2 off = (n * t.a * i.c.r - d * front * i.c.g) * i.c.b * edge * i.c.a;
     off.x *= opt.z / opt.w;
-    float3 c = Sc.SampleLevel(S, i.p.xy * opt.zw + off, 0).rgb;
+    float2 uv0 = i.p.xy * opt.zw, uv = uv0 + off;
+    if (opt2.x > 0.5) {
+        float4 g = Dp.Gather(S, uv);
+        if (min(min(g.x, g.y), min(g.z, g.w)) < i.p.z) uv = uv0;
+    }
+    float3 c = Sc.SampleLevel(S, uv, 0).rgb;
     if (opt.y > 0.5) c = pow(max(c, 0), 2.2);
     float a = saturate(edge * 4);
     return float4(c * a, a);
@@ -2869,6 +2911,7 @@ struct FlashVertex {
 };
 struct FlashCb {
     float opt[4];
+    float opt2[4];
 };
 constexpr int kFlashTexVent = 0, kFlashTexFire = 1, kFlashTexGlow = 2, kFlashTexSmoke = 3, kFlashTexSpark = 4;
 constexpr int kFlashTexGasJet = 5, kFlashTexGasPuff = 6;
@@ -3847,7 +3890,8 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
     if (FAILED(ctx->Map(vb_, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
     memcpy(m.pData, verts, sizeof(FlashVertex) * nv);
     ctx->Unmap(vb_, 0);
-    FlashCb cb = {{rtvEncodesSrgb ? 1.f : 0.f, rtvEncodesSrgb && sceneGamma_ ? 1.f : 0.f, 1.f / static_cast<float>(w), 1.f / static_cast<float>(h)}};
+    FlashCb cb = {{rtvEncodesSrgb ? 1.f : 0.f, rtvEncodesSrgb && sceneGamma_ ? 1.f : 0.f, 1.f / static_cast<float>(w), 1.f / static_cast<float>(h)},
+                  {depth && sceneDepth_ ? 1.f : 0.f, static_cast<float>(w), static_cast<float>(h), 0.f}};
     if (FAILED(ctx->Map(cb_, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
     memcpy(m.pData, &cb, sizeof cb);
     ctx->Unmap(cb_, 0);
@@ -3875,12 +3919,12 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
         ctx->PSSetShader(psDist_, nullptr, 0);
         for (int tx : {kFlashTexDistHaze, kFlashTexDistRing}) {
             if (!counts[tx] || !tex_[tx]) continue;
-            ID3D11ShaderResourceView* sv[2] = {tex_[tx], scene_};
-            ctx->PSSetShaderResources(0, 2, sv);
+            ID3D11ShaderResourceView* sv[3] = {tex_[tx], scene_, sceneDepth_};
+            ctx->PSSetShaderResources(0, 3, sv);
             ctx->Draw(static_cast<UINT>(counts[tx]), static_cast<UINT>(starts[tx]));
         }
-        ID3D11ShaderResourceView* none[2] = {};
-        ctx->PSSetShaderResources(0, 2, none);
+        ID3D11ShaderResourceView* none[3] = {};
+        ctx->PSSetShaderResources(0, 3, none);
         ctx->PSSetShader(ps_, nullptr, 0);
     }
     if (trCount) {
@@ -3926,6 +3970,7 @@ void MuzzleFlash::Release() {
     SafeRelease(samp_);
     for (int i = 0; i < kFlashTexCount; ++i) SafeRelease(tex_[i]);
     scene_ = nullptr;
+    sceneDepth_ = nullptr;
     burst_ = 0;
     tLastShot_ = -1.0;
     n_ = 0;

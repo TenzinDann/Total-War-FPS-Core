@@ -2103,7 +2103,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                             bool dg = false;
                             ID3D11ShaderResourceView* ds = Wp().flash.HasDistortion() ? Wp().rend.CopyForDistort(ctx, bb, td.Width, td.Height, &dg) : nullptr;
                             if (preGun) ds = Wp().rend.SceneSrv(), dg = Wp().rend.SceneGamma();
-                            Wp().flash.SetScene(ds, dg);
+                            Wp().flash.SetScene(ds, dg, preGun ? nullptr : Wp().rend.DistortDepth());
                         }
                         if (hasMf || hasCam)
                             Wp().flash.Draw(ctx, rtv, Wp().rend.Depth(td.Width, td.Height), td.Width, td.Height, hw, Now(), hasMf ? &mf : nullptr,
