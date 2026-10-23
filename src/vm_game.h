@@ -39,6 +39,7 @@ double FireInterval();
 bool CanFire();
 bool Reloading();
 void AmmoInfo(int* ammo, int* size, bool* reloading, int* reserve);
+void RefillAmmo(float frac);
 bool InfTacStamina();
 bool StartMagReload();
 void SelectWeapon(int n);
@@ -98,5 +99,4 @@ bool LauncherBusy();
 void LauncherCast(int kind, bool driven = false, float windup = 0.f);
 void LauncherFire();
 void LauncherAbort();
-void LauncherCue(int cue, int kind);
 }

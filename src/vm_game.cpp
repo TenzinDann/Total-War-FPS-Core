@@ -11,6 +11,7 @@
 namespace vmgame {
 void MagApply();
 void RefillForNewBattle();
+void AmmoRefillStep();
 namespace {
 RenderAddrs g_ra = {};
 const unsigned char kScCreateBytes[] = {0x4C, 0x8D, 0x83, 0x50, 0x13, 0x00, 0x00};
@@ -2096,6 +2097,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
             return;
         }
         RosterStep(dev);
+        AmmoRefillStep();
         SwitchStep(dev);
         PreloadStep(dev);
     }
@@ -2389,7 +2391,52 @@ LONG EffAmmoTotal(int i) {
     const auto& s = g_w[i].set;
     return s.ammoTotal > 0 && s.magSize > 0 && !s.magDisposable ? s.ammoTotal + g_ammoLevel[i] * s.ammoUpgrade : 0;
 }
+static volatile LONG g_refillMilli = 0;
+void RefillAmmo(float frac) {
+    if (!(frac > 0.f)) return;
+    LONG m = static_cast<LONG>(std::lround((frac > 4.f ? 4.f : frac) * 1000.f));
+    if (m > 0) InterlockedExchangeAdd(&g_refillMilli, m);
+}
+void AmmoRefillStep() {
+    LONG m = InterlockedExchange(&g_refillMilli, 0);
+    if (m <= 0) return;
+    int done = 0;
+    for (int i = 0; i < g_modelCount && i < kMaxModels; ++i) {
+        LONG tot = EffAmmoTotal(i);
+        if (tot <= 0) continue;
+        LONG add = static_cast<LONG>((static_cast<LONG64>(tot) * m + 500) / 1000);
+        if (i == g_mag.loadedModel && g_mag.size > 0) {
+            for (;;) {
+                LONG r = g_mag.reserve, a = g_mag.ammo;
+                if (r < 0) break;
+                LONG cap = tot - (a > 0 ? a : 0);
+                if (cap < 0) cap = 0;
+                LONG nr = r + add < cap ? r + add : cap;
+                if (nr <= r) break;
+                if (InterlockedCompareExchange(&g_mag.reserve, nr, r) == r) {
+                    g_log("weapon: ability ammo refill -> %ls reserve %ld -> %ld (current)", g_w[i].set.weaponId, r, nr);
+                    ++done;
+                    break;
+                }
+            }
+        } else {
+            LONG r = g_mag.reserveByModel[i];
+            if (r < 0) continue;
+            LONG a = g_mag.ammoByModel[i];
+            LONG cap = tot - (a >= 0 ? a : EffMagSize(i));
+            if (cap < 0) cap = 0;
+            LONG nr = r + add < cap ? r + add : cap;
+            if (nr > r) {
+                g_mag.reserveByModel[i] = nr;
+                g_log("weapon: ability ammo refill -> %ls reserve %ld -> %ld (stowed)", g_w[i].set.weaponId, r, nr);
+                ++done;
+            }
+        }
+    }
+    g_log("weapon: ability ammo refill %.3f of total -> %d weapon(s) topped up", m / 1000.0, done);
+}
 void RefillForNewBattle() {
+    InterlockedExchange(&g_refillMilli, 0);
     for (int i = 0; i < g_modelCount && i < kMaxModels; ++i) {
         const auto& s = g_w[i].set;
         LONG tot = EffAmmoTotal(i);
@@ -2706,9 +2753,6 @@ void LauncherCast(int kind, bool driven, float windup) {
 }
 void LauncherFire() { InterlockedExchange64(&g_lc.fireUs, static_cast<LONG64>(Now() * 1e6)); }
 void LauncherAbort() { InterlockedExchange64(&g_lc.abortUs, static_cast<LONG64>(Now() * 1e6)); }
-void LauncherCue(int cue, int kind) {
-    if (cue >= 0 && cue < 2 && kind >= 0 && kind < kLauncherKinds) InterlockedOr(&g_lc.cueReq, 1L << (cue * kLauncherKinds + kind));
-}
 bool MeleeActive() { return g_meleeOn != 0; }
 void MeleeInput(bool attack, bool block) { InterlockedExchange(&g_meleeIn, (attack ? 1 : 0) | (block ? 2 : 0)); }
 int TakeMeleeStrike(int* cat) {
