@@ -57,6 +57,8 @@ kick::Params g_kickP[kMaxModels];
 SRWLOCK g_kickLock = SRWLOCK_INIT;
 volatile LONG g_kickShots = 0;
 kick::GunSpring g_gunKick;
+volatile LONG g_jlJumpMilli = 0, g_jlLandMilli = 0;
+float g_jlX[2] = {}, g_jlV[2] = {};
 kick::Sustain g_sustain;
 kick::Jitter g_jitter;
 kick::Onset g_onset;
@@ -306,7 +308,6 @@ int g_unloadPending = 0;
 volatile LONG g_spent[kMaxModels] = {};
 LONG g_ammoLevel[kMaxModels] = {};
 volatile LONG g_infAmmo = 0;
-volatile LONG g_infTac = 0;
 FILETIME g_armoryTime = {};
 volatile LONG g_reqRoster = 0;
 volatile LONG g_reqWeapon = 0;
@@ -807,6 +808,28 @@ vm::Look ComputeLook() {
         for (int i = 0; i < 3; ++i) {
             l.kickRot[i] = (o.gunRot[i] + o.susRot[i] + o.onRot[i] + g_jitter.x[i]) * kick::kDeg;
             l.kickPivot[i] = kp.gunPivot[i];
+        }
+    }
+    {
+        static const float kJlSpring[2] = {6.f, 0.45f};
+        float jump = InterlockedExchange(&g_jlJumpMilli, 0) * 1e-3f, land = InterlockedExchange(&g_jlLandMilli, 0) * 1e-3f;
+        if (!g_fp) {
+            g_jlX[0] = g_jlX[1] = g_jlV[0] = g_jlV[1] = 0.f;
+        } else {
+            float k = 1.f - 0.7f * g_mo.adsW;
+            if (jump > 0.f) {
+                g_jlV[0] += kick::Impulse(-0.010f * k * jump, kJlSpring[0], kJlSpring[1]);
+                g_jlV[1] += kick::Impulse(-0.6f * k * jump, kJlSpring[0], kJlSpring[1]);
+                Wp().stepFoot.Play(Wp().set.stepFootVolume * 0.6f);
+            }
+            if (land > 0.f) {
+                g_jlV[0] += kick::Impulse(-(0.012f + 0.030f * land) * k, kJlSpring[0], kJlSpring[1]);
+                g_jlV[1] += kick::Impulse(-(0.8f + 3.0f * land) * k, kJlSpring[0], kJlSpring[1]);
+                Wp().stepFoot.Play(Wp().set.stepFootVolume * (0.8f + 0.7f * land));
+            }
+            kick::StepSprings(g_jlX, g_jlV, 2, kJlSpring, dt);
+            l.kickPos[1] += g_jlX[0];
+            l.kickRot[0] += g_jlX[1] * kick::kDeg;
         }
     }
     return l;
@@ -1763,7 +1786,6 @@ void RosterStep(ID3D11Device* dev) {
     static char ammoUp[kMaxModels * 72];
     ammoUp[0] = 0;
     char infAmmo[16] = "";
-    char infTac[16] = "";
     if (FILE* f = _wfopen(path, L"r")) {
         static char line[kMaxModels * 64 + 64];
         while (fgets(line, sizeof line, f)) {
@@ -1774,7 +1796,6 @@ void RosterStep(ID3D11Device* dev) {
             if (!strncmp(line, "loadout=", 8)) snprintf(loadout, sizeof loadout, "%s", line + 8);
             if (!strncmp(line, "ammo_up=", 8)) snprintf(ammoUp, sizeof ammoUp, "%s", line + 8);
             if (!strncmp(line, "inf_ammo=", 9)) snprintf(infAmmo, sizeof infAmmo, "%s", line + 9);
-            if (!strncmp(line, "inf_tac=", 8)) snprintf(infTac, sizeof infTac, "%s", line + 8);
         }
         fclose(f);
     }
@@ -1799,9 +1820,6 @@ void RosterStep(ID3D11Device* dev) {
         LONG inf = camp && !strcmp(infAmmo, "1") ? 1 : 0;
         if (InterlockedExchange(&g_infAmmo, inf) != inf || inf)
             g_log("weapon: infinite ammo (MCT) %s ('%s', %s)", inf ? "ON" : "off", infAmmo, camp ? "campaign" : "not campaign");
-        LONG tac = camp && !strcmp(infTac, "1") ? 1 : 0;
-        if (InterlockedExchange(&g_infTac, tac) != tac || tac)
-            g_log("move: infinite tactical sprint stamina (MCT) %s ('%s', %s)", tac ? "ON" : "off", infTac, camp ? "campaign" : "not campaign");
     }
     WIN32_FILE_ATTRIBUTE_DATA fa;
     if (GetFileAttributesExW(path, GetFileExInfoStandard, &fa) &&
@@ -2371,7 +2389,6 @@ bool Reloading() {
     MagTick();
     return g_mag.reload != 0;
 }
-bool InfTacStamina() { return g_infTac != 0; }
 void AmmoInfo(int* ammo, int* size, bool* reloading, int* reserve) {
     LONG s = g_mag.size, a = g_mag.ammo, r = g_mag.reserve;
     *size = s > 0 ? static_cast<int>(s) : 0;
@@ -2633,6 +2650,10 @@ void ShieldGame(float* weight, float* moveScale, float* zoomKeep) {
     *zoomKeep = 1.f - (1.f - g_sh.zoomMilli * 1e-3f) * w;
 }
 float ShieldCamKick() { return InterlockedExchange(&g_sh.camKickMdeg, 0) * 1e-3f; }
+void MoveImpulse(float jump, float land) {
+    if (jump > 0.f) InterlockedExchangeAdd(&g_jlJumpMilli, static_cast<LONG>(jump * 1000.f + 0.5f));
+    if (land > 0.f) InterlockedExchangeAdd(&g_jlLandMilli, static_cast<LONG>(land * 1000.f + 0.5f));
+}
 bool LauncherConfigured() { return Enabled() && g_lc.configured; }
 UINT LauncherFireKey() { return g_lc.fireKey; }
 UINT LauncherSwitchKey() { return g_lc.switchKey; }
@@ -2662,9 +2683,6 @@ void LauncherCast(int kind, bool driven, float windup) {
 }
 void LauncherFire() { InterlockedExchange64(&g_lc.fireUs, static_cast<LONG64>(Now() * 1e6)); }
 void LauncherAbort() { InterlockedExchange64(&g_lc.abortUs, static_cast<LONG64>(Now() * 1e6)); }
-void LauncherCue(int cue, int kind) {
-    if (cue >= 0 && cue < 2 && kind >= 0 && kind < kLauncherKinds) InterlockedOr(&g_lc.cueReq, 1L << (cue * kLauncherKinds + kind));
-}
 bool MeleeActive() { return g_meleeOn != 0; }
 void MeleeInput(bool attack, bool block) { InterlockedExchange(&g_meleeIn, (attack ? 1 : 0) | (block ? 2 : 0)); }
 int TakeMeleeStrike() { return static_cast<int>(InterlockedExchange(&g_meleeStrike, 0)) - 1; }

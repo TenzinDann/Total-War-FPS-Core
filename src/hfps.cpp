@@ -219,6 +219,15 @@ const CodePrint kFlyPrints904[] = {
 constexpr uintptr_t oUiCanFly = 0x70f, oUiAlwaysFly = 0x710, oUiCanToggleFly = 0x711, oUiIsFlying = 0x712;
 constexpr uintptr_t kFnFlyCmdCtor904 = 0x2ea9358, kFnFlyCmdIssue904 = 0x1e3f410;
 bool g_flyOk = false;
+const CodePrint kWallPrints904[] = {
+    {0x2dc67a8, 0x1ab, 0xb8fa363f9006326full},
+    {0x30b3cf8, 0xa3, 0x73b7107b30625308ull},
+    {0x183327c, 0x3a, 0x0210c7b5522ef8adull},
+    {0x2ddb148, 0x91, 0xec20489e15abcf80ull},
+    {0x2ed623c, 0x13b, 0x43539aee1c8b6d43ull}};
+constexpr uintptr_t kFnNavEntryValid904 = 0x30b3cf8, kFnBlockContains904 = 0x183327c;
+constexpr uintptr_t oWorldNavEntries = 0x108, oWorldNavGrid = 0x138, oBlkPoly = 0x10, oBlkPlane = 0x6c;
+bool g_wallOk = false;
 constexpr uintptr_t oUnitAbilityMgr = 0x3d48, oAbMgrEnd = 0x20, oAbMgrFirst = 0x28, oAbNodeNext = 0x8, oAbNodeDef = 0x70, oAbNodeInst = 0x10;
 constexpr uintptr_t oAbDefId = 0x8, oAbDefWindup = 0x30, oAbDefRange = 0x54, oAbRecId = 0x50;
 constexpr uintptr_t oAbWindSteps = 0x120, oAbCooldown = 0x134, oAbUses = 0xb4, oAbFlags = 0x170;
@@ -435,10 +444,6 @@ struct Config {
     float runSpeed = 6.0f;
     float walkSpeed = 2.5f;
     float sprintSpeed = 10.0f;
-    float tacStamina = 15.f;
-    float tacStaminaRegen = 5.f;
-    float tacStaminaDelay = 1.f;
-    float tacStaminaMin = 0.25f;
     float tacSprintSpeed = 12.5f;
     float tacSprintToFire = 0.3f;
     float adsMoveScale = 0.6f;
@@ -451,6 +456,8 @@ struct Config {
     float leash = 3.0f;
     float stuckLeash = 0.6f;
     float tpLead = 0.2f;
+    bool wall = true;
+    float stepUp = 0.6f, stepDown = 0.8f, gravity = 20.3f, jumpHeight = 1.0f, airControl = 0.35f, airTpMax = 1.5f, landDip = 0.12f;
     bool ghost = false;
     bool revealEnemies = true;
     bool noMelee = true;
@@ -614,14 +621,6 @@ void LoadConfig() {
     cfg.sprintToFire = IniF(L"fire", L"sprint_to_fire", cfg.sprintToFire, ini);
     cfg.tacSprintSpeed = IniF(L"move", L"tac_sprint_speed", cfg.tacSprintSpeed, ini);
     cfg.tacSprintToFire = IniF(L"fire", L"tac_sprint_to_fire", cfg.tacSprintToFire, ini);
-    cfg.tacStamina = IniF(L"move", L"tac_stamina", cfg.tacStamina, ini);
-    cfg.tacStaminaRegen = IniF(L"move", L"tac_stamina_regen", cfg.tacStaminaRegen, ini);
-    cfg.tacStaminaDelay = IniF(L"move", L"tac_stamina_delay", cfg.tacStaminaDelay, ini);
-    cfg.tacStaminaMin = IniF(L"move", L"tac_stamina_min", cfg.tacStaminaMin, ini);
-    if (!(cfg.tacStamina > 0.2f && cfg.tacStamina < 600.f)) cfg.tacStamina = 15.f;
-    if (!(cfg.tacStaminaRegen > 0.2f && cfg.tacStaminaRegen < 600.f)) cfg.tacStaminaRegen = 5.f;
-    if (!(cfg.tacStaminaDelay >= 0.f && cfg.tacStaminaDelay < 30.f)) cfg.tacStaminaDelay = 1.f;
-    if (!(cfg.tacStaminaMin >= 0.f && cfg.tacStaminaMin <= 1.f)) cfg.tacStaminaMin = 0.25f;
     if (cfg.tacSprintSpeed < 0.5f || cfg.tacSprintSpeed > 40.f) cfg.tacSprintSpeed = 12.5f;
     if (cfg.tacSprintToFire < 0.f || cfg.tacSprintToFire > 2.f) cfg.tacSprintToFire = 0.3f;
     cfg.adsZoom = IniF(L"camera", L"ads_zoom", cfg.adsZoom, ini);
@@ -661,6 +660,23 @@ void LoadConfig() {
     if (cfg.tpShotGuard != 0.f && (cfg.tpShotGuard < 0.5f || cfg.tpShotGuard > 3.f)) cfg.tpShotGuard = 1.1f;
     cfg.tpLead = IniF(L"move", L"teleport_lead", cfg.tpLead, ini);
     if (cfg.tpLead < 0.f || cfg.tpLead > 0.6f) cfg.tpLead = 0.2f;
+    cfg.wall = GetPrivateProfileIntW(L"move", L"wall", 1, ini) != 0;
+    cfg.stepUp = IniF(L"move", L"step_up", 0.6f, ini);
+    cfg.stepDown = IniF(L"move", L"step_down", 0.8f, ini);
+    cfg.gravity = IniF(L"move", L"gravity", 20.3f, ini);
+    cfg.jumpHeight = IniF(L"move", L"jump_height", 1.0f, ini);
+    cfg.airControl = IniF(L"move", L"air_control", 0.35f, ini);
+    cfg.airTpMax = IniF(L"move", L"air_teleport_max", 1.5f, ini);
+    cfg.landDip = IniF(L"move", L"land_dip", 0.12f, ini);
+    if (!(cfg.stepUp >= 0.05f && cfg.stepUp <= 3.f)) cfg.stepUp = 0.6f;
+    if (!(cfg.stepDown >= 0.05f && cfg.stepDown <= 5.f)) cfg.stepDown = 0.8f;
+    if (!(cfg.gravity >= 1.f && cfg.gravity <= 100.f)) cfg.gravity = 20.3f;
+    if (!(cfg.jumpHeight >= 0.f && cfg.jumpHeight <= 5.f)) cfg.jumpHeight = 1.0f;
+    if (!(cfg.airControl >= 0.f && cfg.airControl <= 5.f)) cfg.airControl = 0.35f;
+    if (!(cfg.airTpMax >= 0.f && cfg.airTpMax <= 50.f)) cfg.airTpMax = 1.5f;
+    if (!(cfg.landDip >= 0.f && cfg.landDip <= 0.5f)) cfg.landDip = 0.12f;
+    Log("wall: wall=%d step_up=%.2f step_down=%.2f gravity=%.1f jump_height=%.2f air_control=%.2f air_teleport_max=%.2f land_dip=%.3f",
+        cfg.wall, cfg.stepUp, cfg.stepDown, cfg.gravity, cfg.jumpHeight, cfg.airControl, cfg.airTpMax, cfg.landDip);
     cfg.revealEnemies = GetPrivateProfileIntW(L"hero", L"reveal_enemies", 1, ini) != 0;
     cfg.noMelee = GetPrivateProfileIntW(L"hero", L"no_melee", 1, ini) != 0;
     cfg.noKnock = GetPrivateProfileIntW(L"hero", L"no_knockdown", 1, ini) != 0;
@@ -934,6 +950,11 @@ struct State {
     bool unitSync = false;
     bool kinInit = false;
     float kinPos[2] = {0, 0}, kinVel[2] = {0, 0}, kinY = 0, lastTp[2] = {0, 0};
+    float footY = 0, vy = 0, airGap = 0, airStartY = 0, landY = 0, landV = 0, landPunch = 0;
+    uintptr_t footBlk = 0;
+    bool air = false, airFar = false, spacePrev = false;
+    double tAir = 0, tLand = -1, tWallCheck = 0;
+    unsigned jumps = 0, drops = 0, lands = 0, blocks = 0, wallLogs = 0;
     double tLastTp = 0;
     unsigned tpSent = 0, tpFailed = 0, tpLogs = 0, leashHits = 0;
     int lastMode = -1;
@@ -996,35 +1017,6 @@ struct State {
     long sumDx = 0, sumDy = 0;
 } S;
 volatile LONG g_reqToggle = 0, g_reqExit = 0;
-struct TacStamina {
-    float st = 1.f;
-    double lastTac = -1e9;
-    uintptr_t unit = 0;
-    int logs = 0;
-} g_tac;
-bool TacStaminaOk() { return vmgame::InfTacStamina() || g_tac.st >= cfg.tacStaminaMin; }
-void TacStaminaStep(double now, float dt) {
-    if (S.unit != g_tac.unit) g_tac.unit = S.unit, g_tac.st = 1.f, g_tac.lastTac = -1e9;
-    if (dt < 0.f) dt = 0.f;
-    if (dt > 0.25f) dt = 0.25f;
-    if (vmgame::InfTacStamina()) {
-        g_tac.st = 1.f;
-        if (S.tac) g_tac.lastTac = now;
-        return;
-    }
-    if (S.tac) {
-        g_tac.lastTac = now;
-        g_tac.st -= dt / cfg.tacStamina;
-        if (g_tac.st <= 0.f) {
-            g_tac.st = 0.f;
-            S.tac = false;
-            if (g_tac.logs++ < 6) Log("stance: tactical sprint stamina empty - back to sprint (%.0f s to refill)", cfg.tacStaminaRegen);
-        }
-    } else if (now - g_tac.lastTac >= cfg.tacStaminaDelay) {
-        g_tac.st += dt / cfg.tacStaminaRegen;
-        if (g_tac.st > 1.f) g_tac.st = 1.f;
-    }
-}
 struct CastState {
     volatile LONG armed = 0;
     volatile LONG q[16] = {};
@@ -1460,7 +1452,17 @@ float SegDist2D(float px, float pz, const float* a, const float* b) {
     float dx = wx - ux * k, dz = wz - uz * k;
     return std::sqrt(dx * dx + dz * dz);
 }
-bool MakeDestAt(float x, float z, float* dest);
+bool MakeDestAt(float x, float z, float* dest, uintptr_t hint = 0);
+struct Surf {
+    float h;
+    uintptr_t blk;
+};
+constexpr int kMaxSurf = 8;
+constexpr uintptr_t kNoSurf = ~uintptr_t(0);
+int SurfacesAt(float x, float z, Surf* out);
+int PickSurface(const Surf* s, int n, uintptr_t cur, float foot, float up);
+int WalkPick(const Surf* s, int n, uintptr_t cur, float foot, float up, float down, bool* edge);
+bool SurfaceNear(float x, float z, float refY, float* h, uintptr_t* blk = nullptr);
 struct AimHit {
     float dist = 0;
     const char* what = "range";
@@ -1783,9 +1785,9 @@ bool MeleeStrike(int kind, const float eye[3], const float fwd[3]) {
     c.projId = id;
     c.f0c = 6.2831855f;
     float burst[3] = {eye[0] + hx * mk.reach, eye[1] - 1.3f, eye[2] + hz * mk.reach};
-    alignas(16) float g[8];
-    bool ground = MakeDestAt(burst[0], burst[2], g) && g[1] < eye[1] + 3.f && g[1] > eye[1] - 10.f;
-    if (ground) burst[1] = g[1] + kMeleeBurstUp;
+    float gh = 0.f;
+    bool ground = SurfaceNear(burst[0], burst[2], eye[1] - cfg.eyeHeight, &gh) && gh < eye[1] + 3.f && gh > eye[1] - 10.f;
+    if (ground) burst[1] = gh + kMeleeBurstUp;
     float dir[3] = {burst[0] - eye[0], burst[1] - (eye[1] - 0.5f), burst[2] - eye[2]};
     float dl = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
     if (dl < 0.1f) return false;
@@ -2191,11 +2193,10 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     }
     for (int i = 0; i < 3; ++i) c.launch[i] = eye[i] + ray[i] * d;
     float vis[3] = {c.launch[0], c.launch[1], c.launch[2]};
-    alignas(16) float g[8];
-    float groundY = 0;
-    if (MakeDestAt(c.launch[0], c.launch[2], g) && c.launch[1] < g[1] + 0.25f && c.launch[1] > g[1] - 5.f) {
-        groundY = g[1];
-        c.launch[1] = g[1] + 0.25f;
+    float groundY = 0, gh = 0;
+    if (SurfaceNear(c.launch[0], c.launch[2], eye[1] - cfg.eyeHeight, &gh) && c.launch[1] < gh + 0.25f && c.launch[1] > gh - 5.f) {
+        groundY = gh;
+        c.launch[1] = gh + 0.25f;
     }
     c.tgtIsPos = 1;
     c.shooter = cfg.fireShooter ? S.entity : 0;
@@ -2465,7 +2466,7 @@ bool IssueOvrHalt() {
     if (S.moveLogs++ < 12) Log("move(entity): halt issued=%d entityId=%d", ok, entId);
     return ok;
 }
-bool MakeDestAt(float x, float z, float* dest ) {
+bool MakeDestAt(float x, float z, float* dest , uintptr_t hint) {
     uintptr_t battle = 0;
     if (!CmdQueue(&battle)) return false;
     uintptr_t pm = Ptr(Ptr(battle + oBattlePath) + oPathMgr);
@@ -2473,8 +2474,90 @@ bool MakeDestAt(float x, float z, float* dest ) {
     using FnDest = void* (*)(uintptr_t, void*, const float*, uintptr_t, int);
     const float xz[2] = {x, z};
     memset(dest, 0, 32);
-    reinterpret_cast<FnDest>(g_base + kFnMakeDest)(pm, dest, xz, 0, 1);
+    reinterpret_cast<FnDest>(g_base + kFnMakeDest)(pm, dest, xz, g_wallOk ? hint : 0, 1);
     return std::isfinite(dest[0]) && std::isfinite(dest[1]) && std::isfinite(dest[2]);
+}
+int SurfacesAt(float x, float z, Surf* out) {
+    alignas(16) float d[8];
+    int n = 0;
+    if (MakeDestAt(x, z, d)) out[n++] = {d[1], 0};
+    if (!g_wallOk || !cfg.wall) return n;
+    uintptr_t battle = 0;
+    if (!CmdQueue(&battle)) return n;
+    uintptr_t world = Ptr(battle + oBattlePath);
+    uintptr_t grid = world ? Ptr(world + oWorldNavGrid) : 0, pool = world ? Ptr(world + oWorldNavEntries) : 0;
+    uintptr_t cells = grid ? Ptr(grid) : 0, ents = pool ? Ptr(pool + 8) : 0;
+    float scale = 0;
+    int32_t off = 0;
+    uint32_t maxIdx = 0, shift = 0, head = 0;
+    if (!cells || !ents || !Rd(grid + 0x2c, scale) || !Rd(grid + 0x18, off) || !Rd(grid + 0x1c, maxIdx) || !Rd(grid + 0x10, shift) ||
+        !(scale > 0.f && scale < 100.f) || maxIdx > (1u << 20))
+        return n;
+    shift &= 31;
+    static uintptr_t s_loggedGrid = 0;
+    if (s_loggedGrid != grid) {
+        s_loggedGrid = grid;
+        Log("wall: nav block grid %p (%.3f cells/m, offset %d, max %u, shift %u), entries %p", (void*)grid, scale, off, maxIdx, shift,
+            (void*)ents);
+    }
+    uint32_t xi = static_cast<uint32_t>(static_cast<int32_t>(std::floor(scale * x)) + off);
+    uint32_t zi = static_cast<uint32_t>(static_cast<int32_t>(std::floor(scale * z)) + off);
+    if (xi > maxIdx) xi = maxIdx;
+    if (zi > maxIdx) zi = maxIdx;
+    if (!Rd(cells + (static_cast<uintptr_t>(xi) + (static_cast<uintptr_t>(zi) << shift)) * 4, head)) return n;
+    using FnValid = char (*)(uintptr_t);
+    using FnContains = char (*)(uintptr_t, const float*, float);
+    const float xz[2] = {x, z};
+    for (int guard = 0; head != 0xffffff && guard < 256; ++guard) {
+        uintptr_t e = ents + static_cast<uintptr_t>(head) * 0x18;
+        uint64_t link = 0;
+        if (!Rd(e + 0x10, link)) break;
+        uintptr_t blk = Ptr(e + 8);
+        if ((link & 0xffff) == 0x100 && blk && n < kMaxSurf && reinterpret_cast<FnValid>(g_base + kFnNavEntryValid904)(e) == 1) {
+            uintptr_t poly = Ptr(blk + oBlkPoly);
+            float pl[4] = {};
+            bool dup = false;
+            for (int i = 0; i < n; ++i) dup = dup || out[i].blk == blk;
+            if (!dup && poly && Rd(blk + oBlkPlane, pl) && std::fabs(pl[1]) > 1e-4f &&
+                reinterpret_cast<FnContains>(g_base + kFnBlockContains904)(poly, xz, 0.f) == 1) {
+                float h = -(pl[0] * x + pl[2] * z + pl[3]) / pl[1];
+                if (std::isfinite(h)) out[n++] = {h, blk};
+            }
+        }
+        head = static_cast<uint32_t>(link >> 40);
+    }
+    return n;
+}
+int PickSurface(const Surf* s, int n, uintptr_t cur, float foot, float up) {
+    int same = -1, best = -1;
+    for (int i = 0; i < n; ++i) {
+        if (s[i].blk == cur) same = i;
+        if (s[i].h <= foot + up && (best < 0 || s[i].h > s[best].h)) best = i;
+    }
+    if (same >= 0 && s[same].h > foot + up) return same;
+    return best >= 0 ? best : same;
+}
+int WalkPick(const Surf* s, int n, uintptr_t cur, float foot, float up, float down, bool* edge) {
+    *edge = false;
+    int i = PickSurface(s, n, cur, foot, up);
+    if (i >= 0 && foot - s[i].h > down) {
+        for (int j = 0; j < n; ++j)
+            if (s[j].h > foot + up) return -1;
+        *edge = true;
+    }
+    return i;
+}
+bool SurfaceNear(float x, float z, float refY, float* h, uintptr_t* blk) {
+    Surf s[kMaxSurf];
+    int n = SurfacesAt(x, z, s);
+    if (!n) return false;
+    int i = PickSurface(s, n, kNoSurf, refY, 1.0f);
+    if (i < 0)
+        for (int j = 0; j < n; ++j)
+            if (i < 0 || s[j].h < s[i].h) i = j;
+    *h = s[i].h;
+    if (blk) *blk = s[i].blk;
+    return true;
 }
 bool IssueTeleport(const float* dest) {
     int32_t entId = 0;
@@ -2537,7 +2620,10 @@ void ExitSequenceStep(uintptr_t mgr) {
     }
     if (S.exitStage == 1) {
         alignas(16) float dest[8];
-        if (!CmdQueue(nullptr) || !MakeDestAt(S.exitPos[0], S.exitPos[1], dest)) return;
+        uintptr_t eb = 0;
+        float eh = 0.f;
+        if (!(S.kinInit && SurfaceNear(S.exitPos[0], S.exitPos[1], S.footY, &eh, &eb))) eb = 0;
+        if (!CmdQueue(nullptr) || !MakeDestAt(S.exitPos[0], S.exitPos[1], dest, eb)) return;
         if (!IssueUnitEnabled(true)) return;
         bool tp = g_tpOk && IssueTeleport(dest);
         Log("ghost: hero re-enabled and placed at the camera %.2f,%.2f (teleport %d)", S.exitPos[0], S.exitPos[1], tp);
@@ -2717,9 +2803,14 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
     if (!CmdQueue(&battle)) return h;
     auto below = [&](float t, bool* known) {
         float p[3] = {eye[0] + fwd[0] * t, eye[1] + fwd[1] * t, eye[2] + fwd[2] * t};
+        Surf s[kMaxSurf];
+        int n = SurfacesAt(p[0], p[2], s);
         alignas(16) float g[8];
-        *known = MakeDestAt(p[0], p[2], g) && std::fabs(g[0] - p[0]) < 1.5f && std::fabs(g[2] - p[2]) < 1.5f;
-        return *known && p[1] <= g[1];
+        *known = n > 0 && (s[0].blk || (MakeDestAt(p[0], p[2], g) && std::fabs(g[0] - p[0]) < 1.5f && std::fabs(g[2] - p[2]) < 1.5f));
+        if (!*known) return false;
+        for (int i = 0; i < n; ++i)
+            if (p[1] <= s[i].h && (!s[i].blk || s[i].h <= eye[1] + 0.05f)) return true;
+        return false;
     };
     float prev = 0.5f;
     for (float t = 2.f; t <= range; t += 3.f) {
@@ -3758,8 +3849,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -3830,7 +3919,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -3846,8 +3934,9 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
         if (pass == 0) hmax = lim;
         if (h > hmax && h > 1e-3f) P[0] = H[0] + dx * hmax / h, P[2] = H[2] + dz * hmax / h;
         alignas(16) float dest[8];
+        float sh = 0.f;
         if (MakeDestAt(P[0], P[2], dest) && std::fabs(dest[0] - P[0]) < 3.f && std::fabs(dest[2] - P[2]) < 3.f)
-            P[1] = dest[1];
+            P[1] = SurfaceNear(P[0], P[2], P[1], &sh) ? sh : dest[1];
         else if (pass == 0)
             P[1] = H[1];
     }
@@ -3912,26 +4001,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -4111,10 +4191,9 @@ void Apply(uintptr_t mgr) {
         } else if (tap && canSprint) {
             if (!S.sprint)
                 S.sprint = true;
-            else if (!vmgame::ShieldWanted() && TacStaminaOk())
+            else if (!vmgame::ShieldWanted())
                 S.tac = true;
         }
-        TacStaminaStep(now, dt);
         S.ads = rmb && !S.sprint && !reloading && !vmgame::MeleeActive();
         if (S.ads && !wasAds) S.adsKind = now < S.fireBlock ? (S.exitTac ? 2 : 1) : 0;
         if (!S.ads) S.adsKind = 0;
@@ -4142,7 +4221,22 @@ void Apply(uintptr_t mgr) {
             S.kinVel[0] = S.kinVel[1] = 0;
             S.kinY = raw[1];
             S.kinInit = true;
-            if (MakeDestAt(raw[0], raw[2], dest) && IssueTeleport(dest)) {
+            S.footY = raw[1];
+            S.footBlk = 0;
+            S.air = S.airFar = false;
+            S.vy = S.airGap = S.landY = S.landV = S.landPunch = 0;
+            S.tLand = -1;
+            {
+                Surf sf[kMaxSurf];
+                int ns = SurfacesAt(raw[0], raw[2], sf), bi = -1;
+                for (int i = 0; i < ns; ++i)
+                    if (bi < 0 || std::fabs(sf[i].h - raw[1]) < std::fabs(sf[bi].h - raw[1])) bi = i;
+                if (bi >= 0 && std::fabs(sf[bi].h - raw[1]) < 3.f) S.footY = sf[bi].h, S.footBlk = sf[bi].blk;
+                if (S.wallLogs++ < 80)
+                    Log("wall: enter at %.2f,%.2f,%.2f on %s %p (h %.2f, %d layer(s) here%s)", raw[0], raw[1], raw[2],
+                        S.footBlk ? "block" : "terrain", (void*)S.footBlk, S.footY, ns, g_wallOk && cfg.wall ? "" : ", nav blocks OFF");
+            }
+            if (MakeDestAt(raw[0], raw[2], dest, S.footBlk) && IssueTeleport(dest)) {
                 ++S.tpSent;
                 RecordTp(now, dest[0], dest[2]);
             } else {
@@ -4186,7 +4280,7 @@ void Apply(uintptr_t mgr) {
             S.pinned = pinned;
         }
         bool judged = false, follow = false;
-        bool unbound = S.ghostWanted;
+        bool unbound = S.ghostWanted || S.airFar || (S.tLand > 0 && now - S.tLand < 0.5);
         if (unbound || pinned) judged = true, follow = true;
         for (const TpRec& r : S.tpHist) {
             if (unbound || pinned) break;
@@ -4223,13 +4317,33 @@ void Apply(uintptr_t mgr) {
                     : S.sprint ? cfg.sprintSpeed : cfg.runSpeed * (1.f - (1.f - cfg.adsMoveScale) * S.adsT);
         spd *= shieldMove;
         (void)run;
+        bool space = fg && KeyDown(VK_SPACE);
+        if (space && !S.spacePrev && !S.air && !pinned && !S.stuck && !paused && cfg.jumpHeight > 0.f) {
+            S.air = true;
+            S.vy = std::sqrt(2.f * cfg.gravity * cfg.jumpHeight);
+            S.airStartY = S.footY;
+            S.airGap = 0;
+            S.tAir = now;
+            ++S.jumps;
+            vmgame::MoveImpulse(1.f, 0.f);
+            if (S.wallLogs++ < 80)
+                Log("wall: jump at %.2f,%.2f foot %.2f on %s, up %.2f m/s", S.kinPos[0], S.kinPos[1], S.footY, S.footBlk ? "block" : "terrain",
+                    S.vy);
+        }
+        S.spacePrev = space;
+        if (pinned && S.air) {
+            S.air = S.airFar = false;
+            S.vy = 0;
+        }
+        const float prevKin[2] = {S.kinPos[0], S.kinPos[1]};
         if (pinned) {
             float kp = dt > 0.f ? 1.f - std::exp(-dt / 0.08f) : 1.f;
             S.kinPos[0] += (S.outPos[0] - S.kinPos[0]) * kp;
             S.kinPos[1] += (S.outPos[2] - S.kinPos[1]) * kp;
             S.kinVel[0] = S.kinVel[1] = 0;
         } else if (dt > 0.f && !paused) {
-            float a = cfg.accelTau > 0.001f ? 1.f - std::exp(-dt / cfg.accelTau) : 1.f;
+            float tau = S.air ? cfg.airControl : cfg.accelTau;
+            float a = tau > 0.001f ? 1.f - std::exp(-dt / tau) : 1.f;
             S.kinVel[0] += (mx * spd - S.kinVel[0]) * a;
             S.kinVel[1] += (mz * spd - S.kinVel[1]) * a;
             if (!wantMove && S.kinVel[0] * S.kinVel[0] + S.kinVel[1] * S.kinVel[1] < 0.01f) S.kinVel[0] = S.kinVel[1] = 0;
@@ -4247,15 +4361,115 @@ void Apply(uintptr_t mgr) {
             S.kinPos[1] -= ez * (1.f - leash / ed) * k2;
             ++S.leashHits;
         }
-        bool haveDest = MakeDestAt(S.kinPos[0], S.kinPos[1], dest);
-        float groundY = (haveDest && std::fabs(dest[1] - raw[1]) < 30.f) ? dest[1] : raw[1];
-        S.kinY += (groundY - S.kinY) * (dt > 0.f ? 1.f - std::exp(-dt / 0.05f) : 1.f);
+        Surf sf[kMaxSurf];
+        int ns = SurfacesAt(S.kinPos[0], S.kinPos[1], sf), si = -1;
+        if (ns && pinned) {
+            for (int i = 0; i < ns; ++i)
+                if (si < 0 || std::fabs(sf[i].h - S.outPos[1]) < std::fabs(sf[si].h - S.outPos[1])) si = i;
+        } else if (ns && !S.air) {
+            bool edge = false;
+            si = WalkPick(sf, ns, S.footBlk, S.footY, cfg.stepUp, cfg.stepDown, &edge);
+            if (si < 0) {
+                const float tryPos[2][2] = {{S.kinPos[0], prevKin[1]}, {prevKin[0], S.kinPos[1]}};
+                bool slid = false;
+                for (int t = 0; t < 2 && !slid; ++t) {
+                    if (tryPos[t][0] == prevKin[0] && tryPos[t][1] == prevKin[1]) continue;
+                    Surf s2[kMaxSurf];
+                    bool e2 = false;
+                    int n2 = SurfacesAt(tryPos[t][0], tryPos[t][1], s2);
+                    int i2 = n2 ? WalkPick(s2, n2, S.footBlk, S.footY, cfg.stepUp, cfg.stepDown, &e2) : -1;
+                    if (i2 >= 0) {
+                        S.kinPos[0] = tryPos[t][0];
+                        S.kinPos[1] = tryPos[t][1];
+                        S.kinVel[t == 0 ? 1 : 0] = 0;
+                        memcpy(sf, s2, sizeof sf);
+                        ns = n2;
+                        si = i2;
+                        edge = e2;
+                        slid = true;
+                    }
+                }
+                if (!slid) {
+                    S.kinPos[0] = prevKin[0];
+                    S.kinPos[1] = prevKin[1];
+                    S.kinVel[0] = S.kinVel[1] = 0;
+                    ns = SurfacesAt(S.kinPos[0], S.kinPos[1], sf);
+                    si = ns ? WalkPick(sf, ns, S.footBlk, S.footY, cfg.stepUp, cfg.stepDown, &edge) : -1;
+                }
+                if (S.blocks++ < 20) Log("wall: blocked at %.2f,%.2f (foot %.2f, nothing within step_up %.2f) - %s", prevKin[0], prevKin[1],
+                                         S.footY, cfg.stepUp, slid ? "slid along one axis" : "held");
+            }
+            if (si >= 0 && edge) {
+                S.air = true;
+                S.vy = 0;
+                S.airStartY = S.footY;
+                S.tAir = now;
+                ++S.drops;
+                if (S.wallLogs++ < 80)
+                    Log("wall: walked off the edge at %.2f,%.2f foot %.2f (%s) -> below is %s at %.2f, falling", S.kinPos[0], S.kinPos[1],
+                        S.footY, S.footBlk ? "block" : "terrain", sf[si].blk ? "block" : "terrain", sf[si].h);
+            }
+        }
+        if (S.air) {
+            float prev = S.footY;
+            if (dt > 0.f && !paused) {
+                S.vy -= cfg.gravity * dt;
+                S.footY += S.vy * dt;
+            }
+            si = ns ? PickSurface(sf, ns, kNoSurf, prev, 0.05f) : -1;
+            if (si < 0)
+                for (int i = 0; i < ns; ++i)
+                    if (si < 0 || sf[i].h < sf[si].h) si = i;
+            if (si >= 0) S.airGap = S.footY - sf[si].h;
+            bool timeout = now - S.tAir > 8.0;
+            if (si >= 0 && (S.footY <= sf[si].h || timeout)) {
+                float impact = -S.vy, s = (impact - 3.f) / 15.f;
+                s = s < 0.f ? 0.f : s > 1.f ? 1.f : s;
+                S.footY = sf[si].h;
+                S.footBlk = sf[si].blk;
+                S.air = false;
+                S.vy = S.airGap = 0;
+                S.tLastTp = 0;
+                S.tLand = now;
+                ++S.lands;
+                S.landV += kick::Impulse(-cfg.landDip * (0.25f + 0.75f * s), 5.f, 0.55f);
+                S.landPunch -= 0.4f + 2.0f * s;
+                vmgame::MoveImpulse(0.f, s > 0.05f ? s : 0.05f);
+                if (S.wallLogs++ < 80)
+                    Log("wall: landed on %s %p at %.2f,%.2f h %.2f after %.2f s (from %.2f, impact %.1f m/s, strength %.2f)%s",
+                        S.footBlk ? "block" : "terrain", (void*)S.footBlk, S.kinPos[0], S.kinPos[1], S.footY, now - S.tAir, S.airStartY,
+                        impact, s, timeout ? " [timeout]" : "");
+            }
+        } else if (si >= 0) {
+            if (sf[si].blk != S.footBlk && S.wallLogs++ < 80)
+                Log("wall: now on %s %p h %.2f (was %s %p h %.2f) at %.2f,%.2f", sf[si].blk ? "block" : "terrain", (void*)sf[si].blk, sf[si].h,
+                    S.footBlk ? "block" : "terrain", (void*)S.footBlk, S.footY, S.kinPos[0], S.kinPos[1]);
+            S.footY = sf[si].h;
+            S.footBlk = sf[si].blk;
+        }
+        S.airFar = S.air && S.airGap > cfg.airTpMax;
+        if (S.footBlk && !S.air && !pinned && std::fabs(raw[1] - S.footY) > 1.5f && now - S.tWallCheck > 1.0 && S.wallLogs < 80) {
+            S.tWallCheck = now;
+            ++S.wallLogs;
+            Log("wall: hero entity y %.2f but camera foot %.2f on block %p at %.2f,%.2f (hero not on the block?)", raw[1], S.footY,
+                (void*)S.footBlk, raw[0], raw[2]);
+        }
+        uintptr_t hint = S.air ? (si >= 0 ? sf[si].blk : 0) : S.footBlk;
+        bool haveDest = MakeDestAt(S.kinPos[0], S.kinPos[1], dest, hint);
+        if (S.air)
+            S.kinY = S.footY;
+        else
+            S.kinY += (S.footY - S.kinY) * (dt > 0.f ? 1.f - std::exp(-dt / 0.05f) : 1.f);
+        {
+            static const float kLandSpring[2] = {5.f, 0.55f};
+            kick::StepSprings(&S.landY, &S.landV, 1, kLandSpring, dt);
+        }
         camPos[0] = S.kinPos[0];
-        camPos[1] = S.kinY;
+        camPos[1] = S.kinY + S.landY;
         camPos[2] = S.kinPos[1];
         S.leadPos[0] = S.kinPos[0];
         S.leadPos[1] = S.kinPos[1];
-        if (!S.stuck && !paused && !unbound && !pinned && cfg.tpLead > 0.f) {
+        if (!S.stuck && !paused && !unbound && !pinned && !S.air && cfg.tpLead > 0.f) {
             float L = cfg.tpLead, tau = cfg.accelTau;
             float vtx = mx * spd, vtz = mz * spd;
             float f = tau > 0.001f ? tau * (1.f - std::exp(-L / tau)) : 0.f;
@@ -4263,7 +4477,7 @@ void Apply(uintptr_t mgr) {
             S.leadPos[1] += vtz * L + (S.kinVel[1] - vtz) * f;
         }
         float tx = S.leadPos[0] - S.lastTp[0], tz = S.leadPos[1] - S.lastTp[1];
-        if (haveDest && tx * tx + tz * tz > 0.02f * 0.02f && now - S.tLastTp >= cfg.tpInterval) {
+        if (haveDest && !S.airFar && tx * tx + tz * tz > 0.02f * 0.02f && now - S.tLastTp >= cfg.tpInterval) {
             float gx = S.leadPos[0], gz = S.leadPos[1];
             bool skipTp = false;
             if (cfg.tpShotGuard > 0.f && !S.ghost && !cfg.fireShooter) {
@@ -4298,10 +4512,20 @@ void Apply(uintptr_t mgr) {
             if (!skipTp) {
                 alignas(16) float td[8];
                 bool haveTd = true;
-                if (gx == S.kinPos[0] && gz == S.kinPos[1])
+                if (gx == S.kinPos[0] && gz == S.kinPos[1]) {
                     memcpy(td, dest, sizeof td);
-                else
-                    haveTd = MakeDestAt(gx, gz, td);
+                } else {
+                    Surf s3[kMaxSurf];
+                    bool e3 = false;
+                    int n3 = SurfacesAt(gx, gz, s3), i3 = n3 ? WalkPick(s3, n3, S.footBlk, S.footY, cfg.stepUp, cfg.stepDown, &e3) : -1;
+                    if (i3 >= 0 && !e3) {
+                        haveTd = MakeDestAt(gx, gz, td, s3[i3].blk);
+                    } else {
+                        memcpy(td, dest, sizeof td);
+                        gx = S.kinPos[0];
+                        gz = S.kinPos[1];
+                    }
+                }
                 if (haveTd && IssueTeleport(td)) {
                     ++S.tpSent;
                     RecordTp(now, td[0], td[2]);
@@ -4359,12 +4583,16 @@ void Apply(uintptr_t mgr) {
     S.camKick.Step(kp, now, dt, &S.pitch);
     if (float hk = vmgame::ShieldCamKick())
         S.camKick.v[0] += kick::Impulse(hk, kp.punchSpring[0], kp.punchSpring[1]);
+    if (S.landPunch != 0.f) {
+        S.camKick.v[0] += kick::Impulse(S.landPunch, kp.punchSpring[0], kp.punchSpring[1]);
+        S.landPunch = 0.f;
+    }
     kick::View kv = kick::CamView(S.camKick, S.pitch, S.yaw, lim);
     const float vRoll = kv.roll;
     const float* vFwd = kv.fwd;
     const float* vRight = kv.right;
     const float* vUp = kv.up;
-    vmgame::PublishView(S.yaw, S.pitch, S.flyer ? 0.f : S.camSpeed);
+    vmgame::PublishView(S.yaw, S.pitch, (S.flyer || (mode == 0 && S.air)) ? 0.f : S.camSpeed);
     float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : cfg.eyeHeight),
                     camPos[2] + cy * cfg.eyeForward};
     float target[3] = {eye[0] + vFwd[0] * 10.f, eye[1] + vFwd[1] * 10.f, eye[2] + vFwd[2] * 10.f};
@@ -4690,6 +4918,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
         }
         if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D')) return 0;
+        if (S.active && w == VK_SPACE) return 0;
         break;
     case WM_KEYUP:
     case WM_SYSKEYUP:
@@ -4703,7 +4932,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 return 0;
             }
         }
-        if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D' || w == 'R' || (w >= '1' && w <= '9'))) return 0;
+        if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D' || w == 'R' || w == VK_SPACE || (w >= '1' && w <= '9'))) return 0;
         if (S.active && ((vmgame::ShieldKey() && w == vmgame::ShieldKey()) || (vmgame::ShieldHitKey() && w == vmgame::ShieldHitKey()))) return 0;
         if (S.active && g_heroLauncher && vmgame::LauncherConfigured() &&
             (w == vmgame::LauncherFireKey() || w == vmgame::LauncherSwitchKey() || w == vmgame::LauncherFlameKey()))
@@ -4941,6 +5170,8 @@ bool VerifyGame() {
         Log("fly: flying heroes %s (fly=%d takeoff=%d ahead=%.0f interval=%.2f turn=%.0f eye=%.2f)",
             g_flyOk ? "ok" : "OFF - flying heroes use the normal movement", cfg.fly, cfg.flyTakeoff, cfg.flyAhead, cfg.flyInterval,
             cfg.flyTurnDeg, cfg.flyEyeHeight);
+        g_wallOk = PrintsMatch(Prints(kWallPrints904), "wall nav blocks (teleport hint)");
+        Log("wall: city walls / building nav blocks %s (wall=%d)", g_wallOk ? "ok" : "OFF - terrain only, jumping still works", cfg.wall);
         Log("move: unit orders %s, entity halt %s, entity move %s, entity teleport %s (unavailable modes fall back to unit orders)",
             m ? "ok" : "OFF", h ? "ok" : "OFF", o ? "ok" : "OFF", t ? "ok" : "OFF");
     }
@@ -5261,13 +5492,6 @@ int Ammo(void* L) {
     f.pushnumber(L, static_cast<float>(reserve));
     return 5;
 }
-int TacStaminaApi(void* L) {
-    f.pushnumber(L, S.active ? g_tac.st : 1.f);
-    f.pushboolean(L, TacStaminaOk() ? 1 : 0);
-    f.pushboolean(L, vmgame::InfTacStamina() ? 1 : 0);
-    f.pushboolean(L, S.active && S.tac ? 1 : 0);
-    return 4;
-}
 int CastEvent(void* L) {
     LONG t = g_cast.tail, e = 0;
     if (t != g_cast.head) {
@@ -5314,11 +5538,10 @@ int PushTable(void* L) {
         Log("lua-api: %s not exported by the game - no interface table (luaopen #%ld)", g_missing, n);
         return 0;
     }
-    f.createtable(L, 0, 11);
+    f.createtable(L, 0, 10);
     const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_enabled", HudEnabled},
                                                         {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"cast_event", CastEvent},
-                                                        {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson},
-                                                        {"tac_stamina", TacStaminaApi}};
+                                                        {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);
