@@ -261,6 +261,10 @@ struct Look {
     int shieldFingerOn = 0;
     float shieldHoldW = 0;
     float gunShift[3] = {};
+    bool worldPose = false;
+    float worldModel[12] = {};
+    float worldLight[3] = {};
+    float clip0[4] = {}, clip1[4] = {};
 };
 bool LoadSettings(const wchar_t* ini, Settings& s);
 struct CrosshairSettings {

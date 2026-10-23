@@ -394,6 +394,8 @@ const char kShader[] = R"HLSL(cbuffer CFrame : register(b0) {
     float4 uLens0;
     float4 uLens1;
     float4 uLens2;
+    float4 uClip0;
+    float4 uClip1;
 };
 cbuffer CBones : register(b1) { float4 uBones[768]; };
 cbuffer CMat : register(b2) {
@@ -422,6 +424,7 @@ struct VSIn {
 };
 struct PSIn {
     float4 pos : SV_Position; float3 vpos : TEXCOORD1; float3 n : TEXCOORD2; float4 t : TEXCOORD3; float2 uv : TEXCOORD0;
+    float2 clip : SV_ClipDistance0;
 };
 float3x4 Bone(uint i) { return float3x4(uBones[i * 3 + 0], uBones[i * 3 + 1], uBones[i * 3 + 2]); }
 PSIn VS(VSIn i) {
@@ -436,6 +439,7 @@ PSIn VS(VSIn i) {
     o.n = mul((float3x3)uModel, n);
     o.t = float4(mul((float3x3)uModel, t), i.tan.w);
     o.uv = i.uv;
+    o.clip = float2(dot(float4(v.xyz, 1), uClip0), dot(float4(v.xyz, 1), uClip1));
     return o;
 }
 float3 SrgbEncode(float3 c) {
@@ -784,8 +788,10 @@ struct CFrame {
     float lens0[4];
     float lens1[4];
     float lens2[4];
+    float clip0[4];
+    float clip1[4];
 };
-static_assert(sizeof(CFrame) == 304, "cframe");
+static_assert(sizeof(CFrame) == 336, "cframe");
 float IniFloat(const wchar_t* ini, const wchar_t* key, float def) {
     wchar_t buf[64];
     GetPrivateProfileStringW(L"viewmodel", key, L"", buf, 64, ini);
@@ -2317,6 +2323,7 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
         if (shieldArm) ShieldIk(lk, nInv.m);
     }
     Aff model = AffMul(sway, AffMul(kick, N));
+    if (look.worldPose) memcpy(model.m, look.worldModel, sizeof model.m);
     {
         Aff P;
         memcpy(P.m, lk.shieldPose, sizeof P.m);
@@ -2376,7 +2383,7 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
     float aspect = static_cast<float>(w) / static_cast<float>(h);
     const float vmFov = (look.fovDeg > 1.f && look.fovDeg < 170.f) ? look.fovDeg : s.fovDeg;
     float ys = 1.0f / std::tan(vmFov * kDeg * 0.5f), xs = ys / aspect;
-    const float zn = 0.01f, zf = 50.0f;
+    const float zn = look.worldPose ? 0.05f : 0.01f, zf = look.worldPose ? 400.0f : 50.0f;
     float P[16] = {xs, 0, 0, 0, 0, ys, 0, 0, 0, 0, zf / (zf - zn), -zn * zf / (zf - zn), 0, 0, 1, 0};
     memcpy(cf.proj, P, sizeof P);
     projXs_ = xs, projYs_ = ys;
@@ -2451,6 +2458,18 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
     }
     cf.params[0] = s.exposure;
     cf.params[1] = rtvEncodesSrgb ? 0.f : 1.f;
+    if (look.worldPose) {
+        float wl = std::sqrt(look.worldLight[0] * look.worldLight[0] + look.worldLight[1] * look.worldLight[1] + look.worldLight[2] * look.worldLight[2]);
+        if (wl > 1e-6f)
+            for (int k = 0; k < 3; ++k) cf.lightDir[k] = look.worldLight[k] / wl;
+    }
+    {
+        bool c0 = look.clip0[0] || look.clip0[1] || look.clip0[2] || look.clip0[3], c1 = look.clip1[0] || look.clip1[1] || look.clip1[2] || look.clip1[3];
+        for (int k = 0; k < 4; ++k) {
+            cf.clip0[k] = c0 ? look.clip0[k] : (k == 3 ? 1.f : 0.f);
+            cf.clip1[k] = c1 ? look.clip1[k] : (k == 3 ? 1.f : 0.f);
+        }
+    }
     cf.params[2] = look.time;
     cf.params[3] = det >= 0 ? 1.f : -1.f;
     if (look.flashLight > 0.f && s.flashLight > 0.f && muzzleFrameValid_) {

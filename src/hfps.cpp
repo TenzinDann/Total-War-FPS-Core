@@ -474,6 +474,9 @@ struct Config {
     float dropClearance = 3.5f, dropPushSpeed = 6.f, dropMaxPush = 6.f;
     bool building = true;
     float bldLow = 1.f, bldHigh = 2.05f, bldSkin = 0.4f;
+    bool ladder = true;
+    unsigned ladderKey = 'E';
+    float ladderSpeed = 2.5f, ladderMaxH = 30.f, ladderBack = 0.4f;
     bool ghost = false;
     bool revealEnemies = true;
     bool noMelee = true;
@@ -714,6 +717,17 @@ void LoadConfig() {
     if (!(cfg.bldHigh >= cfg.bldLow && cfg.bldHigh <= 6.f)) cfg.bldHigh = 2.05f;
     if (!(cfg.bldSkin >= 0.f && cfg.bldSkin <= 2.f)) cfg.bldSkin = 0.4f;
     Log("wall: building=%d building_low=%.2f building_high=%.2f building_skin=%.2f", cfg.building, cfg.bldLow, cfg.bldHigh, cfg.bldSkin);
+    cfg.ladder = GetPrivateProfileIntW(L"ladder", L"enabled", 1, ini) != 0;
+    cfg.ladderKey = GetPrivateProfileIntW(L"ladder", L"key", 'E', ini);
+    if (!(cfg.ladderKey > 0 && cfg.ladderKey < 0xFF)) cfg.ladderKey = 'E';
+    cfg.ladderSpeed = IniF(L"ladder", L"climb_speed", 2.5f, ini);
+    cfg.ladderMaxH = IniF(L"ladder", L"max_height", 30.f, ini);
+    cfg.ladderBack = IniF(L"ladder", L"back", 0.4f, ini);
+    if (!(cfg.ladderSpeed >= 0.3f && cfg.ladderSpeed <= 10.f)) cfg.ladderSpeed = 2.5f;
+    if (!(cfg.ladderMaxH >= 4.f && cfg.ladderMaxH <= 60.f)) cfg.ladderMaxH = 30.f;
+    if (!(cfg.ladderBack >= 0.f && cfg.ladderBack <= 1.5f)) cfg.ladderBack = 0.4f;
+    Log("ladder: enabled=%d key=0x%02X climb_speed=%.2f max_height=%.1f back=%.2f", cfg.ladder, cfg.ladderKey, cfg.ladderSpeed, cfg.ladderMaxH,
+        cfg.ladderBack);
     Log("wall: drop_clearance=%.2f drop_push_speed=%.1f drop_max_push=%.1f", cfg.dropClearance, cfg.dropPushSpeed, cfg.dropMaxPush);
     Log("wall: wall=%d step_up=%.2f step_down=%.2f gravity=%.1f jump_height=%.2f air_control=%.2f air_teleport_max=%.2f land_dip=%.3f",
         cfg.wall, cfg.stepUp, cfg.stepDown, cfg.gravity, cfg.jumpHeight, cfg.airControl, cfg.airTpMax, cfg.landDip);
@@ -1003,6 +1017,10 @@ struct State {
     bool bldInside = false, bldRecheck = false;
     double tBldCheck = 0;
     int bldBlocks = 0, bldLogs = 0;
+    int ladMode = 0, ladIdx = 0, ladRung = -1, prompt = 0, ladLogs = 0;
+    float ladS = 0, ladFrom[3] = {}, ladTo[3] = {};
+    double tLadMount = 0, tLadScan = 0;
+    bool ePrev = false;
     double tLastTp = 0;
     unsigned tpSent = 0, tpFailed = 0, tpLogs = 0, leashHits = 0;
     int lastMode = -1;
@@ -3925,6 +3943,7 @@ void PathStep() {
     }
 }
 bool KeyDown(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
+#include "ladder_game.inc"
 void RecordTp(double now, float x, float z) {
     TpRec& r = S.tpHist[S.tpHead++ % (sizeof S.tpHist / sizeof S.tpHist[0])];
     r.t = now;
@@ -4060,8 +4079,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4132,7 +4149,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4215,26 +4231,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -4405,7 +4412,7 @@ void Apply(uintptr_t mgr) {
         S.shiftPrev = shift;
         bool reloading = vmgame::Busy();
         bool canSprint = canMove && fg && mode == 0 && wantMove && KeyDown('W') && !KeyDown('S') && !rmb && !lmb && !reloading &&
-                         !S.pinned && !S.stuck;
+                         !S.pinned && !S.stuck && !S.ladMode;
         bool wasSprint = S.sprint, wasTac = S.tac, wasAds = S.ads;
         if (S.sprint && !canSprint) {
             S.fireBlock = now + (S.tac ? cfg.tacSprintToFire : cfg.sprintToFire);
@@ -4418,7 +4425,7 @@ void Apply(uintptr_t mgr) {
                 S.tac = true;
         }
         TacStaminaStep(now, dt);
-        S.ads = rmb && !S.sprint && !reloading && !vmgame::MeleeActive();
+        S.ads = rmb && !S.sprint && !reloading && !vmgame::MeleeActive() && !S.ladMode;
         if (S.ads && !wasAds) S.adsKind = now < S.fireBlock ? (S.exitTac ? 2 : 1) : 0;
         if (!S.ads) S.adsKind = 0;
         float adsTime = vmgame::CurrentAdsTime(S.adsKind);
@@ -4450,6 +4457,7 @@ void Apply(uintptr_t mgr) {
             S.air = S.airFar = S.dropActive = false;
             S.vy = S.airGap = S.landY = S.landV = S.landPunch = 0;
             S.tLand = -1;
+            S.ladMode = 0, S.prompt = 0;
             {
                 Surf sf[kMaxSurf];
                 int ns = SurfacesAt(raw[0], raw[2], sf), bi = -1;
@@ -4509,7 +4517,7 @@ void Apply(uintptr_t mgr) {
             S.pinned = pinned;
         }
         bool judged = false, follow = false;
-        bool unbound = S.ghostWanted || S.airFar || S.air || (S.tLand > 0 && now - S.tLand < 0.5);
+        bool unbound = S.ghostWanted || S.airFar || S.air || S.ladMode || (S.tLand > 0 && now - S.tLand < 0.5);
         if (unbound || pinned) judged = true, follow = true;
         for (const TpRec& r : S.tpHist) {
             if (unbound || pinned) break;
@@ -4560,6 +4568,8 @@ void Apply(uintptr_t mgr) {
                     S.vy);
         }
         S.spacePrev = space;
+        LadderFrame(now, dt, fg, paused, pinned, sy, cy, cfg.eyeHeight);
+        const bool onLadder = S.ladMode != 0;
         if (pinned && S.air) {
             S.air = S.airFar = S.dropActive = false;
             S.vy = 0;
@@ -4570,7 +4580,7 @@ void Apply(uintptr_t mgr) {
             S.kinPos[0] += (S.outPos[0] - S.kinPos[0]) * kp;
             S.kinPos[1] += (S.outPos[2] - S.kinPos[1]) * kp;
             S.kinVel[0] = S.kinVel[1] = 0;
-        } else if (dt > 0.f && !paused) {
+        } else if (dt > 0.f && !paused && !onLadder) {
             float tau = S.air ? cfg.airControl : cfg.accelTau;
             float a = tau > 0.001f ? 1.f - std::exp(-dt / tau) : 1.f;
             S.kinVel[0] += (mx * spd - S.kinVel[0]) * a;
@@ -4595,7 +4605,7 @@ void Apply(uintptr_t mgr) {
                 ++S.dropKept;
             }
         }
-        if (cfg.building && g_buildOk && !pinned && !paused && dt > 0.f && !S.flyer) {
+        if (cfg.building && g_buildOk && !pinned && !paused && dt > 0.f && !S.flyer && !onLadder) {
             if (S.bldRecheck || (S.bldInside && now - S.tBldCheck > 0.5)) {
                 bool was = S.bldInside;
                 S.bldInside = InsideBuilding(S.kinPos[0], S.kinPos[1], S.footY);
@@ -4646,7 +4656,7 @@ void Apply(uintptr_t mgr) {
         if (ns && pinned) {
             for (int i = 0; i < ns; ++i)
                 if (si < 0 || std::fabs(sf[i].h - S.outPos[1]) < std::fabs(sf[si].h - S.outPos[1])) si = i;
-        } else if (ns && !S.air) {
+        } else if (ns && !S.air && !onLadder) {
             bool edge = false;
             si = WalkPick(sf, ns, S.footBlk, S.footY, cfg.stepUp, cfg.stepDown, &edge);
             if (si < 0) {
@@ -4790,15 +4800,15 @@ void Apply(uintptr_t mgr) {
                         S.kinPos[1], S.footY, now - S.tAir, S.airStartY, impact, s, std::hypot(S.kinPos[0] - S.dropP0[0], S.kinPos[1] - S.dropP0[1]),
                         S.dropPolyN ? PolyDist(S.dropPoly, S.dropPolyN, S.kinPos[0], S.kinPos[1]) : -1.f, S.dropKept, timeout ? " [timeout]" : "");
             }
-        } else if (si >= 0) {
+        } else if (si >= 0 && !onLadder) {
             if (sf[si].blk != S.footBlk && S.wallLogs++ < 80)
                 Log("wall: now on %s %p h %.2f (was %s %p h %.2f) at %.2f,%.2f", sf[si].blk ? "block" : "terrain", (void*)sf[si].blk, sf[si].h,
                     S.footBlk ? "block" : "terrain", (void*)S.footBlk, S.footY, S.kinPos[0], S.kinPos[1]);
             S.footY = sf[si].h;
             S.footBlk = sf[si].blk;
         }
-        S.airFar = S.air && S.airGap > cfg.airTpMax;
-        if (S.footBlk && !S.air && !pinned && std::fabs(raw[1] - S.footY) > 1.5f && now - S.tWallCheck > 1.0 && S.wallLogs < 80) {
+        S.airFar = (S.air && S.airGap > cfg.airTpMax) || onLadder;
+        if (S.footBlk && !S.air && !pinned && !onLadder && std::fabs(raw[1] - S.footY) > 1.5f && now - S.tWallCheck > 1.0 && S.wallLogs < 80) {
             S.tWallCheck = now;
             ++S.wallLogs;
             Log("wall: hero entity y %.2f but camera foot %.2f on block %p at %.2f,%.2f (hero not on the block?)", raw[1], S.footY,
@@ -4806,7 +4816,7 @@ void Apply(uintptr_t mgr) {
         }
         uintptr_t hint = S.air ? (si >= 0 ? sf[si].blk : 0) : S.footBlk;
         bool haveDest = MakeDestAt(S.kinPos[0], S.kinPos[1], dest, hint);
-        if (S.air)
+        if (S.air || onLadder)
             S.kinY = S.footY;
         else
             S.kinY += (S.footY - S.kinY) * (dt > 0.f ? 1.f - std::exp(-dt / 0.05f) : 1.f);
@@ -5058,9 +5068,9 @@ void Apply(uintptr_t mgr) {
         VelStep(bp, eye, vFwd);
         FastFireStats(false);
     }
-    bool held = g_cast.lmb;
+    bool held = g_cast.lmb && !S.ladMode;
     if (vmgame::MeleeActive()) {
-        bool blockKey = g_cast.rmb;
+        bool blockKey = g_cast.rmb && !S.ladMode;
         vmgame::MeleeInput(held && !S.sprint && now >= S.fireBlock, blockKey && !S.sprint);
         int strike = vmgame::TakeMeleeStrike();
         if (strike >= 0 && g_fireOk && cfg.fireEnabled) {
@@ -5268,6 +5278,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
         }
         if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D')) return 0;
+        if (S.active && cfg.ladder && w == cfg.ladderKey) return 0;
         if (S.active && w == VK_SPACE && cfg.jumpHeight > 0.f) return 0;
         break;
     case WM_KEYUP:
@@ -5884,6 +5895,10 @@ int View(void* L) {
     for (float v : d) f.pushnumber(L, v);
     return 6;
 }
+int Prompt(void* L) {
+    f.pushnumber(L, S.active && S.lastMode == 0 ? static_cast<float>(S.prompt) : 0.f);
+    return 1;
+}
 int ExitFirstPerson(void* L) {
     (void)L;
     if (S.active) {
@@ -5898,11 +5913,11 @@ int PushTable(void* L) {
         Log("lua-api: %s not exported by the game - no interface table (luaopen #%ld)", g_missing, n);
         return 0;
     }
-    f.createtable(L, 0, 11);
+    f.createtable(L, 0, 12);
     const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_enabled", HudEnabled},
                                                         {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"cast_event", CastEvent},
                                                         {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson},
-                                                        {"tac_stamina", TacStaminaApi}};
+                                                        {"tac_stamina", TacStaminaApi}, {"prompt", Prompt}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);
