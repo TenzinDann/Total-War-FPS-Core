@@ -1140,8 +1140,15 @@ void SetupMouse() {
         RAWINPUTDEVICE list[64];
         UINT m = n;
         if (GetRegisteredRawInputDevices(list, &m, sizeof(RAWINPUTDEVICE)) != static_cast<UINT>(-1))
-            for (UINT i = 0; i < m; ++i)
+            for (UINT i = 0; i < m; ++i) {
                 if (list[i].usUsagePage == 1 && list[i].usUsage == 2) mouseTaken = true;
+                static unsigned s_rawLogs = 0;
+                if (s_rawLogs < 8) {
+                    ++s_rawLogs;
+                    Log("input: raw input device registered by someone: page %u usage %u flags 0x%lX target %p", list[i].usUsagePage,
+                        list[i].usUsage, static_cast<unsigned long>(list[i].dwFlags), (void*)list[i].hwndTarget);
+                }
+            }
     }
     if (mouseTaken) {
         Log("mouse: raw input already registered in process (%u devices) -> cursor-delta fallback", n);
@@ -3890,8 +3897,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -3962,7 +3967,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4045,26 +4049,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -4888,6 +4883,8 @@ bool InstallHook() {
     Log("hooked battle camera manager %p (battle %p) via vtable copy %p", (void*)mgr, (void*)battle, (void*)ours);
     return true;
 }
+unsigned g_childKeyLogs = 0, g_mainSpaceLogs = 0;
+void ClearThreadKey(int vk);
 LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (!S.active && S.cursorHidden) {
         reinterpret_cast<void (*)(bool)>(g_base + kFnSetCursorVisible)(S.cursorVisOrig != 0);
@@ -4913,6 +4910,10 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         break;
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
+        if (w == VK_SPACE && S.active && g_mainSpaceLogs < 8) {
+            ++g_mainSpaceLogs;
+            Log("input: space key message 0x%03X on main window (focus %p, render child %p)", m, (void*)GetFocus(), (void*)g_childHwnd);
+        }
         if (w == cfg.toggleKey) {
             if (!(l & (1L << 30)) && (S.active || InstallHook())) InterlockedExchange(&g_reqToggle, 1);
             return 0;
@@ -4972,7 +4973,10 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
         }
         if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D')) return 0;
-        if (S.active && w == VK_SPACE) return 0;
+        if (S.active && w == VK_SPACE) {
+            ClearThreadKey(VK_SPACE);
+            return 0;
+        }
         break;
     case WM_KEYUP:
     case WM_SYSKEYUP:
@@ -4994,6 +4998,9 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         break;
     case WM_SYSCHAR:
         if (S.active && cfg.castKeys && ((w >= '0' && w <= '9') || w == '-' || w == '=')) return 0;
+        break;
+    case WM_CHAR:
+        if (S.active && w == ' ') return 0;
         break;
     case WM_MOUSEWHEEL:
         if (S.active) {
@@ -5026,7 +5033,33 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     return CallWindowProcW(g_prevProc, h, m, w, l);
 }
+bool FpsOwnsKey(UINT m, WPARAM w) {
+    if (!S.active) return false;
+    if (m == WM_CHAR) return w == ' ';
+    if (m == WM_SYSCHAR) return cfg.castKeys && ((w >= '0' && w <= '9') || w == '-' || w == '=');
+    if (m != WM_KEYDOWN && m != WM_SYSKEYDOWN && m != WM_KEYUP && m != WM_SYSKEYUP) return false;
+    if (w == cfg.toggleKey || w == 'W' || w == 'A' || w == 'S' || w == 'D' || w == 'R' || w == VK_SPACE || (w >= '1' && w <= '9'))
+        return true;
+    if ((vmgame::ShieldKey() && w == vmgame::ShieldKey()) || (vmgame::ShieldHitKey() && w == vmgame::ShieldHitKey())) return true;
+    if (vmgame::LayerActive() && (w == vmgame::ReloadKey() || w == vmgame::AnimKey() || w == vmgame::ModelKey())) return true;
+    if (g_heroLauncher && vmgame::LauncherConfigured() &&
+        (w == vmgame::LauncherFireKey() || w == vmgame::LauncherSwitchKey() || w == vmgame::LauncherFlameKey()))
+        return true;
+    if (int slot = cfg.castKeys ? CastSlotKey(w) : 0)
+        return (GetKeyState(VK_MENU) & 0x8000) || (g_cast.unswallow & (1L << slot));
+    return false;
+}
 LRESULT CALLBACK HfpsChildWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (S.active && (m == WM_KEYDOWN || m == WM_SYSKEYDOWN || m == WM_KEYUP || m == WM_SYSKEYUP || m == WM_CHAR || m == WM_SYSCHAR)) {
+        bool ours = FpsOwnsKey(m, w);
+        if (g_childKeyLogs < 24) {
+            ++g_childKeyLogs;
+            Log("input: key message 0x%03X vk 0x%02X on render child (focus %p, main %p) -> %s", m, static_cast<unsigned>(w), (void*)GetFocus(),
+                (void*)g_hwnd, ours ? "first person (not passed to the game)" : "game");
+        }
+        if (ours) return g_hwnd ? HfpsWndProc(g_hwnd, m, w, l) : 0;
+        if (m == WM_KEYDOWN && w == VK_ESCAPE) InterlockedExchange(&g_reqExit, 1);
+    }
     switch (m) {
     case WM_LBUTTONDOWN:
     case WM_LBUTTONUP:
@@ -5154,6 +5187,67 @@ bool PrintsMatch(const PrintSet& s, const char* what) {
         }
     return s.n > 0;
 }
+using FnAsyncKey = SHORT(WINAPI*)(int);
+using FnKbdState = BOOL(WINAPI*)(PBYTE);
+FnAsyncKey g_origAsyncKey = nullptr;
+FnKbdState g_origKbdState = nullptr;
+volatile LONG g_gameKeyLogs = 0;
+void ClearThreadKey(int vk) {
+    BYTE ks[256];
+    if (GetKeyboardState(ks) && (ks[vk] & 0x80)) {
+        ks[vk] = 0;
+        SetKeyboardState(ks);
+    }
+}
+SHORT WINAPI HfpsGameGetAsyncKeyState(int vk) {
+    SHORT r = g_origAsyncKey(vk);
+    if (S.active && vk == VK_SPACE) {
+        if (r && InterlockedIncrement(&g_gameKeyLogs) <= 16)
+            Log("input: game asked GetAsyncKeyState(space) from +%llx in first person -> answered not pressed",
+                (unsigned long long)(reinterpret_cast<uintptr_t>(__builtin_return_address(0)) - g_base));
+        return 0;
+    }
+    return r;
+}
+BOOL WINAPI HfpsGameGetKeyboardState(PBYTE b) {
+    BOOL r = g_origKbdState(b);
+    if (r && b && S.active && (b[VK_SPACE] & 0x80)) {
+        if (InterlockedIncrement(&g_gameKeyLogs) <= 16)
+            Log("input: game asked GetKeyboardState with space down from +%llx in first person -> cleared",
+                (unsigned long long)(reinterpret_cast<uintptr_t>(__builtin_return_address(0)) - g_base));
+        b[VK_SPACE] = 0;
+    }
+    return r;
+}
+void HookGameKeyImports() {
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(g_base);
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(g_base + dos->e_lfanew);
+    const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    int hooked[2] = {0, 0};
+    if (dir.VirtualAddress) {
+        for (auto* d = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(g_base + dir.VirtualAddress); d->Name; ++d) {
+            if (_stricmp(reinterpret_cast<const char*>(g_base + d->Name), "user32.dll") || !d->OriginalFirstThunk) continue;
+            auto* names = reinterpret_cast<IMAGE_THUNK_DATA64*>(g_base + d->OriginalFirstThunk);
+            auto* slots = reinterpret_cast<IMAGE_THUNK_DATA64*>(g_base + d->FirstThunk);
+            for (; names->u1.AddressOfData; ++names, ++slots) {
+                if (IMAGE_SNAP_BY_ORDINAL64(names->u1.Ordinal)) continue;
+                const char* nm = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(g_base + names->u1.AddressOfData)->Name;
+                int which = !strcmp(nm, "GetAsyncKeyState") ? 0 : !strcmp(nm, "GetKeyboardState") ? 1 : -1;
+                if (which < 0 || !slots->u1.Function) continue;
+                ULONGLONG ours = which ? reinterpret_cast<ULONGLONG>(&HfpsGameGetKeyboardState) : reinterpret_cast<ULONGLONG>(&HfpsGameGetAsyncKeyState);
+                if (slots->u1.Function == ours) continue;
+                DWORD old = 0;
+                if (!VirtualProtect(&slots->u1.Function, sizeof(ULONGLONG), PAGE_READWRITE, &old)) continue;
+                if (which == 0 && !g_origAsyncKey) g_origAsyncKey = reinterpret_cast<FnAsyncKey>(slots->u1.Function);
+                if (which == 1 && !g_origKbdState) g_origKbdState = reinterpret_cast<FnKbdState>(slots->u1.Function);
+                slots->u1.Function = ours;
+                VirtualProtect(&slots->u1.Function, sizeof(ULONGLONG), old, &old);
+                ++hooked[which];
+            }
+        }
+    }
+    Log("input: game imports GetAsyncKeyState x%d / GetKeyboardState x%d wrapped (space reads as not pressed in first person)", hooked[0], hooked[1]);
+}
 bool VerifyGame() {
     HMODULE exe = GetModuleHandleW(nullptr);
     g_base = reinterpret_cast<uintptr_t>(exe);
@@ -5226,6 +5320,7 @@ bool VerifyGame() {
             cfg.flyTurnDeg, cfg.flyEyeHeight);
         g_wallOk = PrintsMatch(Prints(kWallPrints904), "wall nav blocks (teleport hint)");
         Log("wall: city walls / building nav blocks %s (wall=%d)", g_wallOk ? "ok" : "OFF - terrain only, jumping still works", cfg.wall);
+        HookGameKeyImports();
         Log("move: unit orders %s, entity halt %s, entity move %s, entity teleport %s (unavailable modes fall back to unit orders)",
             m ? "ok" : "OFF", h ? "ok" : "OFF", o ? "ok" : "OFF", t ? "ok" : "OFF");
     }
