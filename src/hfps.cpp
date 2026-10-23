@@ -484,6 +484,7 @@ struct Config {
     float stuckLeash = 0.6f;
     float tpLead = 0.2f;
     bool leadAuto = true, eyeFromHeight = true;
+    bool hideSelf = true;
     float leadAutoTau = 1.5f;
     bool wall = true;
     float stepUp = 0.6f, stepDown = 0.8f, gravity = 20.3f, jumpHeight = 0.f, airControl = 0.35f, airTpMax = 1.5f, landDip = 0.12f;
@@ -707,6 +708,7 @@ void LoadConfig() {
     cfg.leadAutoTau = IniF(L"move", L"teleport_lead_auto_tau", 1.5f, ini);
     if (!(cfg.leadAutoTau >= 0.2f && cfg.leadAutoTau <= 10.f)) cfg.leadAutoTau = 1.5f;
     cfg.eyeFromHeight = GetPrivateProfileIntW(L"camera", L"eye_from_height", 1, ini) != 0;
+    cfg.hideSelf = GetPrivateProfileIntW(L"camera", L"hide_self", 1, ini) != 0;
     Log("ghost: teleport_lead=%.3f teleport_lead_auto=%d tau=%.2f eye_from_height=%d", cfg.tpLead, cfg.leadAuto, cfg.leadAutoTau,
         cfg.eyeFromHeight);
     cfg.wall = GetPrivateProfileIntW(L"move", L"wall", 1, ini) != 0;
@@ -4299,8 +4301,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4371,7 +4371,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4454,26 +4453,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -6040,6 +6030,121 @@ extern "C" void hfps_sim_tick(uintptr_t self, uintptr_t packet, uintptr_t battle
     }
     ReleaseSRWLockExclusive(&g_ff.lock);
 }
+constexpr uintptr_t oBattleVisRoot = 0x64600, oVisRootMgr = 0x1a0, oVisMgrUnitCount = 0x164, oVisMgrUnits = 0x168, oUnitVisUnit = 0xf8,
+                    oUnitVisSoldierCount = 0x34, oUnitVisSoldiers = 0x38, oSoldierVisEntity = 0x18, oSoldierVisInstance = 0xf8,
+                    oInstPartCount = 0x8, oInstParts = 0x10, kInstPartStride = 0x48;
+constexpr uint32_t kHideMaxUnits = 4096, kHideMaxSoldiers = 1024;
+constexpr int kHideMaxParts = 32;
+struct HideSelf {
+    uintptr_t sv = 0, inst = 0, parts = 0;
+    int n = 0;
+    uint32_t want[kHideMaxParts] = {};
+    double tSearch = -1, tCheck = 0;
+    unsigned rewrites = 0;
+    bool warned = false;
+} g_hide;
+uintptr_t HeroSoldierVisual(uintptr_t battle, uintptr_t unit, uintptr_t entity) {
+    uintptr_t root = battle ? Ptr(battle + oBattleVisRoot) : 0, mgr = root ? Ptr(root + oVisRootMgr) : 0;
+    uintptr_t units = mgr ? Ptr(mgr + oVisMgrUnits) : 0;
+    uint32_t nu = 0;
+    if (!units || !unit || !entity || !Rd(mgr + oVisMgrUnitCount, nu) || nu > kHideMaxUnits) return 0;
+    for (uint32_t i = 0; i < nu; ++i) {
+        uintptr_t uv = Ptr(units + 8 * i);
+        uint32_t ns = 0;
+        if (!uv || Ptr(uv + oUnitVisUnit) != unit || !Rd(uv + oUnitVisSoldierCount, ns) || ns > kHideMaxSoldiers) continue;
+        uintptr_t sol = Ptr(uv + oUnitVisSoldiers);
+        for (uint32_t j = 0; sol && j < ns; ++j) {
+            uintptr_t sv = Ptr(sol + 8 * j);
+            if (sv && Ptr(sv + oSoldierVisEntity) == entity) return sv;
+        }
+    }
+    return 0;
+}
+uintptr_t HideParts(uintptr_t inst, int* nOut) {
+    uint32_t n = 0;
+    uintptr_t parts = inst ? Ptr(inst + oInstParts) : 0;
+    if (!inst || !InExe(Ptr(inst)) || !parts || !Rd(inst + oInstPartCount, n) || n == 0 || n > (uint32_t)kHideMaxParts) return 0;
+    *nOut = (int)n;
+    return parts;
+}
+void HideSelfDrop() {
+    g_hide.sv = g_hide.inst = g_hide.parts = 0;
+    g_hide.n = 0;
+}
+void HideSelfRestore(const char* why) {
+    if (!g_hide.inst) return;
+    int n = 0;
+    bool still = HeroSoldierVisual(S.battle, S.unit, S.entity) == g_hide.sv && Ptr(g_hide.sv + oSoldierVisInstance) == g_hide.inst &&
+                 HideParts(g_hide.inst, &n) == g_hide.parts && n == g_hide.n;
+    if (still)
+        for (int k = 0; k < g_hide.n; ++k) Wr(g_hide.parts + kInstPartStride * k, g_hide.want[k]);
+    Log("hide-self: hero model %s (%s; %d parts, game re-showed parts %u times)", still ? "shown again" : "gone - nothing restored", why, g_hide.n,
+        g_hide.rewrites);
+    HideSelfDrop();
+}
+void HideSelfStep() {
+    if (!(S.active && cfg.hideSelf && S.entity)) {
+        HideSelfRestore("first person ended");
+        g_hide.warned = false;
+        g_hide.tSearch = -1;
+        return;
+    }
+    double now = Now();
+    if (g_hide.inst) {
+        int n = 0;
+        bool same = Ptr(g_hide.sv + oSoldierVisInstance) == g_hide.inst && HideParts(g_hide.inst, &n) == g_hide.parts && n == g_hide.n;
+        if (same && now - g_hide.tCheck > 1.0) {
+            g_hide.tCheck = now;
+            same = HeroSoldierVisual(S.battle, S.unit, S.entity) == g_hide.sv;
+        }
+        if (!same) {
+            Log("hide-self: hero render instance changed (died / model swapped?); looking again");
+            HideSelfDrop();
+        }
+    }
+    if (!g_hide.inst) {
+        if (g_hide.tSearch >= 0 && now - g_hide.tSearch < 0.5) return;
+        g_hide.tSearch = now;
+        uintptr_t sv = HeroSoldierVisual(S.battle, S.unit, S.entity);
+        uintptr_t inst = sv ? Ptr(sv + oSoldierVisInstance) : 0;
+        int n = 0;
+        uintptr_t parts = HideParts(inst, &n);
+        if (!parts) {
+            if (!g_hide.warned) {
+                g_hide.warned = true;
+                Log("hide-self: hero render instance not found (battle %p unit %p entity %p visual %p instance %p); model not hidden", (void*)S.battle,
+                    (void*)S.unit, (void*)S.entity, (void*)sv, (void*)inst);
+            }
+            return;
+        }
+        char flags[kHideMaxParts * 2 + 1] = "";
+        for (int k = 0; k < n; ++k) {
+            uint32_t v = 0;
+            Rd(parts + kInstPartStride * k, v);
+            g_hide.want[k] = v;
+            flags[2 * k] = v > 9 ? '+' : (char)('0' + v);
+            flags[2 * k + 1] = k + 1 < n ? ' ' : 0;
+            if (v) Wr(parts + kInstPartStride * k, uint32_t(0));
+        }
+        g_hide.sv = sv;
+        g_hide.inst = inst;
+        g_hide.parts = parts;
+        g_hide.n = n;
+        g_hide.tCheck = now;
+        g_hide.rewrites = 0;
+        g_hide.warned = false;
+        Log("hide-self: hero model hidden in our view (visual %p instance %p, %d parts, flags were %s)", (void*)sv, (void*)inst, n, flags);
+        return;
+    }
+    for (int k = 0; k < g_hide.n; ++k) {
+        uint32_t v = 0;
+        if (Rd(g_hide.parts + kInstPartStride * k, v) && v) {
+            g_hide.want[k] = v;
+            Wr(g_hide.parts + kInstPartStride * k, uint32_t(0));
+            if (g_hide.rewrites++ < 8) Log("hide-self: game showed part %d again (flag %u); hidden again", k, v);
+        }
+    }
+}
 extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     if (!g_loggedUpdateThread) {
         g_loggedUpdateThread = true;
@@ -6068,6 +6173,7 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     PathStep();
     EdgeStep();
     ShotStep();
+    HideSelfStep();
 }
 #ifdef HFPS_LUA_MODULE
 namespace luaapi {
