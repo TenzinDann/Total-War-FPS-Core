@@ -338,6 +338,20 @@ constexpr uintptr_t vtSetPos = 0xb8, vtSetTarget = 0xc0, vtSetUp = 0xc8, vtSetFo
                     vtSetFar = 0x98, vtMgrUpdate = 0x298;
 constexpr size_t kVtCopySlots = 0x100;
 constexpr float kPi = 3.14159265358979f;
+constexpr uintptr_t oEntRecord = 0x2d8, oRecHeight = 0x6c;
+float g_leadAdj[4] = {0.f, 0.f, -0.05f, -0.05f};
+int LeadBand(float v) { return v < 4.5f ? 0 : v < 8.f ? 1 : v < 11.f ? 2 : 3; }
+float LeadAutoStep(float adj, float d, float v, float dt, float tau, float lo, float hi) {
+    if (!(v > 0.5f) || !(dt > 0.f) || !std::isfinite(d)) return adj;
+    float a = adj - (d / v) * (1.f - std::exp(-dt / (tau > 0.05f ? tau : 0.05f)));
+    return a < lo ? lo : a > hi ? hi : a;
+}
+float EyeFromHeight(float h, float def) {
+    if (!(h > 0.3f && h < 30.f)) return def;
+    if (h < 1.95f) return std::fmax(0.6f, def * h / 1.95f);
+    if (h > 2.5f) return def + (h - 2.5f) * 0.9f;
+    return def;
+}
 constexpr uintptr_t oScriptBattle = 0x468, oBattleCmdQueue = 0x644e8, oBattleNoCmd1 = 0x3b0, oBattleNoCmd2 = 0x3b1;
 constexpr uintptr_t oUnitProjectile = 0x3d50;
 constexpr uintptr_t oEntId = 0x258;
@@ -469,6 +483,8 @@ struct Config {
     float leash = 3.0f;
     float stuckLeash = 0.6f;
     float tpLead = 0.2f;
+    bool leadAuto = true, eyeFromHeight = true;
+    float leadAutoTau = 1.5f;
     bool wall = true;
     float stepUp = 0.6f, stepDown = 0.8f, gravity = 20.3f, jumpHeight = 0.f, airControl = 0.35f, airTpMax = 1.5f, landDip = 0.12f;
     float dropClearance = 3.5f, dropPushSpeed = 6.f, dropMaxPush = 6.f;
@@ -687,6 +703,12 @@ void LoadConfig() {
     if (cfg.tpShotGuard != 0.f && (cfg.tpShotGuard < 0.5f || cfg.tpShotGuard > 3.f)) cfg.tpShotGuard = 1.1f;
     cfg.tpLead = IniF(L"move", L"teleport_lead", cfg.tpLead, ini);
     if (cfg.tpLead < 0.f || cfg.tpLead > 0.6f) cfg.tpLead = 0.2f;
+    cfg.leadAuto = GetPrivateProfileIntW(L"move", L"teleport_lead_auto", 1, ini) != 0;
+    cfg.leadAutoTau = IniF(L"move", L"teleport_lead_auto_tau", 1.5f, ini);
+    if (!(cfg.leadAutoTau >= 0.2f && cfg.leadAutoTau <= 10.f)) cfg.leadAutoTau = 1.5f;
+    cfg.eyeFromHeight = GetPrivateProfileIntW(L"camera", L"eye_from_height", 1, ini) != 0;
+    Log("ghost: teleport_lead=%.3f teleport_lead_auto=%d tau=%.2f eye_from_height=%d", cfg.tpLead, cfg.leadAuto, cfg.leadAutoTau,
+        cfg.eyeFromHeight);
     cfg.wall = GetPrivateProfileIntW(L"move", L"wall", 1, ini) != 0;
     cfg.stepUp = IniF(L"move", L"step_up", 0.6f, ini);
     cfg.stepDown = IniF(L"move", L"step_down", 0.8f, ini);
@@ -1023,6 +1045,9 @@ struct State {
     double tStuck = 0, tNoFollow = -1;
     float stuckPos[3] = {};
     float leadPos[2] = {0, 0};
+    double tGuard = -1, tLeadLog = 0;
+    float leadOffSum = 0;
+    int leadOffN = 0;
     bool pinned = false;
     int32_t pinAct = 0;
     double tPinned = 0;
@@ -1385,6 +1410,18 @@ void Enter(uintptr_t mgr) {
     S.unit = unit;
     S.flyer = flyer;
     S.entity = entity;
+    {
+        static float s_cfgEye = -1.f, s_lastAuto = -1.f;
+        if (s_cfgEye < 0.f || cfg.eyeHeight != s_lastAuto) s_cfgEye = cfg.eyeHeight;
+        float h = 0.f, eye = s_cfgEye;
+        uintptr_t rec = Ptr(entity + oEntRecord);
+        if (cfg.eyeFromHeight && !flyer && rec && Rd(rec + oRecHeight, h)) eye = EyeFromHeight(h, s_cfgEye);
+        cfg.eyeHeight = s_lastAuto = eye;
+        Log("ghost: entity height %.2f m -> eye height %.2f m (config %.2f%s)", h, eye, s_cfgEye,
+            !cfg.eyeFromHeight ? ", eye_from_height off" : flyer ? ", flyer" : "");
+        Log("ghost: learned teleport lead by speed band (walk / run / sprint / tactical sprint): %.3f %.3f %.3f %.3f s",
+            cfg.tpLead + g_leadAdj[0], cfg.tpLead + g_leadAdj[1], cfg.tpLead + g_leadAdj[2], cfg.tpLead + g_leadAdj[3]);
+    }
     S.entCount = entCount;
     S.entPath = path;
     S.havePos = false;
@@ -4262,8 +4299,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4334,7 +4369,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4417,26 +4451,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -5081,11 +5106,31 @@ void Apply(uintptr_t mgr) {
         camPos[0] = S.kinPos[0];
         camPos[1] = S.kinY + S.landY;
         camPos[2] = S.kinPos[1];
+        if (cfg.leadAuto && cfg.tpLead > 0.f && dt > 0.f && !S.stuck && !paused && !unbound && !pinned && !S.air && now - S.tGuard > 0.5 &&
+            (S.tLand < 0 || now - S.tLand > 0.5)) {
+            float v = std::sqrt(S.kinVel[0] * S.kinVel[0] + S.kinVel[1] * S.kinVel[1]);
+            float tvx = mx * spd, tvz = mz * spd, tv = std::sqrt(tvx * tvx + tvz * tvz);
+            if (v > 1.5f && tv > 1.5f && std::fabs(v - tv) < 0.12f * tv) {
+                float d = ((S.outPos[0] - S.kinPos[0]) * S.kinVel[0] + (S.outPos[2] - S.kinPos[1]) * S.kinVel[1]) / v;
+                int b = LeadBand(tv);
+                g_leadAdj[b] = LeadAutoStep(g_leadAdj[b], d, v, dt, cfg.leadAutoTau, -cfg.tpLead, 0.25f);
+                S.leadOffSum += d;
+                ++S.leadOffN;
+                if (now - S.tLeadLog > 5.0 && S.leadOffN > 30) {
+                    Log("ghost: hero %+.2f m ahead of the camera on average at %.1f m/s (band %d) -> lead %.3f s", S.leadOffSum / S.leadOffN, tv, b,
+                        cfg.tpLead + g_leadAdj[b]);
+                    S.tLeadLog = now;
+                    S.leadOffSum = 0;
+                    S.leadOffN = 0;
+                }
+            }
+        }
         S.leadPos[0] = S.kinPos[0];
         S.leadPos[1] = S.kinPos[1];
         if (!S.stuck && !paused && !unbound && !pinned && !S.air && cfg.tpLead > 0.f) {
             float L = cfg.tpLead, tau = cfg.accelTau;
             float vtx = mx * spd, vtz = mz * spd;
+            if (cfg.leadAuto) L = std::fmin(0.45f, std::fmax(0.f, cfg.tpLead + g_leadAdj[LeadBand(std::sqrt(vtx * vtx + vtz * vtz))]));
             float f = tau > 0.001f ? tau * (1.f - std::exp(-L / tau)) : 0.f;
             S.leadPos[0] += vtx * L + (S.kinVel[0] - vtx) * f;
             S.leadPos[1] += vtz * L + (S.kinVel[1] - vtz) * f;
@@ -5112,12 +5157,14 @@ void Apply(uintptr_t mgr) {
                     }
                     if (found) {
                         ++S.tpGuarded;
+                        S.tGuard = now;
                         if (S.guardLogs++ < 12)
                             Log("move(teleport): guard - target %.2f m from a fresh bullet path, pulled back to %.0f%% of the lead "
                                 "(gap %.2f m)", gap0, (k < 0.f ? 0.f : k) * 100.f, gap1);
                     } else {
                         skipTp = true;
                         ++S.tpGuardSkipped;
+                        S.tGuard = now;
                         if (S.guardLogs++ < 12)
                             Log("move(teleport): guard - even the camera spot is %.2f m from a fresh bullet path; teleport held", gap1);
                     }
