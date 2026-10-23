@@ -3830,6 +3830,42 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     vmgame::LauncherCast(kind, true, windup);
     return true;
 }
+struct LauncherWatch {
+    uintptr_t inst[vmgame::kLauncherKinds] = {}, def[vmgame::kLauncherKinds] = {}, unit = 0;
+    double tScan = -1;
+    int busySkips = 0;
+} g_lw;
+void LauncherWatchOtherCasts(double now) {
+    if (!g_heroLauncher || !g_abilityOk || !vmgame::LauncherConfigured()) return;
+    if (S.unit != g_lw.unit || g_lw.tScan < 0 || now - g_lw.tScan >= 1.0) {
+        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
+            uintptr_t a = 0, d = 0;
+            int32_t id = AbilityId(k);
+            bool has = id >= 0 && FindAbility(id, &a, &d);
+            g_lw.inst[k] = has ? a : 0, g_lw.def[k] = has ? d : 0;
+        }
+        g_lw.unit = S.unit, g_lw.tScan = now;
+    }
+    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
+        uintptr_t A = g_lw.inst[k];
+        int32_t steps = 0;
+        if (!A || !Rd(A + oAbWindSteps, steps) || steps <= 0) continue;
+        float windup = vmgame::LauncherWindup(k);
+        if (g_lw.def[k]) Rd(g_lw.def[k] + oAbDefWindup, windup);
+        if (A == g_lg.inst && now - g_lg.tIssue < windup + 2.5) continue;
+        g_lg.inst = A, g_lg.tIssue = now;
+        if (vmgame::LauncherBusy()) {
+            if (g_lw.busySkips++ < 4) Log("launcher: %s wind-up started while the launcher is still busy - not animated", vmgame::LauncherAbility(k));
+            continue;
+        }
+        g_lg.kind = k, g_lg.windup = windup, g_lg.sawWind = true;
+        ++g_lg.casts;
+        vmgame::LauncherCast(k, true, windup);
+        if (g_lg.logs < 30)
+            ++g_lg.logs, Log("launcher: %s wind-up started without G / X / F (ability bar / game button) - first-person launcher follows it", vmgame::LauncherAbility(k));
+        return;
+    }
+}
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
         bool has = false;
@@ -3844,6 +3880,7 @@ void LauncherGameStep(double now) {
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
     }
+    if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
     int32_t steps = 0, cool = 0;
     unsigned char flags = 0;
