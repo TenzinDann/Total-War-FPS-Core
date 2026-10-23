@@ -1,7 +1,8 @@
 volatile LONG g_meleeIn = 0;
 bool MeleeWeapon() {
     return Wp().rend.Clips() && (Wp().rend.FindClip("m_light_stab") >= 0 || Wp().rend.FindClip("m_gs_light_left") >= 0 ||
-                                 Wp().rend.FindClip("m_gh_light_left") >= 0 || Wp().rend.FindClip("m_hb_light_left") >= 0);
+                                 Wp().rend.FindClip("m_gh_light_left") >= 0 || Wp().rend.FindClip("m_hb_light_left") >= 0 ||
+                                 Wp().rend.FindClip("m_es_strike_1") >= 0);
 }
 volatile LONG g_meleeOn = 0, g_meleeStrike = 0;
 volatile LONG g_meleeHitQ[32] = {};
@@ -320,8 +321,35 @@ const Impact kSp2Impact[kActs] = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -
                                   {kSfxHitBash, -1}, {kSfxHitSlash, kSfxTailSlash}, {-1, -1}};
 const Moveset kSpear2 = {"m_sp_thrust", kSp2Def, kSp2Exit, static_cast<int>(sizeof kSp2Exit / sizeof *kSp2Exit), kSp2Impact,
                          0.2f, 0.8f, 1.0f, nullptr, 0.2f, 0.3f, nullptr, 0.2f, 1, 0.30f};
+const Def kEsDef[kActs] = {
+    {"idle", "idle", 0.2f, 1.f, 0.f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
+    {"ready", "draw", 0.1f, 1.f, 0.5f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
+    {"default", "idle", 0.1f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.45f, -1, 0, 0},
+    {"default_left", "idle", 0.1f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.45f, -1, 0, 0},
+    {"default_right", "idle", 0.1f, 1.f, 0.f, 0, 0, -1, 0, kLight2, kHeavy1, 0.45f, -1, 0, 0},
+    {"(unused)", "idle", 0.1f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.45f, -1, 0, 0},
+    {"(unused)", "idle", 0.1f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.45f, -1, 0, 0},
+    {"melee_strike_1", "m_es_strike_1", 0.05f, 1.f, 1.133f, 0.833f, 1.133f, kDefaultRight, 0.833f, -1, -1, 0, kStrikeSweep, 0.167f, 0.f},
+    {"melee_strike_2", "m_es_strike_2", 0.05f, 1.f, 1.133f, 0.833f, 1.133f, kDefaultLeft, 0.833f, -1, -1, 0, kStrikeSweep, 0.167f, 0.f},
+    {"(unused)", "m_es_strike_1", 0.05f, 1.f, 1.133f, 0.833f, 1.133f, kDefaultRight, 0.833f, -1, -1, 0, kStrikeSweep, 0.167f, 0.f},
+    {"melee_lunge_unaimed", "m_es_lunge", 0.05f, 1.f, 1.267f, 0.833f, 1.267f, kDefault, 0.833f, -1, -1, 0, kStrikeHeavy, 0.167f, 0.f},
+    {"(unused)", "m_es_lunge", 0.05f, 1.f, 1.267f, 0.833f, 1.267f, kDefault, 0.833f, -1, -1, 0, kStrikeHeavy, 0.167f, 0.f},
+    {"(unused)", "m_es_lunge", 0.05f, 1.f, 1.267f, 0.833f, 1.267f, kDefault, 0.833f, -1, -1, 0, kStrikeHeavy, 0.167f, 0.f},
+    {"melee_clang", "m_es_clang", 0.05f, 1.f, 1.233f, 1.1f, kInf, kDefault, 1.1f, -1, -1, 0, kStrikeBash, 0.1f, 0.f},
+    {"(unused)", "m_es_strike_1", 0.05f, 1.f, 1.133f, 0.833f, 1.133f, kDefaultRight, 0.833f, -1, -1, 0, kStrikeSweep, 0.167f, 0.f},
+    {"block", "m_es_parry_pose", 0.05f, 1.f, 0.f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
+};
+const Exit kEsExit[] = {{"draw", "idle", 0.2f}, {"m_es_strike_1", "idle", 0.2f}, {"m_es_strike_2", "idle", 0.2f}, {"m_es_lunge", "idle", 0.2f},
+                        {"m_es_clang", "idle", 0.2f}, {"m_es_parry_end", "idle", 0.1f}};
+const Impact kEsImpact[kActs] = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
+                                 {kSfxHitSlash, -1}, {kSfxHitSlash, -1}, {kSfxHitSlash, -1},
+                                 {kSfxHitStab, -1}, {kSfxHitStab, -1}, {kSfxHitStab, -1},
+                                 {kSfxHitBash, -1}, {kSfxHitSlash, -1}, {-1, -1}};
+const Moveset kEnergySword = {"m_es_strike_1", kEsDef, kEsExit, static_cast<int>(sizeof kEsExit / sizeof *kEsExit), kEsImpact,
+                              0.4f, 0.8f, 0.6f, "m_es_parry_end", 0.05f};
 const Moveset& Ms() {
     if (Wp().rend.FindClip(kSpear2.detect) >= 0) return kSpear2;
+    if (Wp().rend.FindClip(kEnergySword.detect) >= 0) return kEnergySword;
     if (Wp().rend.FindClip(kHalberd.detect) >= 0) return kHalberd;
     if (Wp().rend.FindClip(kGreathammer.detect) >= 0) return kGreathammer;
     return Wp().rend.FindClip(kGreatsword.detect) >= 0 ? kGreatsword : kSpear;
@@ -530,6 +558,11 @@ void MeleeStep(vm::Look& l, double now) {
         g.start = now;
         g.pending = false;
         ClearSwings();
+        if (&Ms() == &kEnergySword && Wp().spinLoop.Loaded()) {
+            Wp().spinLoop.FadeAll();
+            Wp().spinLoop.Play(Wp().set.spinVolume, true);
+            if (g_log) g_log("melee: energy sword hum loop on (volume %.2f)", Wp().set.spinVolume);
+        }
         for (HitRec& h : g_hitQ) h.on = false;
     }
     if (InterlockedExchange(&g_reqDraw, 0)) {
