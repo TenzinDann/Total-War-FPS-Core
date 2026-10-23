@@ -580,6 +580,7 @@ float IniF(const wchar_t* sec, const wchar_t* key, float def, const wchar_t* ini
     double v = wcstod(buf, &end);
     return (end != buf && std::isfinite(v)) ? static_cast<float>(v) : def;
 }
+void LoadMeleeCats(const wchar_t* ini);
 LONG g_cfgGen = 0;
 void LoadConfig() {
     wchar_t ini[MAX_PATH];
@@ -772,6 +773,7 @@ void LoadConfig() {
     if (cfg.meleeHeavySplashMax < 0 || cfg.meleeHeavySplashMax > 32) cfg.meleeHeavySplashMax = 12;
     cfg.meleeHeavyReach = IniF(L"melee", L"heavy_reach", cfg.meleeHeavyReach, ini);
     if (!(cfg.meleeHeavyReach >= 0.5f && cfg.meleeHeavyReach <= 3.f)) cfg.meleeHeavyReach = 1.3f;
+    LoadMeleeCats(ini);
     cfg.hideHud = GetPrivateProfileIntW(L"ui", L"hide_hud", 1, ini) != 0;
     cfg.hideCursor = GetPrivateProfileIntW(L"ui", L"hide_cursor", 1, ini) != 0;
     cfg.hidePaths = GetPrivateProfileIntW(L"ui", L"hide_paths", 1, ini) != 0;
@@ -1919,8 +1921,73 @@ const MeleeArc kMeleeArcs[vmgame::kStrikeKinds] = {
     {2.8f, 40.f, 1.6f, 3, true},
     {2.2f, 60.f, 0.0f, 5, false},
 };
+struct MeleeKindCfg {
+    float reach;
+    float halfDeg;
+    float dmg;
+    int maxHit;
+    bool damage;
+    float splashR;
+    float splashDmg;
+    int splashMax;
+};
+struct MeleeCatCfg {
+    MeleeKindCfg k[vmgame::kStrikeKinds];
+    float damageScale;
+    float fallback;
+    bool alwaysHit;
+    float blockAngle;
+};
+MeleeCatCfg g_meleeCat[vmgame::kMeleeCats];
+const wchar_t* const kMeleeKindKey[vmgame::kStrikeKinds] = {L"stab", L"sweep", L"heavy_sweep", L"heavy", L"bash"};
+void LoadMeleeCats(const wchar_t* ini) {
+    for (int c = 0; c < vmgame::kMeleeCats; ++c) {
+        const wchar_t* sec = vmgame::MeleeCatSection(c);
+        MeleeCatCfg& m = g_meleeCat[c];
+        char line[640];
+        int ln = snprintf(line, sizeof line, "melee-cat: %ls", sec);
+        for (int k = 0; k < vmgame::kStrikeKinds; ++k) {
+            const MeleeArc& a = kMeleeArcs[k];
+            const bool heavy = k == vmgame::kStrikeHeavySweep || k == vmgame::kStrikeHeavy;
+            auto get = [&](const wchar_t* what, float def, float lo, float hi) {
+                wchar_t key[48];
+                swprintf(key, 48, L"%ls_%ls", kMeleeKindKey[k], what);
+                float v = IniF(sec, key, def, ini);
+                return (v >= lo && v <= hi) ? v : def;
+            };
+            MeleeKindCfg& o = m.k[k];
+            o.reach = get(L"reach", a.reach * (heavy ? cfg.meleeHeavyReach : 1.f) + 0.3f, 0.3f, 12.f);
+            o.halfDeg = get(L"arc", a.halfDeg * 2.f, 1.f, 360.f) * 0.5f;
+            o.dmg = get(L"damage", a.damage ? a.dmg : 0.f, 0.f, 20.f);
+            o.damage = o.dmg > 0.f;
+            o.maxHit = static_cast<int>(get(L"max", static_cast<float>(a.maxHit), 0.f, 16.f) + 0.5f);
+            o.splashR = get(L"splash_radius", heavy ? cfg.meleeHeavySplashRadius : cfg.meleeSplashRadius, 0.f, 6.f);
+            o.splashDmg = get(L"splash_damage", heavy ? cfg.meleeHeavySplashDamage : cfg.meleeSplashDamage, 0.f, 5.f);
+            o.splashMax = static_cast<int>(get(L"splash_max", static_cast<float>(heavy ? cfg.meleeHeavySplashMax : cfg.meleeSplashMax), 0.f, 32.f) + 0.5f);
+            if (ln > 0 && ln < static_cast<int>(sizeof line))
+                ln += snprintf(line + ln, sizeof line - ln, " | %ls %.2fm %.0fdeg x%.2f n%d s%.1f/%.2f/%d", kMeleeKindKey[k], o.reach, o.halfDeg * 2.f,
+                               o.dmg, o.maxHit, o.splashR, o.splashDmg, o.splashMax);
+        }
+        float ds = IniF(sec, L"damage_scale", cfg.meleeDamage, ini);
+        m.damageScale = (ds >= 0.f && ds <= 20.f) ? ds : cfg.meleeDamage;
+        float fb = IniF(sec, L"fallback_damage", cfg.meleeFallback, ini);
+        m.fallback = (fb >= 0.f && fb <= 5000.f) ? fb : cfg.meleeFallback;
+        m.alwaysHit = GetPrivateProfileIntW(sec, L"always_hit", cfg.meleeAlwaysHit ? 1 : 0, ini) != 0;
+        float ba = IniF(sec, L"block_angle", -1.f, ini);
+        m.blockAngle = (ba >= 0.f && ba <= 180.f) ? ba : -1.f;
+        Log("%s | scale %.2f fallback %.0f always_hit %d block_angle %.0f", line, m.damageScale, m.fallback, m.alwaysHit ? 1 : 0, m.blockAngle);
+    }
+}
+float ShieldAngleNow() {
+    if (vmgame::MeleeActive()) {
+        int c = vmgame::CurrentMeleeCat();
+        if (c >= 0 && c < vmgame::kMeleeCats && g_meleeCat[c].blockAngle >= 0.f) return g_meleeCat[c].blockAngle;
+    }
+    return cfg.shieldAngle;
+}
 struct MeleeReq {
     int kind;
+    int cat;
     float ox, oy, oz;
     float dx, dz;
     uintptr_t hero;
@@ -1946,17 +2013,18 @@ struct MeleeAtk {
 static_assert(sizeof(MeleeAtk) == 0x38 && __builtin_offsetof(MeleeAtk, attackIdx) == 0x20 && __builtin_offsetof(MeleeAtk, flags) == 0x30,
               "melee attacker block layout");
 bool MeleeEngineReady() { return cfg.meleeEngine && g_meleeHitOk && EarlyFlightActive() && g_ef.world && g_ef.hero == S.entity; }
-bool MeleeEngineQueue(int kind, const float eye[3], const float fwd[3]) {
+bool MeleeEngineQueue(int kind, int cat, const float eye[3], const float fwd[3]) {
+    if (cat < 0 || cat >= vmgame::kMeleeCats) cat = vmgame::kMeleeCatSword;
     float hx = fwd[0], hz = fwd[2], hl = std::sqrt(hx * hx + hz * hz);
     if (kind < 0 || kind >= vmgame::kStrikeKinds || hl < 1e-3f || !S.entity) return false;
-    MeleeReq r = {kind, eye[0], eye[1], eye[2], hx / hl, hz / hl, S.entity, Now()};
+    MeleeReq r = {kind, cat, eye[0], eye[1], eye[2], hx / hl, hz / hl, S.entity, Now()};
     AcquireSRWLockExclusive(&g_mq.lock);
     bool ok = g_mq.n < 8;
     if (ok) g_mq.q[g_mq.n++] = r;
     ReleaseSRWLockExclusive(&g_mq.lock);
     return ok;
 }
-int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const MeleeArc& arc, float frac, int* dmgOut) {
+int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const MeleeKindCfg& arc, const MeleeCatCfg& cc, float frac, int* dmgOut) {
     using FnCalc = int32_t* (*)(uintptr_t combat, int32_t* out, uintptr_t attacker, uintptr_t victim, uint32_t splitTargets);
     using FnCtor = void* (*)(void* hitInfo, uintptr_t victim);
     using FnDtor = void (*)(void* hitInfo);
@@ -1985,7 +2053,7 @@ int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const Mele
                 rv[0], rv[1], vhp, vmax, a58);
         }
         if (r[0] == 0) {
-            if (!cfg.meleeAlwaysHit) return 0;
+            if (!cc.alwaysHit) return 0;
             InterlockedIncrement(&g_mq.forced);
         }
     }
@@ -1996,11 +2064,11 @@ int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const Mele
     int dmg = 0;
     if (arc.damage) {
         float base = static_cast<float>(r[1]);
-        if (base <= 1.f && cfg.meleeFallback > 0.f) {
-            base = cfg.meleeFallback;
+        if (base <= 1.f && cc.fallback > 0.f) {
+            base = cc.fallback;
             InterlockedIncrement(&g_mq.fallback);
         }
-        float d = base * arc.dmg * frac * cfg.meleeDamage;
+        float d = base * arc.dmg * frac * cc.damageScale;
         dmg = d < 1.f ? 1 : static_cast<int>(d + 0.5f);
         MeleeAtk atk;
         memset(&atk, 0, sizeof atk);
@@ -2061,12 +2129,13 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
             vmgame::MeleeHitFeedback(0);
             continue;
         }
-        const MeleeArc& arc = kMeleeArcs[rq.kind];
+        const int cat = rq.cat >= 0 && rq.cat < vmgame::kMeleeCats ? rq.cat : vmgame::kMeleeCatSword;
+        const MeleeCatCfg& cc = g_meleeCat[cat];
+        const MeleeKindCfg& arc = cc.k[rq.kind];
         const bool heavy = rq.kind == vmgame::kStrikeHeavySweep || rq.kind == vmgame::kStrikeHeavy;
-        const float splashR = heavy ? cfg.meleeHeavySplashRadius : cfg.meleeSplashRadius;
-        const float splashDmg = heavy ? cfg.meleeHeavySplashDamage : cfg.meleeSplashDamage;
-        const int splashMax = heavy ? cfg.meleeHeavySplashMax : cfg.meleeSplashMax;
-        float cosHalf = std::cos(arc.halfDeg * kPi / 180.f), reach = arc.reach * (heavy ? cfg.meleeHeavyReach : 1.f) + 0.3f;
+        const float splashR = arc.splashR, splashDmg = arc.splashDmg;
+        const int splashMax = arc.splashMax;
+        float cosHalf = std::cos(arc.halfDeg * kPi / 180.f), reach = arc.reach;
         const bool splash = splashR > 0.f && splashMax > 0;
         const float scanR = reach + (splash ? splashR : 0.f);
         struct Cand {
@@ -2139,7 +2208,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
             if (np >= arc.maxHit || np >= 16) continue;
             prim[np++] = c;
             cand[c].done = true;
-            int dmg = 0, rr = MeleeEngineHit(world, hero, cand[c].e, arc, 1.f, &dmg);
+            int dmg = 0, rr = MeleeEngineHit(world, hero, cand[c].e, arc, cc, 1.f, &dmg);
             if (rr) ++hits;
             if (rr == 2) ++kills;
             if (dn < 140) dn += snprintf(dl + dn, sizeof dl - dn, "%s%d%s@%.1f", np > 1 ? " " : "", dmg, rr == 2 ? "k" : rr ? "" : "x", cand[c].d);
@@ -2173,7 +2242,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
             for (int s = 0; s < ms; ++s) {
                 Cand& cd = cand[sc[s].c];
                 cd.done = true;
-                int dmg = 0, rr = MeleeEngineHit(world, hero, cd.e, arc, splashDmg, &dmg);
+                int dmg = 0, rr = MeleeEngineHit(world, hero, cd.e, arc, cc, splashDmg, &dmg);
                 if (rr) ++sHits;
                 if (rr == 2) ++sKills;
                 if (sn < 140) sn += snprintf(sl + sn, sizeof sl - sn, "%s%d%s@%.1f", s ? " " : "", dmg, rr == 2 ? "k" : rr ? "" : "x", sc[s].d);
@@ -2184,9 +2253,9 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         InterlockedExchangeAdd(&g_mq.kills, kills + sKills);
         vmgame::MeleeHitFeedback(hits + sHits);
         if (g_mq.logs++ < 200)
-            Log("melee-engine: kind %d %s (reach %.1f m, splash %.1f m x%d) (%.0f ms after queue) scanned %u, in arc %d, hit %d, killed %d, "
+            Log("melee-engine: cat %d kind %d %s (reach %.2f m, arc %.0f, splash %.1f m x%d) (%.0f ms after queue) scanned %u, in arc %d, hit %d, killed %d, "
                 "damage [%s] | splash hit %d, killed %d [%s] (forced hits so far %ld, fallback damage so far %ld)",
-                rq.kind, heavy ? "heavy" : "light", reach, splashR, splashMax, (Now() - rq.t) * 1000.0, scanned, inArc, hits, kills, dl, sHits,
+                cat, rq.kind, heavy ? "heavy" : "light", reach, arc.halfDeg * 2.f, splashR, splashMax, (Now() - rq.t) * 1000.0, scanned, inArc, hits, kills, dl, sHits,
                 sKills, sl, g_mq.forced, g_mq.fallback);
     }
 }
@@ -3284,7 +3353,7 @@ uint64_t HeroProjHit(uintptr_t self, uintptr_t proj, uintptr_t list, uintptr_t f
         if (shooter ? ReadVec(shooter + oEntPos, src) : ReadVec(proj + 0xf4, src)) dx = src[0] - h[0], dz = src[2] - h[2];
     }
     float ang = 0.f;
-    bool front = shieldhit::Frontal(S.yaw, dx, dz, cfg.shieldAngle, &ang);
+    bool front = shieldhit::Frontal(S.yaw, dx, dz, ShieldAngleNow(), &ang);
     float m[4] = {}, rec[2] = {};
     for (int i = 0; i < 4; ++i) Rd(proj + 0x78 + 4 * i, m[i]);
     uintptr_t r = Ptr(proj + 0x90);
@@ -3293,7 +3362,7 @@ uint64_t HeroProjHit(uintptr_t self, uintptr_t proj, uintptr_t list, uintptr_t f
     float speed = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
     if (!front) {
         InterlockedIncrement(&g_sb.side);
-        if (ShieldLog()) Log("shield-game: missile from the side (%.0f deg > %.0f) not blocked, raw %.0f, speed %.1f", ang, cfg.shieldAngle, raw, speed);
+        if (ShieldLog()) Log("shield-game: missile from the side (%.0f deg > %.0f) not blocked, raw %.0f, speed %.1f", ang, ShieldAngleNow(), raw, speed);
         return orig(self, proj, list, flag, out);
     }
     vmgame::ShieldHit();
@@ -3340,9 +3409,9 @@ extern "C" void hfps_hero_melee(uintptr_t self, uintptr_t pend) {
     ReadVec(attacker + oEntPos, a);
     ReadVec(self + oEntPos, h);
     float ang = 0.f;
-    if (!shieldhit::Frontal(S.yaw, a[0] - h[0], a[2] - h[2], cfg.shieldAngle, &ang)) {
+    if (!shieldhit::Frontal(S.yaw, a[0] - h[0], a[2] - h[2], ShieldAngleNow(), &ang)) {
         InterlockedIncrement(&g_sb.side);
-        if (ShieldLog()) Log("shield-game: melee from the side (%.0f deg > %.0f) not blocked, kind %d damage %u", ang, cfg.shieldAngle, kind, dmg);
+        if (ShieldLog()) Log("shield-game: melee from the side (%.0f deg > %.0f) not blocked, kind %d damage %u", ang, ShieldAngleNow(), kind, dmg);
         return;
     }
     shieldhit::MeleeRewrite rw = shieldhit::RewriteMelee(kind, dmg, f);
@@ -3375,7 +3444,7 @@ uint64_t HeroStagger(uintptr_t self, uintptr_t info) {
         float v[3] = {};
         for (int i = 0; i < 3; ++i) Rd(info + 8 + 4 * i, v[i]);
         float ang = 0.f;
-        if (shieldhit::Frontal(S.yaw, -v[0], -v[2], cfg.shieldAngle, &ang)) {
+        if (shieldhit::Frontal(S.yaw, -v[0], -v[2], ShieldAngleNow(), &ang)) {
             InterlockedIncrement(&g_sb.stagger);
             uint8_t flag = 0;
             Rd(info + 0x14, flag);
@@ -4079,8 +4148,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4151,7 +4218,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4234,26 +4300,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -5084,10 +5141,11 @@ void Apply(uintptr_t mgr) {
     if (vmgame::MeleeActive()) {
         bool blockKey = g_cast.rmb && !S.ladMode;
         vmgame::MeleeInput(held && !S.sprint && now >= S.fireBlock, blockKey && !S.sprint);
-        int strike = vmgame::TakeMeleeStrike();
+        int strikeCat = vmgame::kMeleeCatSword;
+        int strike = vmgame::TakeMeleeStrike(&strikeCat);
         if (strike >= 0 && g_fireOk && cfg.fireEnabled) {
             bool engine = MeleeEngineReady();
-            if (engine ? MeleeEngineQueue(strike, eye, vFwd) : MeleeStrike(strike, eye, vFwd))
+            if (engine ? MeleeEngineQueue(strike, strikeCat, eye, vFwd) : MeleeStrike(strike, eye, vFwd))
                 ++S.meleeStrikes;
             else
                 ++S.meleeFailed;

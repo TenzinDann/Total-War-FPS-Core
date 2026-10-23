@@ -22,6 +22,17 @@ bool g_enabled = false;
 UINT g_testKey = VK_F7, g_reloadKey = VK_F8, g_animKey = VK_F9, g_modelKey = VK_F10;
 UINT g_shieldKey = 'Q', g_shieldHitKey = 0;
 wchar_t g_ini[MAX_PATH];
+const wchar_t* const kMeleeCatSec[kMeleeCats] = {L"melee_shield_spear", L"melee_sword", L"melee_hammer", L"melee_halberd"};
+float g_catBlock[kMeleeCats] = {-1.f, -1.f, -1.f, -1.f};
+void LoadCatBlocks() {
+    for (int c = 0; c < kMeleeCats; ++c) {
+        wchar_t buf[64];
+        GetPrivateProfileStringW(kMeleeCatSec[c], L"block", L"", buf, 64, g_ini);
+        wchar_t* end = nullptr;
+        double v = buf[0] ? wcstod(buf, &end) : -1.0;
+        g_catBlock[c] = (buf[0] && end != buf && v >= 0.0 && v <= 1.0) ? static_cast<float>(v) : -1.f;
+    }
+}
 constexpr int kMaxModels = 200;
 wchar_t g_models[kMaxModels][MAX_PATH * 2];
 int g_modelCount = 0;
@@ -175,6 +186,7 @@ void LoadAllSettings(int idx, vm::Settings& s) {
     g_crossSet = cs;
     s = vm::Settings();
     vm::LoadSettings(g_ini, s);
+    LoadCatBlocks();
     if (s.shieldModel[0]) {
         wchar_t rel[520], dir[MAX_PATH * 2], joined[MAX_PATH * 4], full[MAX_PATH * 2];
         wcsncpy(rel, s.shieldModel, 519);
@@ -967,6 +979,7 @@ void AnimStep(vm::Look& l, double now) {
         for (vm::GunSound& m : w.meleeSfx) m.Update();
     }
     InterlockedExchange(&g_meleeOn, MeleeWeapon() ? 1 : 0);
+    InterlockedExchange(&g_meleeCat, MeleeWeapon() ? melee::CatOf(melee::Ms()) : 0);
     if (!Wp().rend.Clips()) return;
     if (MeleeWeapon()) {
         MeleeStep(l, now);
@@ -1174,7 +1187,10 @@ void ShieldStep(vm::Look& l, double now, float dt) {
     bool meleeBlock = g_fp && MeleeWeapon() && (melee::g.act == melee::kBlock || melee::Guarding(now));
     g_sh.meleeBlock = meleeBlock ? 1 : 0;
     auto blockNow = [&]() {
-        if (meleeBlock) return s.shieldBlockAds;
+        if (meleeBlock) {
+            float b = g_catBlock[melee::CatOf(melee::Ms())];
+            return b >= 0.f ? b : s.shieldBlockAds;
+        }
         if (!allowed || g_sh.w < 0.6f) return 0.f;
         float a = g_mo.adsW;
         a = a <= 0.01f ? 0.f : (a >= 0.99f ? 1.f : a);
@@ -2695,9 +2711,6 @@ void LauncherCast(int kind, bool driven, float windup) {
 }
 void LauncherFire() { InterlockedExchange64(&g_lc.fireUs, static_cast<LONG64>(Now() * 1e6)); }
 void LauncherAbort() { InterlockedExchange64(&g_lc.abortUs, static_cast<LONG64>(Now() * 1e6)); }
-void LauncherCue(int cue, int kind) {
-    if (cue >= 0 && cue < 2 && kind >= 0 && kind < kLauncherKinds) InterlockedOr(&g_lc.cueReq, 1L << (cue * kLauncherKinds + kind));
-}
 void LadderPublish(const LadderView* v, int n, bool gunDown) {
     if (n < 0) n = 0;
     if (n > kLadderMax) n = kLadderMax;
@@ -2715,7 +2728,14 @@ void LadderSound(int kind) {
 bool LadderReady() { return Enabled() && g_ld.configured; }
 bool MeleeActive() { return g_meleeOn != 0; }
 void MeleeInput(bool attack, bool block) { InterlockedExchange(&g_meleeIn, (attack ? 1 : 0) | (block ? 2 : 0)); }
-int TakeMeleeStrike() { return static_cast<int>(InterlockedExchange(&g_meleeStrike, 0)) - 1; }
+int TakeMeleeStrike(int* cat) {
+    LONG s = InterlockedExchange(&g_meleeStrike, 0) - 1;
+    if (s < 0) return -1;
+    if (cat) *cat = static_cast<int>(s >> 4);
+    return static_cast<int>(s & 15);
+}
+int CurrentMeleeCat() { return static_cast<int>(g_meleeCat); }
+const wchar_t* MeleeCatSection(int cat) { return cat >= 0 && cat < kMeleeCats ? kMeleeCatSec[cat] : L""; }
 void MeleeHitFeedback(int hits) {
     LONG t = g_meleeHitQTail;
     if (t - g_meleeHitQHead >= 32) return;

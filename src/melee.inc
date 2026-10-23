@@ -4,6 +4,7 @@ bool MeleeWeapon() {
                                  Wp().rend.FindClip("m_gh_light_left") >= 0 || Wp().rend.FindClip("m_hb_light_left") >= 0);
 }
 volatile LONG g_meleeOn = 0, g_meleeStrike = 0;
+volatile LONG g_meleeCat = 0;
 volatile LONG g_meleeHitQ[32] = {};
 volatile LONG g_meleeHitQHead = 0, g_meleeHitQTail = 0;
 namespace melee {
@@ -326,6 +327,12 @@ const Moveset& Ms() {
     if (Wp().rend.FindClip(kGreathammer.detect) >= 0) return kGreathammer;
     return Wp().rend.FindClip(kGreatsword.detect) >= 0 ? kGreatsword : kSpear;
 }
+int CatOf(const Moveset& m) {
+    if (&m == &kSpear2 || &m == &kSpear) return kMeleeCatShieldSpear;
+    if (&m == &kGreathammer) return kMeleeCatHammer;
+    if (&m == &kHalberd) return kMeleeCatHalberd;
+    return kMeleeCatSword;
+}
 bool Guarding(double now) {
     const float lg = Ms().lightGuard;
     if (lg <= 0.f) return false;
@@ -517,7 +524,7 @@ void TryStrike(double now) {
     if (cd.strike < 0 || g.struck || now - g.start < cd.hitAt / cd.scale - StrikeLead()) return;
     g.struck = true;
     PushImpact({Ms().impact[g.act], now, g.start + cd.hitAt / cd.scale, g_swCur, g.act});
-    InterlockedExchange(&g_meleeStrike, cd.strike + 1);
+    InterlockedExchange(&g_meleeStrike, (CatOf(Ms()) << 4 | cd.strike) + 1);
     if (g_strikeN < 64) g_strikeTrace[g_strikeN++] = cd.strike;
     if (g_log) g_log("melee: %.3f %s strike %d", now - g.start, cd.name, cd.strike);
 }
