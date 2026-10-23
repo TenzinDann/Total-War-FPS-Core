@@ -2720,10 +2720,10 @@ bool StructureOver(const Surf* s, int n, float foot, float up, float down) {
     }
     return high && !stand;
 }
-bool InsideStructure(float x, float z, float foot) {
+bool InsideStructure(float x, float z, float foot, float up = -1.f) {
     Surf s[kMaxSurf];
     int n = SurfacesAt(x, z, s);
-    return StructureOver(s, n, foot, cfg.stepUp, cfg.stepDown);
+    return StructureOver(s, n, foot, up > 0.f ? up : cfg.stepUp, cfg.stepDown);
 }
 struct SegQuery {
     int32_t kind;
@@ -4262,8 +4262,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4334,7 +4332,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4417,26 +4414,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -4884,7 +4872,7 @@ void Apply(uintptr_t mgr) {
                 if (S.blocks++ < 20) Log("wall: blocked at %.2f,%.2f (foot %.2f, nothing within step_up %.2f) - %s", prevKin[0], prevKin[1],
                                          S.footY, cfg.stepUp, slid ? "slid along one axis" : "held");
             }
-            if (si >= 0 && !edge && cfg.wallBody && cfg.wall && g_wallOk) {
+            if (si >= 0 && !edge && !sf[si].blk && cfg.wallBody && cfg.wall && g_wallOk) {
                 float bx = S.kinPos[0] - prevKin[0], bz = S.kinPos[1] - prevKin[1], bl = std::sqrt(bx * bx + bz * bz);
                 if (S.bodyInside) {
                     if (!InsideStructure(S.kinPos[0], S.kinPos[1], S.footY)) {
@@ -4894,7 +4882,7 @@ void Apply(uintptr_t mgr) {
                 } else if (bl > 1e-4f) {
                     auto bodyAt = [&](float px, float pz, float ux, float uz) {
                         return InsideStructure(px, pz, S.footY) ||
-                               (cfg.wallBodyMargin > 0.f && InsideStructure(px + ux * cfg.wallBodyMargin, pz + uz * cfg.wallBodyMargin, S.footY));
+                               (cfg.wallBodyMargin > 0.f && InsideStructure(px + ux * cfg.wallBodyMargin, pz + uz * cfg.wallBodyMargin, S.footY, 2.f));
                     };
                     if (bodyAt(S.kinPos[0], S.kinPos[1], bx / bl, bz / bl)) {
                         const float tryPos[2][2] = {{S.kinPos[0], prevKin[1]}, {prevKin[0], S.kinPos[1]}};
@@ -4902,12 +4890,11 @@ void Apply(uintptr_t mgr) {
                         bool slid = false;
                         for (int t = 0; t < 2 && !slid; ++t) {
                             if (tryPos[t][0] == prevKin[0] && tryPos[t][1] == prevKin[1]) continue;
-                            if (bodyAt(tryPos[t][0], tryPos[t][1], tryDir[t][0], tryDir[t][1])) continue;
                             Surf s2[kMaxSurf];
                             bool e2 = false;
                             int n2 = SurfacesAt(tryPos[t][0], tryPos[t][1], s2);
                             int i2 = n2 ? WalkPick(s2, n2, S.footBlk, S.footY, cfg.stepUp, cfg.stepDown, &e2) : -1;
-                            if (i2 >= 0 && !e2) {
+                            if (i2 >= 0 && !e2 && (s2[i2].blk || !bodyAt(tryPos[t][0], tryPos[t][1], tryDir[t][0], tryDir[t][1]))) {
                                 S.kinPos[0] = tryPos[t][0];
                                 S.kinPos[1] = tryPos[t][1];
                                 S.kinVel[t == 0 ? 1 : 0] = 0;
