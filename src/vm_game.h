@@ -95,6 +95,7 @@ bool LauncherBusy();
 void LauncherCast(int kind, bool driven = false, float windup = 0.f);
 void LauncherFire();
 void LauncherAbort();
+void LauncherCue(int cue, int kind);
 constexpr int kLadderMax = 4;
 struct LadderView {
     float base[3];
