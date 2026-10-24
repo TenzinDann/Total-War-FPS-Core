@@ -129,6 +129,15 @@ void SidecarIni(int idx, wchar_t* out) {
 }
 vm::CrosshairSettings g_crossSet;
 vm::Crosshair g_cross;
+vm::CastMarkerStyle g_cmStyle;
+vm::CastMarker g_cmR;
+struct CastMarkerPub {
+    SRWLOCK lock = SRWLOCK_INIT;
+    bool on = false;
+    LONG seq = 0;
+    cm::Frame f;
+} g_cmPub;
+cm::Frame g_cmDraw;
 void ModelDir(int idx, wchar_t* out) {
     wcsncpy(out, g_models[idx], MAX_PATH * 2 - 1);
     out[MAX_PATH * 2 - 1] = 0;
@@ -185,6 +194,7 @@ void LoadAllSettings(int idx, vm::Settings& s) {
     vm::CrosshairSettings cs;
     vm::LoadCrosshair(g_ini, cs);
     g_crossSet = cs;
+    vm::LoadCastMarkerStyle(g_ini, g_cmStyle);
     s = vm::Settings();
     vm::LoadSettings(g_ini, s);
     LoadCatBlocks();
@@ -2275,6 +2285,20 @@ void WarmStep(IDXGISwapChain* sc) {
     }
     dev->Release();
 }
+void CastMarkerDraw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool hw) {
+    if (!g_cmStyle.enabled) return;
+    bool on;
+    AcquireSRWLockShared(&g_cmPub.lock);
+    on = g_cmPub.on;
+    if (on) g_cmDraw = g_cmPub.f;
+    ReleaseSRWLockShared(&g_cmPub.lock);
+    vm::WorldCam wc;
+    if (!on || !ReadCam(&wc)) return;
+    static int logs = 0;
+    bool drawn = g_cmR.Draw(ctx, rtv, w, h, hw, wc, g_cmDraw, g_cmStyle);
+    if (logs < 6 && drawn) ++logs, g_log("cast-marker: drawn %d vertices (%d lines, %d fill tris%s%s) on %ux%u", g_cmR.Verts(), g_cmDraw.nLines,
+                                          g_cmDraw.nTris, g_cmDraw.pillar ? ", pillar" : "", g_cmDraw.chevron ? ", chevron" : "", w, h);
+}
 void DrawLayer(IDXGISwapChain* sc, int part) {
     if (g_failed || !(g_testLayer || g_fp)) {
         if (!g_failed && g_warm && part == kPartAll) WarmStep(sc);
@@ -2356,6 +2380,8 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                         g_fprof.Mark("look");
                         if (part == kPartAll) HudCoverSave(dev, ctx, bb, td);
                         g_fprof.Mark("hud-save");
+                        if (g_fp) CastMarkerDraw(ctx, rtv, td.Width, td.Height, hw);
+                        g_fprof.Mark("cast-marker");
                         if (Wp().rend.Draw(ctx, rtv, bb, td.Width, td.Height, hw, Wp().set, look)) ++g_st.draws;
                         g_fprof.Mark("gun");
                         gunProf = vm::g_drawProf;
@@ -2853,6 +2879,13 @@ bool Muzzle(float* ndcX, float* ndcY, float* aspect) {
     }
     return false;
 }
+void CastMarkerSet(const cm::Frame* f) {
+    AcquireSRWLockExclusive(&g_cmPub.lock);
+    g_cmPub.on = f && f->on;
+    if (g_cmPub.on) g_cmPub.f = *f;
+    ++g_cmPub.seq;
+    ReleaseSRWLockExclusive(&g_cmPub.lock);
+}
 void PublishCamera(const float eye[3], const float right[3], const float up[3], const float fwd[3], float fovY) {
     InterlockedIncrement(&g_cam.seq);
     MemoryBarrier();
@@ -3018,9 +3051,6 @@ void LauncherCast(int kind, bool driven, float windup) {
 }
 void LauncherFire() { InterlockedExchange64(&g_lc.fireUs, static_cast<LONG64>(Now() * 1e6)); }
 void LauncherAbort() { InterlockedExchange64(&g_lc.abortUs, static_cast<LONG64>(Now() * 1e6)); }
-void LauncherCue(int cue, int kind) {
-    if (cue >= 0 && cue < 2 && kind >= 0 && kind < kLauncherKinds) InterlockedOr(&g_lc.cueReq, 1L << (cue * kLauncherKinds + kind));
-}
 bool MeleeActive() { return g_meleeOn != 0; }
 void MeleeInput(bool attack, bool block) { InterlockedExchange(&g_meleeIn, (attack ? 1 : 0) | (block ? 2 : 0)); }
 int TakeMeleeStrike(int* cat) {

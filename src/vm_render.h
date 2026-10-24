@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <cstdint>
+#include "cast_marker.h"
 namespace vm {
 constexpr int kMeleeSfx = 18;
 extern const wchar_t* const kMeleeSfxNames[kMeleeSfx];
@@ -517,6 +518,37 @@ private:
     ID3D11RasterizerState* rs_ = nullptr;
     ID3D11DepthStencilState* dss_ = nullptr;
     bool failed_ = false;
+};
+struct CastMarkerStyle {
+    bool enabled = true;
+    float width = 2.6f;
+    float outline = 1.2f;
+    float glow = 9.f;
+    float glowAlpha = 0.32f;
+    float fillAlpha = 0.13f;
+    float pillarWidth = 4.f;
+    float chevron = 13.f;
+    float tone[cm::kTones][3] = {{0.93f, 0.97f, 1.f}, {0.77f, 0.47f, 1.f}, {1.f, 0.67f, 0.24f}, {1.f, 0.33f, 0.30f}, {0.62f, 0.64f, 0.66f}};
+};
+bool LoadCastMarkerStyle(const wchar_t* ini, CastMarkerStyle& s);
+class CastMarker {
+public:
+    bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool rtvEncodesSrgb, const WorldCam& cam, const cm::Frame& f,
+              const CastMarkerStyle& s);
+    void Release();
+    int Verts() const { return verts_; }
+private:
+    bool Init(ID3D11Device* dev);
+    ID3D11Device* dev_ = nullptr;
+    ID3D11VertexShader* vs_ = nullptr;
+    ID3D11PixelShader* ps_ = nullptr;
+    ID3D11InputLayout* layout_ = nullptr;
+    ID3D11Buffer* vb_ = nullptr;
+    ID3D11BlendState* bs_ = nullptr;
+    ID3D11RasterizerState* rs_ = nullptr;
+    ID3D11DepthStencilState* dss_ = nullptr;
+    bool failed_ = false, warnedFull_ = false;
+    int verts_ = 0;
 };
 struct ScreenBufs {
     ID3D11Device* dev = nullptr;

@@ -7,6 +7,7 @@
 #include <cstring>
 #include "shield_hit.h"
 #include "vm_game.h"
+#include "cast_marker.h"
 #ifdef HFPS_PACK_ASSETS
 #include "pack_extract.h"
 #endif
@@ -513,6 +514,8 @@ struct Config {
     bool hideEdgeArrows = true;
     bool hudEnabled = true;
     bool castKeys = true;
+    bool castMarker = true;
+    float castMarkerPillar = 6.f;
     bool hudCover = true;
     char hideNames[kMaxHideUi][48] = {};
     int hideCount = 0;
@@ -813,6 +816,8 @@ void LoadConfig() {
     cfg.hudEnabled = GetPrivateProfileIntW(L"hud", L"enabled", 1, ini) != 0;
     cfg.hudCover = GetPrivateProfileIntW(L"hud", L"cover_viewmodel", 1, ini) != 0;
     cfg.castKeys = GetPrivateProfileIntW(L"hud", L"cast_keys", 1, ini) != 0;
+    cfg.castMarker = GetPrivateProfileIntW(L"hud", L"cast_marker", 1, ini) != 0;
+    cfg.castMarkerPillar = IniF(L"hud", L"cast_marker_pillar", cfg.castMarkerPillar, ini);
     if (!cfg.hudCover) vmgame::SetHudCover(0, 0, 0, 0);
     {
         wchar_t list[512];
@@ -1168,6 +1173,15 @@ struct CastState {
     float eye[3] = {}, fwd[3] = {};
     LONG events = 0;
 } g_cast;
+struct CastMarkerShared {
+    SRWLOCK lock = SRWLOCK_INIT;
+    cm::Req req;
+    uintptr_t unit = 0;
+    LONG gen = 0;
+    bool aimOk = false;
+    float aim[3] = {}, aimDist = 0, aimRange = -1;
+    bool aimEdge = false;
+} g_cms;
 void CastPush(LONG e) {
     LONG h = g_cast.head;
     if (h - g_cast.tail >= 16) return;
@@ -1175,9 +1189,11 @@ void CastPush(LONG e) {
     InterlockedExchange(&g_cast.head, h + 1);
     if (++g_cast.events <= 6) Log("cast: input event %ld (%s)", e, e == 101 ? "click while armed" : e == 102 ? "cancel while armed" : "Alt+slot key");
 }
+void CastMarkerClear();
 void CastReset() {
     InterlockedExchange(&g_cast.armed, 0);
     InterlockedExchange(&g_cast.tail, g_cast.head);
+    CastMarkerClear();
 }
 int CastSlotKey(WPARAM w) {
     if (w >= '1' && w <= '9') return static_cast<int>(w - '0');
@@ -3529,6 +3545,132 @@ void IssueUnitVisible(uintptr_t sb, uintptr_t unit, bool visible) {
     using Fn = void (*)(uintptr_t battleField, VisibleCmd* cmd);
     reinterpret_cast<Fn>(g_base + kFnScriptIssueVisible)(sb + oScriptBattle, &c);
 }
+struct CastMarkerLocal {
+    LONG gen = -2;
+    bool unit = false;
+    float eye[3] = {}, fwd[3] = {}, hero[3] = {}, uc[3] = {}, us = 0, ut = 0;
+    cm::Aim aim;
+    cm::Frame frame;
+    bool shown = false;
+    double tStat = 0, ms = 0;
+    int frames = 0, rebuilt = 0, queries = 0, logs = 0, lostLogs = 0;
+} g_cml;
+void CastMarkerClear() {
+    AcquireSRWLockExclusive(&g_cms.lock);
+    g_cms.req = cm::Req();
+    g_cms.unit = 0;
+    g_cms.aimOk = false;
+    ++g_cms.gen;
+    ReleaseSRWLockExclusive(&g_cms.lock);
+    if (g_cml.shown) vmgame::CastMarkerSet(nullptr);
+    g_cml.shown = false;
+    g_cml.gen = -2;
+}
+bool CmHeight(void* ctx, float x, float z, float* h) {
+    const NavCtx* c = static_cast<const NavCtx*>(ctx);
+    alignas(16) float d[8];
+    if (!c->ok || !c->pm || !MakeDestPm(c->pm, x, z, d, 0)) return false;
+    if (std::fabs(d[0] - x) > 1.5f || std::fabs(d[2] - z) > 1.5f) return false;
+    *h = d[1];
+    return true;
+}
+bool CastTargetShape(uintptr_t unit, const NavCtx& nav, float* centre, float* spread, float* top) {
+    uintptr_t battle = 0;
+    if (!unit || !CmdQueue(&battle)) return false;
+    int heroAl = -1;
+    unsigned n = CollectUnits(battle, &heroAl);
+    bool found = false;
+    for (unsigned i = 0; i < n && !found; ++i) found = g_units[i].unit == unit;
+    if (!found) return false;
+    static uintptr_t ents[1024];
+    unsigned ne = UnitEntities(unit, ents, 1024);
+    float sx = 0, sz = 0, ymax = -1e9f, ysum = 0;
+    static float pos[1024][3];
+    unsigned k = 0;
+    for (unsigned i = 0; i < ne; ++i)
+        if (Plausible(ents[i]) && EntPos(ents[i], pos[k])) sx += pos[k][0], sz += pos[k][2], ysum += pos[k][1], ymax = std::fmax(ymax, pos[k][1]), ++k;
+    if (!k) return false;
+    centre[0] = sx / k, centre[2] = sz / k, centre[1] = ysum / k;
+    float s2 = 0;
+    for (unsigned i = 0; i < k; ++i) {
+        float dx = pos[i][0] - centre[0], dz = pos[i][2] - centre[2];
+        s2 = std::fmax(s2, dx * dx + dz * dz);
+    }
+    *spread = std::fmin(std::sqrt(s2), 60.f);
+    *top = ymax;
+    float h;
+    if (CmHeight(const_cast<NavCtx*>(&nav), centre[0], centre[2], &h)) centre[1] = h;
+    return true;
+}
+void CastMarkerStep(const float eye[3], const float fwd[3], const float hero[3]) {
+    if (!cfg.castMarker) return;
+    const double t0 = Now();
+    cm::Req q;
+    uintptr_t unit;
+    LONG gen;
+    AcquireSRWLockShared(&g_cms.lock);
+    q = g_cms.req, unit = g_cms.unit, gen = g_cms.gen;
+    ReleaseSRWLockShared(&g_cms.lock);
+    if (q.shape == cm::kNone && !unit) {
+        if (g_cml.shown) vmgame::CastMarkerSet(nullptr);
+        g_cml.shown = false;
+        g_cml.gen = gen;
+        return;
+    }
+    NavCtx nav;
+    NavCtxGet(&nav);
+    if (!nav.ok || !nav.pm) return;
+    int queries = 0;
+    if (unit) {
+        q.unit = CastTargetShape(unit, nav, q.unitCentre, &q.unitSpread, &q.unitTop);
+        if (!q.unit && g_cml.lostLogs++ < 6) Log("cast-marker: target unit %p is gone / has no soldiers - no marker over it", (void*)unit);
+    }
+    auto moved = [](const float* a, const float* b, float eps) {
+        return std::fabs(a[0] - b[0]) > eps || std::fabs(a[1] - b[1]) > eps || std::fabs(a[2] - b[2]) > eps;
+    };
+    const bool ground = q.shape == cm::kRing || q.shape == cm::kLane || q.shape == cm::kLaneFromHero || q.shape == cm::kPoint;
+    const bool sameReq = gen == g_cml.gen;
+    const bool sameView = sameReq && !moved(eye, g_cml.eye, 0.01f) && !moved(fwd, g_cml.fwd, 2e-5f) && !moved(hero, g_cml.hero, 0.01f);
+    const bool sameUnit = q.unit == g_cml.unit && (!q.unit || (!moved(q.unitCentre, g_cml.uc, 0.15f) && std::fabs(q.unitSpread - g_cml.us) < 0.3f &&
+                                                               std::fabs(q.unitTop - g_cml.ut) < 0.15f));
+    if (ground && !sameView) {
+        g_cml.aim = cm::AimGround(eye, fwd, hero, q.range, CmHeight, &nav);
+        queries += g_cml.aim.queries;
+        AcquireSRWLockExclusive(&g_cms.lock);
+        g_cms.aimOk = g_cml.aim.ok;
+        memcpy(g_cms.aim, g_cml.aim.p, sizeof g_cms.aim);
+        g_cms.aimDist = g_cml.aim.dist, g_cms.aimEdge = g_cml.aim.edge, g_cms.aimRange = q.range;
+        ReleaseSRWLockExclusive(&g_cms.lock);
+    } else if (!ground) {
+        g_cml.aim = cm::Aim();
+    }
+    if (!sameView || !sameUnit || !g_cml.shown) {
+        cm::Style st;
+        st.pillarH = cfg.castMarkerPillar;
+        int bq = 0;
+        cm::Build(g_cml.frame, q, g_cml.aim, hero, st, CmHeight, &nav, &bq);
+        queries += bq;
+        vmgame::CastMarkerSet(&g_cml.frame);
+        g_cml.shown = true;
+        ++g_cml.rebuilt;
+        if (g_cml.logs < 12 && !sameReq)
+            ++g_cml.logs, Log("cast-marker: shape %d r %.1f / %.1f len %.1f range %.0f%s%s -> %d points, %d lines, %d fill tris%s%s; aim %s %.1f m%s, %d height queries",
+                              q.shape, q.r0, q.r1, q.len, q.range, q.over ? " overcast" : "", q.unit ? " + target unit" : "", g_cml.frame.nPts,
+                              g_cml.frame.nLines, g_cml.frame.nTris, g_cml.frame.pillar ? ", pillar" : "", g_cml.frame.chevron ? ", chevron" : "",
+                              g_cml.aim.ok ? "ok" : "none", g_cml.aim.dist, g_cml.aim.edge ? " (range edge)" : "", queries);
+    }
+    memcpy(g_cml.eye, eye, sizeof g_cml.eye), memcpy(g_cml.fwd, fwd, sizeof g_cml.fwd), memcpy(g_cml.hero, hero, sizeof g_cml.hero);
+    memcpy(g_cml.uc, q.unitCentre, sizeof g_cml.uc), g_cml.us = q.unitSpread, g_cml.ut = q.unitTop, g_cml.unit = q.unit;
+    g_cml.gen = gen;
+    const double now = Now();
+    g_cml.ms += (now - t0) * 1000.0, g_cml.queries += queries, ++g_cml.frames;
+    if (now - g_cml.tStat >= 5.0) {
+        if (g_cml.tStat > 0 && g_cml.frames)
+            Log("cast-marker: %d frames, avg %.3f ms, %.1f height queries / frame, rebuilt %d", g_cml.frames, g_cml.ms / g_cml.frames,
+                static_cast<double>(g_cml.queries) / g_cml.frames, g_cml.rebuilt);
+        g_cml.tStat = now, g_cml.ms = 0, g_cml.frames = g_cml.queries = g_cml.rebuilt = 0;
+    }
+}
 bool Revealed(uintptr_t u) {
     for (unsigned i = 0; i < S.nRevealed; ++i)
         if (S.revealed[i] == u) return true;
@@ -4499,8 +4641,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4571,7 +4711,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4654,26 +4793,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -5649,6 +5779,7 @@ void Apply(uintptr_t mgr) {
         if (!Rd(S.cam + oCamFov, fov) || !(fov > 0.2f && fov < 2.8f)) fov = 1.1345f;
         vmgame::PublishCamera(eye, vRight, vUp, vFwd, fov);
         CastView(eye, vFwd);
+        CastMarkerStep(eye, vFwd, camPos);
     }
     CamSetVec(S.cam, vtSetTarget, target);
     uintptr_t active = Ptr(mgr + oMgrActive);
@@ -6699,6 +6830,53 @@ int View(void* L) {
     for (float v : d) f.pushnumber(L, v);
     return 6;
 }
+int CastMarkerApi(void* L) {
+    float v[6] = {};
+    for (int i = 0; i < 6; ++i) v[i] = f.type(L, i + 1) == kTNumber ? f.tonumber(L, i + 1) : 0.f;
+    int shape = static_cast<int>(v[0]);
+    AcquireSRWLockExclusive(&g_cms.lock);
+    g_cms.req.shape = S.active && shape >= cm::kRing && shape <= cm::kSelfRing ? shape : cm::kNone;
+    g_cms.req.r0 = std::fmax(0.f, v[1]), g_cms.req.r1 = std::fmax(0.f, v[2]), g_cms.req.len = std::fmax(0.f, v[3]);
+    g_cms.req.range = std::fmax(0.f, v[4]), g_cms.req.over = v[5] != 0.f;
+    if (g_cms.req.shape == cm::kNone) g_cms.aimOk = false;
+    ++g_cms.gen;
+    ReleaseSRWLockExclusive(&g_cms.lock);
+    return 0;
+}
+int CastTargetApi(void* L) {
+    uintptr_t unit = 0;
+    if (S.active && f.type(L, 1) == kTUserdata && f.objlen(L, 1) >= sizeof(uintptr_t)) {
+        const void* blk = f.touserdata(L, 1);
+        uintptr_t wrap = 0;
+        if (blk) memcpy(&wrap, blk, sizeof wrap);
+        unit = wrap ? Ptr(wrap + 8) : 0;
+    }
+    int tone = f.type(L, 2) == kTNumber ? static_cast<int>(f.tonumber(L, 2)) : 0;
+    float ring = f.type(L, 3) == kTNumber ? f.tonumber(L, 3) : 0.f;
+    AcquireSRWLockExclusive(&g_cms.lock);
+    if (unit != g_cms.unit) ++g_cms.gen;
+    g_cms.unit = unit;
+    g_cms.req.unitTone = tone == 1 ? cm::kWhite : tone == 2 ? cm::kGrey : cm::kRed;
+    g_cms.req.unitRing = std::fmax(0.f, ring);
+    ReleaseSRWLockExclusive(&g_cms.lock);
+    return 0;
+}
+int CastPointApi(void* L) {
+    float p[3], d, r;
+    bool ok, edge;
+    AcquireSRWLockShared(&g_cms.lock);
+    ok = g_cms.aimOk && S.active, memcpy(p, g_cms.aim, sizeof p), d = g_cms.aimDist, edge = g_cms.aimEdge, r = g_cms.aimRange;
+    ReleaseSRWLockShared(&g_cms.lock);
+    if (!ok) {
+        f.pushnil(L);
+        return 1;
+    }
+    for (float v : p) f.pushnumber(L, v);
+    f.pushnumber(L, d);
+    f.pushboolean(L, edge ? 1 : 0);
+    f.pushnumber(L, r);
+    return 6;
+}
 int Prompt(void* L) {
     f.pushnumber(L, S.active && S.lastMode == 0 ? static_cast<float>(S.prompt) : 0.f);
     return 1;
@@ -6721,7 +6899,8 @@ int PushTable(void* L) {
     const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_enabled", HudEnabled},
                                                         {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"cast_event", CastEvent},
                                                         {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson},
-                                                        {"tac_stamina", TacStaminaApi}, {"refill_ammo", RefillAmmoApi}, {"prompt", Prompt}};
+                                                        {"tac_stamina", TacStaminaApi}, {"refill_ammo", RefillAmmoApi}, {"prompt", Prompt},
+                                                        {"cast_marker", CastMarkerApi}, {"cast_target", CastTargetApi}, {"cast_point", CastPointApi}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);

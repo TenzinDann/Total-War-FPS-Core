@@ -5719,3 +5719,4 @@ int WarmShaders() {
 }
 }
 }
+#include "cast_marker_draw.inc"
