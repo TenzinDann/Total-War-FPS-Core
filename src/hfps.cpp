@@ -1615,6 +1615,7 @@ struct AimHit {
     uintptr_t ent = 0;
     float vel[2] = {0, 0};
     unsigned units = 0, ents = 0;
+    unsigned snapCulled = 0;
 };
 AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispLag);
 constexpr uintptr_t kSimTickCall904 = 0x2dd393f;
@@ -2150,6 +2151,123 @@ int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const Mele
     *dmgOut = dmg;
     return killed ? 2 : 1;
 }
+struct MeleeUnitExt {
+    uintptr_t u;
+    uint64_t sig;
+    uint32_t n, step;
+    float r;
+};
+uint64_t MeleeRosterSig(const uintptr_t* ents, unsigned n) {
+    uint64_t h = 1469598103934665603ull;
+    for (unsigned i = 0; i < n; ++i) h = (h ^ ents[i]) * 1099511628211ull;
+    return h;
+}
+constexpr unsigned kMeleeExtSlots = 2048;
+constexpr float kMeleeStepSpread = 5.f;
+MeleeUnitExt g_mext[kMeleeExtSlots];
+uintptr_t g_mextWorld = 0;
+struct MeleeSoldier {
+    uintptr_t e;
+    float q[3];
+};
+constexpr unsigned kMeleeGatherCap = 65536;
+MeleeSoldier g_mgather[kMeleeGatherCap];
+MeleeUnitExt* MeleeExt(uintptr_t u, bool create) {
+    unsigned h = static_cast<unsigned>((u >> 4) * 2654435761u) & (kMeleeExtSlots - 1);
+    for (unsigned k = 0; k < 32; ++k) {
+        MeleeUnitExt& x = g_mext[(h + k) & (kMeleeExtSlots - 1)];
+        if (x.u == u) return &x;
+        if (!x.u) {
+            if (!create) return nullptr;
+            memset(&x, 0, sizeof x);
+            x.u = u;
+            return &x;
+        }
+    }
+    return nullptr;
+}
+unsigned MeleeGather(uintptr_t world, uintptr_t battle, uintptr_t hero, uintptr_t heroUnit, const float (*org)[3], int no, unsigned* unitsSkipped,
+                     unsigned* unitsAll) {
+    static uintptr_t ents[1024];
+    unsigned ng = 0;
+    *unitsSkipped = *unitsAll = 0;
+    if (world != g_mextWorld) {
+        memset(g_mext, 0, sizeof g_mext);
+        g_mextWorld = world;
+    }
+    uint32_t step = 0;
+    const bool haveStep = battle && Rd(battle + 0x64720, step);
+    uintptr_t list = Ptr(world + oWorldAlliances);
+    uint32_t na = 0;
+    if (!list || !Rd(list + oAlliancesCount, na) || na > 16) return 0;
+    uintptr_t alliances = Ptr(list + oAlliancesArray);
+    for (uint32_t i = 0; i < na && alliances; ++i) {
+        uintptr_t al = Ptr(alliances + 8 * i);
+        uint32_t nArmies = 0;
+        if (!al || !Rd(al + oAllianceArmyCount, nArmies) || nArmies > 64) continue;
+        uintptr_t armies = Ptr(al + oAllianceArmyArray);
+        for (uint32_t j = 0; j < nArmies && armies; ++j) {
+            uintptr_t army = Ptr(armies + 8 * j);
+            uint32_t nu = 0;
+            if (!army || !Rd(army + oArmyUnitCount, nu) || nu > 1024) continue;
+            uintptr_t units = Ptr(army + oArmyUnitArray);
+            for (uint32_t k = 0; k < nu && units; ++k) {
+                uintptr_t u = Ptr(units + 8 * k);
+                if (!u || u == heroUnit) continue;
+                unsigned ne = UnitEntities(u, ents, 1024);
+                if (!ne) continue;
+                ++*unitsAll;
+                float q0[3];
+                const bool p0 = ents[0] != hero && Plausible(ents[0]) && EntPos(ents[0], q0);
+                const uint64_t sig = MeleeRosterSig(ents, ne);
+                if (p0 && haveStep) {
+                    const MeleeUnitExt* x = MeleeExt(u, false);
+                    if (x && x->sig == sig && x->n == ne && step >= x->step && step - x->step < 600) {
+                        float slack = x->r + kMeleeStepSpread * static_cast<float>(step - x->step + 1) + 1.f;
+                        bool reach = false;
+                        for (int o = 0; o < no && !reach; ++o) {
+                            float dx = q0[0] - org[o][0], dz = q0[2] - org[o][1];
+                            reach = std::sqrt(dx * dx + dz * dz) - slack <= org[o][2];
+                        }
+                        if (!reach) {
+                            ++*unitsSkipped;
+                            continue;
+                        }
+                    }
+                }
+                float r = 0.f;
+                bool allRead = p0;
+                for (unsigned m = 0; m < ne; ++m) {
+                    uintptr_t e = ents[m];
+                    float q[3];
+                    if (m == 0 && p0) {
+                        memcpy(q, q0, sizeof q);
+                    } else if (e == hero || !Plausible(e) || !EntPos(e, q)) {
+                        if (e != hero) allRead = false;
+                        continue;
+                    }
+                    if (p0) {
+                        float dx = q[0] - q0[0], dz = q[2] - q0[2], d = std::sqrt(dx * dx + dz * dz);
+                        if (d > r) r = d;
+                    }
+                    if (ng < kMeleeGatherCap) {
+                        g_mgather[ng++] = {e, {q[0], q[1], q[2]}};
+                    } else {
+                        static bool s_full = false;
+                        if (!s_full) Log("melee-engine: more than %u soldiers to check - the rest of this strike's scan dropped", kMeleeGatherCap);
+                        s_full = true;
+                    }
+                }
+                if (allRead && haveStep) {
+                    if (MeleeUnitExt* x = MeleeExt(u, true)) *x = {u, sig, ne, step, r};
+                } else if (MeleeUnitExt* x = MeleeExt(u, false)) {
+                    x->n = 0;
+                }
+            }
+        }
+    }
+    return ng;
+}
 void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
     if (!g_mq.n) return;
     MeleeReq reqs[8];
@@ -2170,7 +2288,19 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
     uintptr_t heroSide = Ptr(hero + 0x80), heroUnit = Ptr(hero + 0x2e8);
     if (!heroHp) return;
     using FnCanHit = char (*)(uintptr_t e);
-    static uintptr_t ents[1024];
+    float org[8][3];
+    int no = 0;
+    for (int ri = 0; ri < nr; ++ri) {
+        const MeleeReq& rq = reqs[ri];
+        if (rq.hero != hero || Now() - rq.t > 0.6) continue;
+        const int cat = rq.cat >= 0 && rq.cat < vmgame::kMeleeCats ? rq.cat : vmgame::kMeleeCatSword;
+        const MeleeKindCfg& arc = g_meleeCat[cat].k[rq.kind];
+        org[no][0] = rq.ox, org[no][1] = rq.oz;
+        org[no][2] = arc.reach + (arc.splashR > 0.f && arc.splashMax > 0 ? arc.splashR : 0.f);
+        ++no;
+    }
+    unsigned unitsSkipped = 0, unitsAll = 0;
+    const unsigned ng = no ? MeleeGather(world, outer, hero, heroUnit, org, no, &unitsSkipped, &unitsAll) : 0;
     for (int ri = 0; ri < nr; ++ri) {
         const MeleeReq& rq = reqs[ri];
         if (rq.hero != hero || Now() - rq.t > 0.6) {
@@ -2194,51 +2324,28 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         static Cand cand[96];
         int nc = 0;
         unsigned scanned = 0;
-        uintptr_t list = Ptr(world + oWorldAlliances);
-        uint32_t na = 0;
-        if (list && Rd(list + oAlliancesCount, na) && na <= 16) {
-            uintptr_t alliances = Ptr(list + oAlliancesArray);
-            for (uint32_t i = 0; i < na && alliances; ++i) {
-                uintptr_t al = Ptr(alliances + 8 * i);
-                uint32_t nArmies = 0;
-                if (!al || !Rd(al + oAllianceArmyCount, nArmies) || nArmies > 64) continue;
-                uintptr_t armies = Ptr(al + oAllianceArmyArray);
-                for (uint32_t j = 0; j < nArmies && armies; ++j) {
-                    uintptr_t army = Ptr(armies + 8 * j);
-                    uint32_t nu = 0;
-                    if (!army || !Rd(army + oArmyUnitCount, nu) || nu > 1024) continue;
-                    uintptr_t units = Ptr(army + oArmyUnitArray);
-                    for (uint32_t k = 0; k < nu && units; ++k) {
-                        uintptr_t u = Ptr(units + 8 * k);
-                        if (!u || u == heroUnit) continue;
-                        unsigned ne = UnitEntities(u, ents, 1024);
-                        for (unsigned m = 0; m < ne; ++m) {
-                            uintptr_t e = ents[m];
-                            float q[3];
-                            if (e == hero || !Plausible(e) || !EntPos(e, q)) continue;
-                            ++scanned;
-                            float vx = q[0] - rq.ox, vz = q[2] - rq.oz, d = std::sqrt(vx * vx + vz * vz);
-                            if (d > scanR || std::fabs(q[1] - (rq.oy - 1.7f)) > 3.f) continue;
-                            bool inArc = d <= reach && (d <= 0.6f || (vx * rq.dx + vz * rq.dz) / d >= cosHalf);
-                            if (!inArc && !splash) continue;
-                            uint32_t hp = 0, l6c = 0;
-                            uint8_t f108 = 0, f68 = 0;
-                            if (!Rd(e + 0xb1c, hp) || !hp || !Rd(e + 0x108, f108) || !(f108 & 0x10) || !Rd(e + 0x68, f68) || !(f68 & 1) ||
-                                !Rd(e + 0x6c, l6c) || Ptr(e + 0x80) == heroSide || !(l6c & heroL6c & 2))
-                                continue;
-                            if (!reinterpret_cast<FnCanHit>(g_base + kFnCanBeHit904)(e)) continue;
-                            Cand cd = {e, d, q[0], q[2], inArc, false};
-                            if (nc < 96) {
-                                cand[nc++] = cd;
-                            } else {
-                                int worst = 0;
-                                for (int c = 1; c < 96; ++c)
-                                    if (cand[c].d > cand[worst].d) worst = c;
-                                if (d < cand[worst].d) cand[worst] = cd;
-                            }
-                        }
-                    }
-                }
+        for (unsigned g = 0; g < ng; ++g) {
+            const uintptr_t e = g_mgather[g].e;
+            const float* q = g_mgather[g].q;
+            ++scanned;
+            float vx = q[0] - rq.ox, vz = q[2] - rq.oz, d = std::sqrt(vx * vx + vz * vz);
+            if (d > scanR || std::fabs(q[1] - (rq.oy - 1.7f)) > 3.f) continue;
+            bool inArc = d <= reach && (d <= 0.6f || (vx * rq.dx + vz * rq.dz) / d >= cosHalf);
+            if (!inArc && !splash) continue;
+            uint32_t hp = 0, l6c = 0;
+            uint8_t f108 = 0, f68 = 0;
+            if (!Rd(e + 0xb1c, hp) || !hp || !Rd(e + 0x108, f108) || !(f108 & 0x10) || !Rd(e + 0x68, f68) || !(f68 & 1) ||
+                !Rd(e + 0x6c, l6c) || Ptr(e + 0x80) == heroSide || !(l6c & heroL6c & 2))
+                continue;
+            if (!reinterpret_cast<FnCanHit>(g_base + kFnCanBeHit904)(e)) continue;
+            Cand cd = {e, d, q[0], q[2], inArc, false};
+            if (nc < 96) {
+                cand[nc++] = cd;
+            } else {
+                int worst = 0;
+                for (int c = 1; c < 96; ++c)
+                    if (cand[c].d > cand[worst].d) worst = c;
+                if (d < cand[worst].d) cand[worst] = cd;
             }
         }
         for (int a = 1; a < nc; ++a)
@@ -2301,10 +2408,10 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         InterlockedExchangeAdd(&g_mq.kills, kills + sKills);
         vmgame::MeleeHitFeedback(hits + sHits);
         if (g_mq.logs++ < 200)
-            Log("melee-engine: cat %d kind %d %s (reach %.2f m, arc %.0f, splash %.1f m x%d) (%.0f ms after queue) scanned %u, in arc %d, hit %d, killed %d, "
-                "damage [%s] | splash hit %d, killed %d [%s] (forced hits so far %ld, fallback damage so far %ld)",
-                cat, rq.kind, heavy ? "heavy" : "light", reach, arc.halfDeg * 2.f, splashR, splashMax, (Now() - rq.t) * 1000.0, scanned, inArc, hits, kills, dl, sHits,
-                sKills, sl, g_mq.forced, g_mq.fallback);
+            Log("melee-engine: cat %d kind %d %s (reach %.2f m, arc %.0f, splash %.1f m x%d) (%.0f ms after queue) scanned %u (units %u, %u skipped far), "
+                "in arc %d, hit %d, killed %d, damage [%s] | splash hit %d, killed %d [%s] (forced hits so far %ld, fallback damage so far %ld)",
+                cat, rq.kind, heavy ? "heavy" : "light", reach, arc.halfDeg * 2.f, splashR, splashMax, (Now() - rq.t) * 1000.0, scanned, unitsAll,
+                unitsSkipped, inArc, hits, kills, dl, sHits, sKills, sl, g_mq.forced, g_mq.fallback);
     }
 }
 #include "hero_fire_fx.inc"
@@ -2483,10 +2590,10 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
             S.tAimStat = now;
         }
         if (S.tracerLogs++ < 12)
-            Log("tracer: aim hit %s%s%p at %.1f m, target speed %.1f m/s, lead %.2f m (%.0f ms), %s; units %u soldiers %u (trace %.2f ms)",
+            Log("tracer: aim hit %s%s%p at %.1f m, target speed %.1f m/s, lead %.2f m (%.0f ms), %s; units %u soldiers %u (snapshot-culled %u) (trace %.2f ms)",
                 hit.what, hit.ent ? " " : "", (void*)hit.ent, hit.dist, std::sqrt(hit.vel[0] * hit.vel[0] + hit.vel[1] * hit.vel[1]),
                 std::sqrt(lead[0] * lead[0] + lead[1] * lead[1]), leadT * 1000.f, viaFast ? "fast fire" : "local queue", hit.units,
-                hit.ents, (q1.QuadPart - q0.QuadPart) * 1000.0 / static_cast<double>(g_qpf.QuadPart));
+                hit.ents, hit.snapCulled, (q1.QuadPart - q0.QuadPart) * 1000.0 / static_cast<double>(g_qpf.QuadPart));
     }
     if (ok && !c.shooter) {
         float hx = c.target[0] - c.launch[0], hz = c.target[2] - c.launch[2];
@@ -2679,33 +2786,43 @@ bool IssueOvrHalt() {
     if (S.moveLogs++ < 12) Log("move(entity): halt issued=%d entityId=%d", ok, entId);
     return ok;
 }
+bool MakeDestPm(uintptr_t pm, float x, float z, float* dest, uintptr_t hint) {
+    using FnDest = void* (*)(uintptr_t, void*, const float*, uintptr_t, int);
+    const float xz[2] = {x, z};
+    memset(dest, 0, 32);
+    reinterpret_cast<FnDest>(g_base + kFnMakeDest)(pm, dest, xz, hint, 1);
+    return std::isfinite(dest[0]) && std::isfinite(dest[1]) && std::isfinite(dest[2]);
+}
 bool MakeDestAt(float x, float z, float* dest , uintptr_t hint) {
     uintptr_t battle = 0;
     if (!CmdQueue(&battle)) return false;
     uintptr_t pm = Ptr(Ptr(battle + oBattlePath) + oPathMgr);
     if (!pm) return false;
-    using FnDest = void* (*)(uintptr_t, void*, const float*, uintptr_t, int);
-    const float xz[2] = {x, z};
-    memset(dest, 0, 32);
-    reinterpret_cast<FnDest>(g_base + kFnMakeDest)(pm, dest, xz, g_wallOk ? hint : 0, 1);
-    return std::isfinite(dest[0]) && std::isfinite(dest[1]) && std::isfinite(dest[2]);
+    return MakeDestPm(pm, x, z, dest, g_wallOk ? hint : 0);
 }
-int SurfacesAt(float x, float z, Surf* out) {
-    alignas(16) float d[8];
-    int n = 0;
-    if (MakeDestAt(x, z, d)) out[n++] = {d[1], 0};
-    if (!g_wallOk || !cfg.wall) return n;
+struct NavCtx {
+    bool ok = false, grid = false;
+    uintptr_t pm = 0, cells = 0, ents = 0;
+    float scale = 0;
+    int32_t off = 0;
+    uint32_t maxIdx = 0, shift = 0;
+};
+void NavCtxGet(NavCtx* c) {
+    *c = NavCtx();
     uintptr_t battle = 0;
-    if (!CmdQueue(&battle)) return n;
+    if (!CmdQueue(&battle)) return;
+    c->ok = true;
     uintptr_t world = Ptr(battle + oBattlePath);
+    c->pm = Ptr(world + oPathMgr);
+    if (!g_wallOk || !cfg.wall) return;
     uintptr_t grid = world ? Ptr(world + oWorldNavGrid) : 0, pool = world ? Ptr(world + oWorldNavEntries) : 0;
     uintptr_t cells = grid ? Ptr(grid) : 0, ents = pool ? Ptr(pool + 8) : 0;
     float scale = 0;
     int32_t off = 0;
-    uint32_t maxIdx = 0, shift = 0, head = 0;
+    uint32_t maxIdx = 0, shift = 0;
     if (!cells || !ents || !Rd(grid + 0x2c, scale) || !Rd(grid + 0x18, off) || !Rd(grid + 0x1c, maxIdx) || !Rd(grid + 0x10, shift) ||
         !(scale > 0.f && scale < 100.f) || maxIdx > (1u << 20))
-        return n;
+        return;
     shift &= 31;
     static uintptr_t s_loggedGrid = 0;
     if (s_loggedGrid != grid) {
@@ -2713,6 +2830,29 @@ int SurfacesAt(float x, float z, Surf* out) {
         Log("wall: nav block grid %p (%.3f cells/m, offset %d, max %u, shift %u), entries %p", (void*)grid, scale, off, maxIdx, shift,
             (void*)ents);
     }
+    c->grid = true;
+    c->cells = cells, c->ents = ents, c->scale = scale, c->off = off, c->maxIdx = maxIdx, c->shift = shift;
+}
+int SurfacesAtCtx(const NavCtx& c, float x, float z, Surf* out, float* terrXZ);
+int SurfacesAt(float x, float z, Surf* out) {
+    NavCtx c;
+    NavCtxGet(&c);
+    return SurfacesAtCtx(c, x, z, out, nullptr);
+}
+int SurfacesAtCtx(const NavCtx& c, float x, float z, Surf* out, float* terrXZ) {
+    alignas(16) float d[8];
+    int n = 0;
+    if (!c.ok) return 0;
+    if (c.pm && MakeDestPm(c.pm, x, z, d, 0)) {
+        out[n++] = {d[1], 0};
+        if (terrXZ) terrXZ[0] = d[0], terrXZ[1] = d[2];
+    }
+    if (!c.grid) return n;
+    const uintptr_t cells = c.cells, ents = c.ents;
+    const float scale = c.scale;
+    const int32_t off = c.off;
+    const uint32_t maxIdx = c.maxIdx, shift = c.shift;
+    uint32_t head = 0;
     uint32_t xi = static_cast<uint32_t>(static_cast<int32_t>(std::floor(scale * x)) + off);
     uint32_t zi = static_cast<uint32_t>(static_cast<int32_t>(std::floor(scale * z)) + off);
     if (xi > maxIdx) xi = maxIdx;
@@ -3149,7 +3289,7 @@ struct VelEnt {
     float p[3], pp[3];
     uint32_t s, ps;
 };
-constexpr unsigned kVelSlots = 4096;
+constexpr unsigned kVelSlots = 16384;
 VelEnt g_vel[kVelSlots];
 uint32_t g_velScanStep = 0xffffffffu;
 uintptr_t g_velBattle = 0;
@@ -3158,19 +3298,25 @@ void VelReset() {
     g_velScanStep = 0xffffffffu;
     g_velBattle = 0;
 }
-VelEnt* VelSlot(uintptr_t e, bool create) {
+VelEnt* VelSlot(uintptr_t e, bool create, uint32_t step = 0) {
     unsigned h = static_cast<unsigned>((e >> 4) * 2654435761u) & (kVelSlots - 1);
+    VelEnt* stale = nullptr;
     for (unsigned k = 0; k < 64; ++k) {
         VelEnt& v = g_vel[(h + k) & (kVelSlots - 1)];
         if (v.e == e) return &v;
         if (!v.e) {
             if (!create) return nullptr;
-            v.e = e;
-            v.s = v.ps = 0xffffffffu;
-            return &v;
+            VelEnt* t = stale ? stale : &v;
+            t->e = e;
+            t->s = t->ps = 0xffffffffu;
+            return t;
         }
+        if (create && !stale && v.s != 0xffffffffu && step - v.s > 3) stale = &v;
     }
-    return nullptr;
+    if (!stale) return nullptr;
+    stale->e = e;
+    stale->s = stale->ps = 0xffffffffu;
+    return stale;
 }
 bool VelOf(uintptr_t e, float* v) {
     VelEnt* x = VelSlot(e, false);
@@ -3252,9 +3398,11 @@ void VelStep(uintptr_t battle, const float eye[3], const float fwd[3]) {
         if (d2 > 190.f * 190.f) continue;
         float t = v[0] * fwd[0] + v[1] * fwd[1] + v[2] * fwd[2];
         if (d2 > 30.f * 30.f && t < 0.5f * std::sqrt(d2)) continue;
+        float c[3] = {v[0] - fwd[0] * t, v[1] - fwd[1] * t, v[2] - fwd[2] * t};
+        if (d2 > 30.f * 30.f && c[0] * c[0] + c[1] * c[1] + c[2] * c[2] > 45.f * 45.f && ((step ^ static_cast<uint32_t>(u >> 4)) & 1)) continue;
         for (unsigned k = 0; k < ne; ++k) {
             if (!Plausible(ents[k]) || !EntPos(ents[k], q)) continue;
-            VelEnt* x = VelSlot(ents[k], true);
+            VelEnt* x = VelSlot(ents[k], true, step);
             if (!x) continue;
             if (x->s != step) {
                 if (x->s != 0xffffffffu) {
@@ -3272,12 +3420,14 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
     h.dist = range;
     uintptr_t battle = 0;
     if (!CmdQueue(&battle)) return h;
+    NavCtx nav;
+    NavCtxGet(&nav);
     auto below = [&](float t, bool* known) {
         float p[3] = {eye[0] + fwd[0] * t, eye[1] + fwd[1] * t, eye[2] + fwd[2] * t};
         Surf s[kMaxSurf];
-        int n = SurfacesAt(p[0], p[2], s);
-        alignas(16) float g[8];
-        *known = n > 0 && (s[0].blk || (MakeDestAt(p[0], p[2], g) && std::fabs(g[0] - p[0]) < 1.5f && std::fabs(g[2] - p[2]) < 1.5f));
+        float g[2] = {0.f, 0.f};
+        int n = SurfacesAtCtx(nav, p[0], p[2], s, g);
+        *known = n > 0 && (s[0].blk || (std::fabs(g[0] - p[0]) < 1.5f && std::fabs(g[1] - p[2]) < 1.5f));
         if (!*known) return false;
         for (int i = 0; i < n; ++i)
             if (p[1] <= s[i].h && (!s[i].blk || s[i].h <= eye[1] + 0.05f)) return true;
@@ -3307,11 +3457,32 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
     h.units = n;
     static uintptr_t ents[1024];
     float hx = fwd[0], hz = fwd[2], hh = hx * hx + hz * hz;
+    constexpr float kAimSnapSlack = 2.5f;
+    uint32_t curStep = 0;
+    const bool snap = hh > 1e-6f && battle == g_velBattle && Rd(battle + 0x64720, curStep) && curStep == g_velScanStep;
+    const float snapT = snap ? kAimSnapSlack / std::sqrt(hh) : 0.f;
     auto test = [&](uintptr_t e) {
         float q[3];
-        if (!Plausible(e) || !EntPos(e, q)) return;
-        ++h.ents;
+        if (!Plausible(e)) return;
         float vel[2] = {0.f, 0.f};
+        if (snap) {
+            const VelEnt* x = VelSlot(e, false);
+            if (x && x->s == curStep) {
+                VelOf(e, vel);
+                float qx = x->p[0] - vel[0] * dispLag, qz = x->p[2] - vel[1] * dispLag;
+                float t = ((qx - eye[0]) * hx + (qz - eye[2]) * hz) / hh;
+                float px = eye[0] + fwd[0] * t - qx, pz = eye[2] + fwd[2] * t - qz;
+                const float out = 0.55f + kAimSnapSlack;
+                if (px * px + pz * pz > out * out || t < 1.f - snapT || t >= h.dist + snapT) {
+                    ++h.ents;
+                    ++h.snapCulled;
+                    return;
+                }
+            }
+        }
+        if (!EntPos(e, q)) return;
+        ++h.ents;
+        vel[0] = vel[1] = 0.f;
         bool hasVel = VelOf(e, vel);
         float qx = q[0] - vel[0] * dispLag, qz = q[2] - vel[1] * dispLag;
         float v[3] = {qx - eye[0], q[1] - eye[1], qz - eye[2]};
@@ -4320,8 +4491,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4392,7 +4561,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4475,26 +4643,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
