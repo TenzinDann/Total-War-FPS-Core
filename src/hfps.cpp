@@ -493,7 +493,7 @@ struct Config {
     float bldLow = 1.f, bldHigh = 2.05f, bldSkin = 0.4f;
     bool wallUp = true;
     unsigned wallUpKey = 'E';
-    float wallUpReach = 3.f, wallUpMin = 3.f, wallUpMaxH = 30.f;
+    float wallUpReach = 3.f, wallUpMin = 3.f, wallUpMaxH = 30.f, wallUpGateR = 8.f;
     bool wallBody = true;
     float wallBodyMargin = 1.f;
     bool ghost = false;
@@ -753,8 +753,10 @@ void LoadConfig() {
     if (!(cfg.wallUpReach >= 0.5f && cfg.wallUpReach <= 10.f)) cfg.wallUpReach = 3.f;
     if (!(cfg.wallUpMin >= 1.5f && cfg.wallUpMin <= 20.f)) cfg.wallUpMin = 3.f;
     if (!(cfg.wallUpMaxH > cfg.wallUpMin && cfg.wallUpMaxH <= 80.f)) cfg.wallUpMaxH = 30.f;
-    Log("wall-up: enabled=%d key=0x%02X reach=%.2f min_height=%.2f max_height=%.1f", cfg.wallUp, cfg.wallUpKey, cfg.wallUpReach,
-        cfg.wallUpMin, cfg.wallUpMaxH);
+    cfg.wallUpGateR = IniF(L"move", L"wall_up_gate_radius", 8.f, ini);
+    if (!(cfg.wallUpGateR >= 0.f && cfg.wallUpGateR <= 40.f)) cfg.wallUpGateR = 8.f;
+    Log("wall-up: enabled=%d key=0x%02X reach=%.2f min_height=%.2f max_height=%.1f gate_radius=%.1f", cfg.wallUp, cfg.wallUpKey, cfg.wallUpReach,
+        cfg.wallUpMin, cfg.wallUpMaxH, cfg.wallUpGateR);
     cfg.wallBody = GetPrivateProfileIntW(L"move", L"wall_body", 1, ini) != 0;
     cfg.wallBodyMargin = IniF(L"move", L"wall_body_margin", 1.f, ini);
     if (!(cfg.wallBodyMargin >= 0.f && cfg.wallBodyMargin <= 3.f)) cfg.wallBodyMargin = 1.f;
@@ -1054,6 +1056,8 @@ struct State {
     float wallUpTo[3] = {};
     uintptr_t wallUpBlk = 0;
     double tWallScan = 0;
+    int wallUpWhy = 0, wallWhyLogs = 0;
+    double tWallWhy = -10;
     bool bodyInside = false;
     int bodyLogs = 0, censusLogs = 0;
     double tLastTp = 0;
@@ -4493,8 +4497,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4565,7 +4567,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4648,26 +4649,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -4699,31 +4691,82 @@ void LauncherReset() {
     InterlockedExchange(&g_reqLauncher, 0);
     InterlockedExchange(&g_heroLauncher, 0);
 }
-constexpr float kWallUpStep = 0.25f, kWallUpInset = 0.6f;
-bool FindWallUp(float x, float z, float foot, float fx, float fz, float out[3], uintptr_t* blkOut) {
+enum WallUpWhy { kWhyNone = 0, kWhyNoWall, kWhyPaused, kWhyNotGround, kWhyNoTop, kWhyHeight, kWhyGate, kWhyInside, kWhyRoof };
+constexpr float kWallUpStep = 0.25f, kWallUpInset = 0.6f, kWallUpThick = 6.f, kWallUpGround = 2.f;
+const char* WallUpWhyText(int why) {
+    switch (why) {
+        case kWhyNoTop: return "tall building wall ahead but no wall-top nav block behind it (house / tower without a walkway)";
+        case kWhyHeight: return "wall top higher than wall_up_max_height";
+        case kWhyGate: return "gate passage near the landing (gatehouse)";
+        case kWhyInside: return "landing inside a building";
+        case kWhyRoof: return "roof over the landing (tower / gatehouse room)";
+        default: return "-";
+    }
+}
+bool GatePassageNear(float x, float z, float fx, float fz, float foot, float top, float r) {
+    if (!(r > 0.f)) return false;
+    const float mid = foot + 0.5f * (top - foot);
+    Surf s[kMaxSurf];
+    int run = 0;
+    for (float o = -r; o <= r + 1e-3f; o += 0.5f) {
+        int n = SurfacesAt(x - fz * o, z + fx * o, s);
+        bool low = false, high = false;
+        for (int i = 0; i < n; ++i) {
+            if (!s[i].blk) continue;
+            if (s[i].h <= mid)
+                low = true;
+            else
+                high = true;
+        }
+        run = low && high ? run + 1 : 0;
+        if (run >= 2) return true;
+    }
+    return false;
+}
+bool RoofOver(float x, float z, float h) {
+    uint32_t t = 0;
+    float hp[3] = {};
+    const float lo[3] = {x, h + 2.5f, z}, hi[3] = {x, h + 8.f, z};
+    return SegHitsBuilding(lo, hi, &t, hp) || SegHitsBuilding(hi, lo, &t, hp);
+}
+bool FindWallUp(float x, float z, float foot, float fx, float fz, float out[3], uintptr_t* blkOut, int* why) {
+    int dummy = 0;
+    if (!why) why = &dummy;
+    auto no = [why](int w) {
+        *why = w;
+        return false;
+    };
     float fl = std::sqrt(fx * fx + fz * fz);
-    if (!(fl > 1e-4f)) return false;
+    if (!(fl > 1e-4f)) return no(kWhyNoWall);
     fx /= fl;
     fz /= fl;
     Surf s[kMaxSurf];
+    int n = SurfacesAt(x, z, s), terr = -1;
+    if (!n) return no(kWhyPaused);
+    for (int i = 0; i < n; ++i)
+        if (!s[i].blk) terr = i;
+    if (terr < 0 || foot > s[terr].h + kWallUpGround) return no(kWhyNotGround);
+    uint32_t t = 0;
+    float hp[3] = {};
+    const float p0[2] = {x, z}, pr[2] = {x + fx * cfg.wallUpReach, z + fz * cfg.wallUpReach};
+    const bool bld = TallWallBetween(p0, pr, foot, &t, hp);
+    const float maxD = cfg.wallUpReach + (bld ? kWallUpThick : 0.f);
     float bodyD = -1.f;
-    for (float d = kWallUpStep; d <= cfg.wallUpReach + 1e-3f; d += kWallUpStep) {
-        int n = SurfacesAt(x + fx * d, z + fz * d, s);
-        if (!n) return false;
-        if (StructureOver(s, n, foot, cfg.wallUpMin, cfg.stepDown)) {
+    for (float d = kWallUpStep; d <= maxD + 1e-3f; d += kWallUpStep) {
+        int m = SurfacesAt(x + fx * d, z + fz * d, s);
+        if (!m) return no(kWhyPaused);
+        if (StructureOver(s, m, foot, cfg.wallUpMin, cfg.stepDown)) {
             bodyD = d;
             break;
         }
     }
-    if (bodyD < 0.f) return false;
-    uint32_t t = 0;
-    float hp[3] = {};
-    const float p0[2] = {x, z}, p1[2] = {x + fx * bodyD, z + fz * bodyD};
-    if (TallWallBetween(p0, p1, foot, &t, hp)) return false;
-    int n = SurfacesAt(p1[0], p1[1], s), top = -1;
+    if (bodyD < 0.f) return no(bld ? kWhyNoTop : kWhyNoWall);
+    const float p1[2] = {x + fx * bodyD, z + fz * bodyD};
+    n = SurfacesAt(p1[0], p1[1], s);
+    int top = -1;
     for (int i = 0; i < n; ++i)
         if (s[i].blk && (top < 0 || s[i].h > s[top].h)) top = i;
-    if (top < 0 || s[top].h < foot + cfg.wallUpMin || s[top].h > foot + cfg.wallUpMaxH) return false;
+    if (top < 0 || s[top].h < foot + cfg.wallUpMin || s[top].h > foot + cfg.wallUpMaxH) return no(kWhyHeight);
     uintptr_t blk = s[top].blk;
     float land = bodyD, h = s[top].h;
     for (float in : {kWallUpInset, kWallUpInset * 0.5f}) {
@@ -4741,8 +4784,11 @@ bool FindWallUp(float x, float z, float foot, float fx, float fz, float out[3], 
     out[0] = x + fx * land;
     out[1] = h;
     out[2] = z + fz * land;
-    if (InsideBuilding(out[0], out[2], h)) return false;
+    if (GatePassageNear(out[0], out[2], fx, fz, foot, h, cfg.wallUpGateR)) return no(kWhyGate);
+    if (InsideBuilding(out[0], out[2], h)) return no(kWhyInside);
+    if (RoofOver(out[0], out[2], h)) return no(kWhyRoof);
     *blkOut = blk;
+    *why = kWhyNone;
     return true;
 }
 void WallUpFrame(double now, bool fg, bool paused, bool pinned) {
@@ -4757,7 +4803,15 @@ void WallUpFrame(double now, bool fg, bool paused, bool pinned) {
     if (press || now - S.tWallScan >= 0.1) {
         S.tWallScan = now;
         bool was = S.wallUpOk;
-        S.wallUpOk = FindWallUp(S.kinPos[0], S.kinPos[1], S.footY, std::sin(S.yaw), std::cos(S.yaw), S.wallUpTo, &S.wallUpBlk);
+        int why = kWhyNone;
+        S.wallUpOk = FindWallUp(S.kinPos[0], S.kinPos[1], S.footY, std::sin(S.yaw), std::cos(S.yaw), S.wallUpTo, &S.wallUpBlk, &why);
+        if (why >= kWhyNoTop && why != S.wallUpWhy && now - S.tWallWhy > 2.0 && S.wallWhyLogs < 60) {
+            ++S.wallWhyLogs;
+            S.tWallWhy = now;
+            Log("wall-up: no prompt at %.2f,%.2f foot %.2f facing %.0f deg - %s", S.kinPos[0], S.kinPos[1], S.footY, S.yaw * 57.29578f,
+                WallUpWhyText(why));
+        }
+        S.wallUpWhy = why;
         if (S.wallUpOk && !was && S.wallUpLogs++ < 40)
             Log("wall-up: prompt on - wall top %.2f,%.2f h %.2f (%.1f m above the foot %.2f) on block %p", S.wallUpTo[0], S.wallUpTo[2], S.wallUpTo[1],
                 S.wallUpTo[1] - S.footY, S.footY, (void*)S.wallUpBlk);
@@ -4973,7 +5027,7 @@ void Apply(uintptr_t mgr) {
             S.air = S.airFar = S.dropActive = false;
             S.vy = S.airGap = S.landY = S.landV = S.landPunch = 0;
             S.tLand = -1;
-            S.prompt = 0, S.wallUpOk = false, S.ePrev = true, S.wallUps = 0;
+            S.prompt = 0, S.wallUpOk = false, S.ePrev = true, S.wallUps = 0, S.wallUpWhy = 0, S.wallWhyLogs = 0;
             for (float& a : g_leadAdj) a = std::fmin(a, kLeadAdjMax);
             {
                 Surf sf[kMaxSurf];
