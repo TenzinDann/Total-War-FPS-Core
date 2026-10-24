@@ -543,6 +543,30 @@ struct Config {
 wchar_t g_dir[MAX_PATH];
 uintptr_t g_base = 0;
 bool g_coreOk = false;
+enum DllStatus : LONG {
+    kStatusStarting = 0, kStatusReady = 1,
+    kStatusOldProxy = 2,
+    kStatusOtherCopy = 3,
+    kStatusAssets = 4,
+    kStatusVersion = 5,
+    kStatusSignatures = 6,
+    kStatusDisabled = 7,
+    kStatusNoWindow = 8
+};
+enum RefuseCode : LONG {
+    kRefuseSelect = 1,
+    kRefuseNotHero = 2,
+    kRefuseNotOwner = 3,
+    kRefusePaused = 4,
+    kRefuseArtillery = 5,
+    kRefuseOther = 6
+};
+volatile LONG g_status = kStatusStarting;
+volatile LONG g_refuseSeq = 0, g_refuseCode = 0;
+void Refuse(LONG code) {
+    InterlockedExchange(&g_refuseCode, code);
+    InterlockedIncrement(&g_refuseSeq);
+}
 CRITICAL_SECTION g_logLock;
 FILE* g_log = nullptr;
 __attribute__((format(__MINGW_PRINTF_FORMAT, 1, 2))) void Log(const char* fmt, ...) {
@@ -1359,14 +1383,17 @@ void Enter(uintptr_t mgr) {
     uintptr_t fpCtrl = battle ? Ptr(battle + oBattleFpCtrl) : 0;
     uintptr_t cam = fpCtrl ? fpCtrl + oFpCtrlCamera : 0;
     if (!battle || battle != battle2 || !fpCtrl) {
+        Refuse(kRefuseOther);
         Log("enter refused: battle=%p ui.battle=%p fpCtrl=%p", (void*)battle, (void*)battle2, (void*)fpCtrl);
         return;
     }
     if (Ptr(fpCtrl + oFpCtrlEntity)) {
+        Refuse(kRefuseArtillery);
         Log("enter refused: native artillery first-person mode is active");
         return;
     }
     if (!FpCamOk(cam)) {
+        Refuse(kRefuseOther);
         Log("enter refused: camera vtable mismatch %p", (void*)Ptr(cam));
         return;
     }
@@ -1378,11 +1405,13 @@ void Enter(uintptr_t mgr) {
     uintptr_t entity = FindEntity(unit, &path, &entCount);
     float pos[3];
     if (!unit || !entity || !ReadVec(entity + oEntPos, pos)) {
+        Refuse(kRefuseSelect);
         Log("enter refused: selection count=%d unit=%p entity=%p (select one unit first)", selCount, (void*)unit,
             (void*)entity);
         return;
     }
     if (cfg.heroesOnly && !g_charOk) {
+        Refuse(kRefuseOther);
         Log("enter refused: cannot tell lords / heroes apart on this exe (IsCharacter fingerprint mismatch); [hero] heroes_only=0 lets any unit in");
         return;
     }
@@ -1390,6 +1419,7 @@ void Enter(uintptr_t mgr) {
         int keyLen = CharKeyLen(uiUnit);
         bool general = IsGeneralUiUnit(uiUnit);
         if (keyLen <= 0 && !general) {
+            Refuse(kRefuseNotHero);
             Log("enter refused: unit %p (ui %p) is not a lord or hero (IsCharacter key len %d, IsGeneral 0; first person is lords / heroes only; [hero] heroes_only=0 lets any unit in)",
                 (void*)unit, (void*)uiUnit, keyLen);
             return;
@@ -1411,12 +1441,14 @@ void Enter(uintptr_t mgr) {
                 canFly, always, canToggle, isFly, pos[1]);
     }
     if (S.exitStage && unit != S.exitUnit) {
+        Refuse(kRefusePaused);
         Log("enter refused: previous hero %p is still being restored (exit stage %d); unpause and try again", (void*)S.exitUnit,
             S.exitStage);
         return;
     }
     uintptr_t prev = Ptr(mgr + oMgrActive);
     if (!prev || !InExe(Ptr(prev))) {
+        Refuse(kRefuseOther);
         Log("enter refused: active camera %p looks invalid", (void*)prev);
         return;
     }
@@ -4643,8 +4675,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4715,7 +4745,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4798,26 +4827,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -5997,6 +6017,7 @@ bool InstallHook() {
     uintptr_t battle = ui ? Ptr(ui + oUiBattle) : 0;
     uintptr_t mgr = battle ? Ptr(battle + oBattleCamMgr) : 0;
     if (!mgr) {
+        Refuse(kRefuseOther);
         Log("toggle ignored: no battle camera manager (ui=%p battle=%p)", (void*)ui, (void*)battle);
         return false;
     }
@@ -6004,6 +6025,7 @@ bool InstallHook() {
     uintptr_t ours = g_vtCopy ? reinterpret_cast<uintptr_t>(g_vtCopy + 2) : 0;
     if (ours && vt == ours) return true;
     if (vt != g_base + kVtCamMgr) {
+        Refuse(kRefuseOther);
         Log("camera manager %p has unexpected vtable %p; not hooking", (void*)mgr, (void*)vt);
         return false;
     }
@@ -6019,6 +6041,7 @@ bool InstallHook() {
         ours = reinterpret_cast<uintptr_t>(g_vtCopy + 2);
     }
     if (!Wr(mgr, ours)) {
+        Refuse(kRefuseOther);
         Log("hook write failed on camera manager %p", (void*)mgr);
         return false;
     }
@@ -6308,12 +6331,16 @@ bool VerifyGame() {
         Log("Warhammer3.exe version not supported: stamp=0x%08lX size=0x%lX (this build knows %s 0x%08lX/0x%lX); "
             "module inactive - the game was probably updated, addresses need porting",
             stamp, size, kGames[0].name, kGames[0].stamp, kGames[0].size);
+        g_status = kStatusVersion;
         return false;
     }
     UseGame(*game);
     Log("Warhammer3.exe %s (stamp 0x%08lX size 0x%lX)", game->name, stamp, size);
     bool ok = Ptr(g_base + kVtCamMgr + vtMgrUpdate) == g_base + kFnCamMgrUpdate && PrintsMatch(game->cam, "camera");
-    if (!ok) Log("Warhammer3.exe camera signatures do not match; module inactive");
+    if (!ok) {
+        Log("Warhammer3.exe camera signatures do not match; module inactive");
+        g_status = kStatusSignatures;
+    }
     if (ok) vmgame::VerifyStatic(g_base, &Log, game->render);
     if (ok) {
         bool f = Ptr(g_base + kVtFireCmd) == g_base + kFnFireCmdWrite && PrintsMatch(game->fire, "fire");
@@ -6373,6 +6400,45 @@ bool VerifyGame() {
     }
     return ok;
 }
+bool ReadableRange(const unsigned char* p, size_t n) {
+    while (n) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery(p, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
+        size_t left = static_cast<size_t>(static_cast<const unsigned char*>(mbi.BaseAddress) + mbi.RegionSize - p);
+        if (left >= n) return true;
+        p += left;
+        n -= left;
+    }
+    return true;
+}
+bool IsOurOldProxy(HMODULE m) {
+    static const char kSig[] = "(version.dll proxy) pid=";
+    const size_t sn = sizeof kSig - 1;
+    auto* base = reinterpret_cast<const unsigned char*>(reinterpret_cast<uintptr_t>(m) & ~static_cast<uintptr_t>(3));
+    if (!ReadableRange(base, sizeof(IMAGE_DOS_HEADER))) return false;
+    auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || !ReadableRange(base + dos->e_lfanew, sizeof(IMAGE_NT_HEADERS64)))
+        return false;
+    auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    WORD ns = nt->FileHeader.NumberOfSections;
+    if (!ReadableRange(reinterpret_cast<const unsigned char*>(sec), ns * sizeof *sec)) return false;
+    for (WORD i = 0; i < ns; ++i) {
+        DWORD ch = sec[i].Characteristics;
+        if (!(ch & IMAGE_SCN_MEM_READ) || (ch & (IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_DISCARDABLE))) continue;
+        size_t n = sec[i].Misc.VirtualSize < sec[i].SizeOfRawData ? sec[i].Misc.VirtualSize : sec[i].SizeOfRawData;
+        const unsigned char* p = base + sec[i].VirtualAddress;
+        if (n < sn || !ReadableRange(p, n)) continue;
+        const unsigned char* end = p + n - sn + 1;
+        for (const unsigned char* q = p; q < end; ++q) {
+            q = static_cast<const unsigned char*>(memchr(q, kSig[0], static_cast<size_t>(end - q)));
+            if (!q) break;
+            if (memcmp(q, kSig, sn) == 0) return true;
+        }
+    }
+    return false;
+}
 DWORD WINAPI InitThread(LPVOID) {
     if (!HostIsWh3()) return 0;
     OpenLog();
@@ -6383,15 +6449,19 @@ DWORD WINAPI InitThread(LPVOID) {
         HMODULE vm = GetModuleHandleW(L"version.dll");
         if (vm) GetModuleFileNameW(vm, vp, MAX_PATH);
         swprintf(want, MAX_PATH, L"%ls\\version.dll", g_dir);
-        if (vm && _wcsicmp(vp, want) == 0) {
+        bool inDir = vm && _wcsicmp(vp, want) == 0;
+        if (inDir && IsOurOldProxy(vm)) {
             Log("loader: old version.dll proxy %ls is also loaded (version.dll route retired 10-18 - remove it) - this copy stays idle", vp);
+            g_status = kStatusOldProxy;
             return 0;
         }
-        Log("loader: version.dll = %ls (not ours), module dir %ls", vp[0] ? vp : L"(none)", g_dir);
+        Log("loader: version.dll = %ls (%s), module dir %ls", vp[0] ? vp : L"(none)",
+            inDir ? "in the game folder, another tool's (no hero_fps / tenzin_fps proxy signature) - carrying on" : "not ours", g_dir);
     }
 #ifdef HFPS_PACK_ASSETS
     if (!packx::ExtractFromPack(g_dir, &Log)) {
         Log("onepack: assets not available - first person stays off");
+        g_status = kStatusAssets;
         return 0;
     }
 #endif
@@ -6403,6 +6473,7 @@ DWORD WINAPI InitThread(LPVOID) {
     LoadConfig();
     if (!cfg.enabled) {
         Log("disabled by tenzin_fps.ini");
+        g_status = kStatusDisabled;
         return 0;
     }
     vmgame::Setup(g_base, g_dir, &Log);
@@ -6416,6 +6487,7 @@ DWORD WINAPI InitThread(LPVOID) {
     }
     if (!ctx.best) {
         Log("game window not found; module idle");
+        g_status = kStatusNoWindow;
         return 0;
     }
     Sleep(1500);
@@ -6430,10 +6502,12 @@ DWORD WINAPI InitThread(LPVOID) {
         (void*)g_prevProc);
     if (!g_prevProc) {
         Log("subclass failed err=%lu", GetLastError());
+        g_status = kStatusNoWindow;
         return 0;
     }
     Log("ready: select one unit in battle and press toggle key 0x%02X (viewmodel test key 0x%02X, reload 0x%02X)",
         cfg.toggleKey, vmgame::TestKey(), vmgame::ReloadKey());
+    g_status = kStatusReady;
     return 0;
 }
 bool LoadRealVersion() {
@@ -6904,6 +6978,15 @@ int Prompt(void* L) {
     f.pushnumber(L, S.active && S.lastMode == 0 ? static_cast<float>(S.prompt) : 0.f);
     return 1;
 }
+int Refused(void* L) {
+    f.pushnumber(L, static_cast<float>(g_refuseSeq));
+    f.pushnumber(L, static_cast<float>(g_refuseCode));
+    return 2;
+}
+int Status(void* L) {
+    f.pushnumber(L, static_cast<float>(g_status));
+    return 1;
+}
 int ExitFirstPerson(void* L) {
     (void)L;
     if (S.active) {
@@ -6922,7 +7005,7 @@ int PushTable(void* L) {
     const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_enabled", HudEnabled},
                                                         {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"cast_event", CastEvent},
                                                         {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson},
-                                                        {"tac_stamina", TacStaminaApi}, {"refill_ammo", RefillAmmoApi}, {"prompt", Prompt},
+                                                        {"tac_stamina", TacStaminaApi}, {"refill_ammo", RefillAmmoApi}, {"prompt", Prompt}, {"refused", Refused}, {"status", Status},
                                                         {"cast_marker", CastMarkerApi}, {"cast_target", CastTargetApi}, {"cast_point", CastPointApi}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
