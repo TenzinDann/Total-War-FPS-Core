@@ -1606,49 +1606,7 @@ bool Renderer::Init(ID3D11Device* dev, const wchar_t* hvmPath, char* err, size_t
     ready_ = true;
     return true;
 }
-DrawProf g_drawProf;
-namespace {
-ScreenBufs g_sharedScreen;
-double ProfNow() {
-    static LARGE_INTEGER f = {};
-    if (!f.QuadPart) QueryPerformanceFrequency(&f);
-    LARGE_INTEGER c;
-    QueryPerformanceCounter(&c);
-    return static_cast<double>(c.QuadPart) / static_cast<double>(f.QuadPart);
-}
-}
-void ScreenBufs::Release() {
-    SafeRelease(dsv);
-    SafeRelease(depthTex);
-    depthW = depthH = 0;
-    SafeRelease(sceneSrv);
-    SafeRelease(sceneTex);
-    sceneW = sceneH = sceneMips = 0;
-    sceneFmt = DXGI_FORMAT_UNKNOWN;
-    SafeRelease(distSrv);
-    SafeRelease(distTex);
-    distW = distH = 0;
-    distFmt = DXGI_FORMAT_UNKNOWN;
-    SafeRelease(distDepthSrv);
-    SafeRelease(distDepthTex);
-    distDepthW = distDepthH = 0;
-    dev = nullptr;
-}
-void ReleaseSharedScreenBuffers() { g_sharedScreen.Release(); }
-ScreenBufs& Renderer::Sb() {
-    ScreenBufs& b = shareScreen_ ? g_sharedScreen : own_;
-    if (b.dev != dev_) {
-        b.Release();
-        b.dev = dev_;
-    }
-    return b;
-}
-const ScreenBufs& Renderer::Sb() const { return shareScreen_ ? g_sharedScreen : own_; }
 bool Renderer::EnsureDepth(UINT w, UINT h) {
-    ScreenBufs& b = Sb();
-    ID3D11DepthStencilView*& dsv_ = b.dsv;
-    ID3D11Texture2D*& depthTex_ = b.depthTex;
-    UINT &depthW_ = b.depthW, &depthH_ = b.depthH;
     if (dsv_ && w == depthW_ && h == depthH_) return true;
     SafeRelease(dsv_);
     SafeRelease(depthTex_);
@@ -1676,11 +1634,6 @@ bool Renderer::EnsureDepth(UINT w, UINT h) {
 ID3D11ShaderResourceView* Renderer::CopyForDistort(ID3D11DeviceContext* ctx, ID3D11Texture2D* backBuffer, UINT w, UINT h, bool* gamma) {
     if (gamma) *gamma = false;
     if (!ctx || !backBuffer || !dev_ || distBroken_) return nullptr;
-    ScreenBufs& b = Sb();
-    ID3D11Texture2D *&distTex_ = b.distTex, *&depthTex_ = b.depthTex, *&distDepthTex_ = b.distDepthTex;
-    ID3D11ShaderResourceView *&distSrv_ = b.distSrv, *&distDepthSrv_ = b.distDepthSrv;
-    UINT &distW_ = b.distW, &distH_ = b.distH, &depthW_ = b.depthW, &depthH_ = b.depthH, &distDepthW_ = b.distDepthW, &distDepthH_ = b.distDepthH;
-    DXGI_FORMAT& distFmt_ = b.distFmt;
     D3D11_TEXTURE2D_DESC sd;
     backBuffer->GetDesc(&sd);
     if (sd.SampleDesc.Count != 1 || sd.Width != w || sd.Height != h) return nullptr;
@@ -1750,11 +1703,6 @@ ID3D11ShaderResourceView* Renderer::CopyForDistort(ID3D11DeviceContext* ctx, ID3
 }
 bool Renderer::EnsureScene(UINT w, UINT h, DXGI_FORMAT fmt) {
     if (sceneBroken_) return false;
-    ScreenBufs& b = Sb();
-    ID3D11Texture2D*& sceneTex_ = b.sceneTex;
-    ID3D11ShaderResourceView*& sceneSrv_ = b.sceneSrv;
-    UINT &sceneW_ = b.sceneW, &sceneH_ = b.sceneH, &sceneMips_ = b.sceneMips;
-    DXGI_FORMAT& sceneFmt_ = b.sceneFmt;
     if (sceneSrv_ && w == sceneW_ && h == sceneH_ && fmt == sceneFmt_) return true;
     SafeRelease(sceneSrv_);
     SafeRelease(sceneTex_);
@@ -2234,11 +2182,8 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
                     bool rtvEncodesSrgb, const Settings& s, const Look& look) {
     sceneFresh_ = false;
     shieldViewValid_ = false;
-    const double tProf0 = ProfNow();
-    g_drawProf = DrawProf();
     if (!ready_ || !ctx || !rtv || !w || !h) return false;
     if (!EnsureDepth(w, h)) return false;
-    g_drawProf.depth = (ProfNow() - tProf0) * 1000.0;
     static float palette[kMaxBones * 12 + 12];
     float muzzleModel[3] = {s.muzzleLocal[0], s.muzzleLocal[1], s.muzzleLocal[2]};
     float axisModel[3] = {s.muzzleAxis[0], s.muzzleAxis[1], s.muzzleAxis[2]};
@@ -2540,7 +2485,6 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
     StateBackup bk;
     bk.Save(ctx);
     bool haveScene = false;
-    const double tProfScene = ProfNow();
     if (sceneTex && (s.sceneLight > 0.001f || lensOn)) {
         D3D11_TEXTURE2D_DESC sd;
         sceneTex->GetDesc(&sd);
@@ -2553,12 +2497,11 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
         default: break;
         }
         if (sd.SampleDesc.Count == 1 && sd.Width == w && sd.Height == h && EnsureScene(w, h, f)) {
-            const ScreenBufs& b = Sb();
-            ctx->CopySubresourceRegion(b.sceneTex, 0, 0, 0, 0, sceneTex, 0, nullptr);
-            ctx->GenerateMips(b.sceneSrv);
+            ctx->CopySubresourceRegion(sceneTex_, 0, 0, 0, 0, sceneTex, 0, nullptr);
+            ctx->GenerateMips(sceneSrv_);
             haveScene = true;
             cf.scene[0] = s.sceneLight;
-            cf.scene[1] = static_cast<float>(b.sceneMips >= 2 ? b.sceneMips - 2 : 0);
+            cf.scene[1] = static_cast<float>(sceneMips_ >= 2 ? sceneMips_ - 2 : 0);
             cf.scene[2] = (f == DXGI_FORMAT_R16G16B16A16_FLOAT || f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
                            f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
                               ? 0.f
@@ -2568,9 +2511,6 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
     }
     sceneFresh_ = haveScene;
     sceneGammaEnc_ = haveScene && cf.scene[2] > 0.5f;
-    g_drawProf.scene = (ProfNow() - tProfScene) * 1000.0;
-    ID3D11DepthStencilView* dsv_ = Sb().dsv;
-    ID3D11ShaderResourceView* sceneSrv_ = Sb().sceneSrv;
     D3D11_MAPPED_SUBRESOURCE mp;
     if (SUCCEEDED(ctx->Map(cbFrame_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mp))) {
         memcpy(mp.pData, &cf, sizeof cf);
@@ -2605,9 +2545,7 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
     ctx->PSSetSamplers(0, 1, &samp_);
     ID3D11ShaderResourceView* sceneView = haveScene ? sceneSrv_ : white_;
     ctx->PSSetShaderResources(3, 1, &sceneView);
-    const double tProfWh3 = ProfNow();
     SetupWh3Material(s);
-    g_drawProf.wh3 = (ProfNow() - tProfWh3) * 1000.0;
     float em[44] = {};
     if (wh3On_) {
         if (s.wh3Emissive) {
@@ -2659,7 +2597,6 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
         ctx->DrawIndexed(sm.indexCount, sm.firstIndex, 0);
     }
     bk.Restore(ctx);
-    g_drawProf.total = (ProfNow() - tProf0) * 1000.0;
     return true;
 }
 void Renderer::SetupWh3Material(const Settings& s) {
@@ -2725,10 +2662,22 @@ void Renderer::Release() {
     SafeRelease(dss_);
     SafeRelease(bs_);
     SafeRelease(samp_);
-    own_.Release();
+    SafeRelease(dsv_);
+    SafeRelease(depthTex_);
     SafeRelease(white_);
+    SafeRelease(sceneSrv_);
+    SafeRelease(sceneTex_);
+    sceneW_ = sceneH_ = sceneMips_ = 0;
+    sceneFmt_ = DXGI_FORMAT_UNKNOWN;
     sceneBroken_ = false;
+    SafeRelease(distSrv_);
+    SafeRelease(distTex_);
+    distW_ = distH_ = 0;
+    distFmt_ = DXGI_FORMAT_UNKNOWN;
     distBroken_ = false;
+    SafeRelease(distDepthSrv_);
+    SafeRelease(distDepthTex_);
+    distDepthW_ = distDepthH_ = 0;
     distDepthOk_ = false;
     for (auto*& s : srv_) SafeRelease(s);
     texCount_ = 0;
@@ -2757,6 +2706,7 @@ void Renderer::Release() {
     muzzleValid_ = false;
     muzzleFrameValid_ = false;
     indexCount_ = 0;
+    depthW_ = depthH_ = 0;
     SafeRelease(dev_);
 }
 namespace {

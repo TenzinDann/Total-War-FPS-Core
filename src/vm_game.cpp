@@ -1749,7 +1749,6 @@ bool EnsureWeapon(int idx, ID3D11Device* dev) {
         double t0 = Now();
         if (!SettingsUnchanged(idx, w.set)) LoadAllSettings(idx, w.set);
         char err[512] = {};
-        w.rend.ShareScreenBuffers(true);
         if (!w.rend.Init(dev, g_models[idx], err, sizeof err)) {
             g_log("viewmodel: init failed (%ls): %s", g_models[idx], err);
             PrefetchDiscard(idx);
@@ -2037,60 +2036,21 @@ void CheckDevice(ID3D11Device* dev) {
         g_w[i].rend.Release();
         g_w[i].fxDirty = true;
     }
-    vm::ReleaseSharedScreenBuffers();
     g_shieldR.Release();
     InterlockedExchange(&g_reqRoster, 1);
 }
-double g_slowFrameMs = 20.0;
-struct FrameProf {
-    static constexpr int kSegs = 24;
-    const char* name[kSegs];
-    double t[kSegs];
-    int n = 0;
-    double t0 = 0;
-    void Start(double now) { n = 0, t0 = now; }
-    void Mark(const char* nm) {
-        if (n < kSegs) name[n] = nm, t[n++] = Now();
-    }
-    void Format(char* out, size_t cap) const {
-        size_t k = 0;
-        out[0] = 0;
-        double prev = t0;
-        for (int i = 0; i < n && k + 32 < cap; ++i) {
-            double ms = (t[i] - prev) * 1000.0;
-            prev = t[i];
-            if (ms >= 0.1) k += snprintf(out + k, cap - k, "%s%s %.1f", k ? ", " : "", name[i], ms);
-        }
-    }
-};
-FrameProf g_fprof;
-bool g_profWasFp = false;
-int g_profLogs = 0, g_warmProfLogs = 0;
 void WarmStep(IDXGISwapChain* sc) {
     ID3D11Device* dev = nullptr;
     if (FAILED(sc->GetDevice(IID_ID3D11Device, reinterpret_cast<void**>(&dev))) || !dev) {
         InterlockedExchange(&g_warm, 0);
         return;
     }
-    if (InterlockedCompareExchange(&g_warm, 2, 1) == 1) g_warmT0 = Now(), g_warmProfLogs = 0;
-    FrameProf wp;
-    wp.Start(Now());
+    if (InterlockedCompareExchange(&g_warm, 2, 1) == 1) g_warmT0 = Now();
     CheckDevice(dev);
-    wp.Mark("device");
     bool ok = EnsureWeapon(g_modelIdx, dev);
-    wp.Mark("current");
     if (ok) {
         RosterStep(dev);
-        wp.Mark("roster");
         PreloadStep(dev);
-        wp.Mark("preload");
-    }
-    double wms = (Now() - wp.t0) * 1000.0;
-    if (g_slowFrameMs > 0 && wms >= g_slowFrameMs && g_warmProfLogs < 40) {
-        char segs[512];
-        wp.Format(segs, sizeof segs);
-        ++g_warmProfLogs;
-        g_log("warm-prof: slow preload frame %.1f ms (before first person): %s", wms, segs);
     }
     if (!ok || (g_preloadNext < 0 && !g_reqRoster)) {
         int ready = 0;
@@ -2104,12 +2064,9 @@ void WarmStep(IDXGISwapChain* sc) {
 void DrawLayer(IDXGISwapChain* sc, int part) {
     if (g_failed || !(g_testLayer || g_fp)) {
         if (!g_failed && g_warm && part == kPartAll) WarmStep(sc);
-        g_profWasFp = false;
         return;
     }
     double t0 = Now();
-    g_fprof.Start(t0);
-    vm::DrawProf gunProf;
     if (part != kPartCross && InterlockedExchange(&g_reqModelNext, 0) && g_modelCount > 1) {
         int next = ((g_sw.phase == 1 ? g_sw.target : g_modelIdx) + 1) % g_modelCount;
         InterlockedExchange(&g_wantIdx, next);
@@ -2125,7 +2082,6 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
               Wp().set.fovDeg, Wp().set.offset[0], Wp().set.offset[1], Wp().set.offset[2], Wp().set.rotDeg[0], Wp().set.rotDeg[1],
               Wp().set.rotDeg[2], Wp().set.scale, Wp().set.mirrorX);
     }
-    g_fprof.Mark("settings");
     ID3D11Device* dev = nullptr;
     if (FAILED(sc->GetDevice(IID_ID3D11Device, reinterpret_cast<void**>(&dev))) || !dev) {
         if (!g_st.loggedDev) g_log("viewmodel: swapchain has no D3D11 device; layer off");
@@ -2135,20 +2091,15 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
     }
     if (part != kPartCross) {
         CheckDevice(dev);
-        g_fprof.Mark("device");
         if (!EnsureWeapon(g_modelIdx, dev)) {
             g_failed = true;
             dev->Release();
             return;
         }
-        g_fprof.Mark("current");
         RosterStep(dev);
-        g_fprof.Mark("roster");
         AmmoRefillStep();
         SwitchStep(dev);
-        g_fprof.Mark("switch");
         PreloadStep(dev);
-        g_fprof.Mark("preload");
     }
     ID3D11Texture2D* bb = nullptr;
     if (SUCCEEDED(sc->GetBuffer(0, IID_ID3D11Texture2D, reinterpret_cast<void**>(&bb))) && bb) {
@@ -2170,25 +2121,18 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                 ID3D11DeviceContext* ctx = nullptr;
                 dev->GetImmediateContext(&ctx);
                 if (ctx) {
-                    g_fprof.Mark("rtv");
                     if (part != kPartGun) UiLayerOnPresent(ctx, bb, td.Width, td.Height);
-                    g_fprof.Mark("ui");
                     float mx = 0, my = 0, ma = 1;
                     bool mv = false, gun = part != kPartCross;
                     if (gun) {
                         vm::Look look = ComputeLook();
-                        g_fprof.Mark("look");
                         if (part == kPartAll) HudCoverSave(dev, ctx, bb, td);
-                        g_fprof.Mark("hud-save");
                         if (Wp().rend.Draw(ctx, rtv, bb, td.Width, td.Height, hw, Wp().set, look)) ++g_st.draws;
-                        g_fprof.Mark("gun");
-                        gunProf = vm::g_drawProf;
                         mv = Wp().rend.Muzzle(&mx, &my, &ma);
                         vm::MuzzleFrame mf;
                         vm::WorldCam wc;
                         bool hasMf = g_fp && Wp().rend.MuzzleView(&mf), hasCam = g_fp && ReadCam(&wc);
                         if (g_fp) ShieldDraw(dev, ctx, rtv, td.Width, td.Height, hw, hasCam ? &wc : nullptr);
-                        g_fprof.Mark("shield");
                         if (hasMf)
                             Wp().shells.Draw(ctx, rtv, Wp().rend.Depth(td.Width, td.Height), td.Width, td.Height, hw, Now(), &mf,
                                              hasCam ? &wc : nullptr, Wp().set, look.flashLight, Wp().rend.SceneSrv(), Wp().rend.SceneGamma());
@@ -2220,7 +2164,6 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                                 ++g_fxStat.lands;
                             }
                         }
-                        g_fprof.Mark("shells");
                         {
                             static const bool preGun = getenv("HFPS_DISTORT_PRE_GUN") != nullptr;
                             bool dg = false;
@@ -2228,13 +2171,10 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                             if (preGun) ds = Wp().rend.SceneSrv(), dg = Wp().rend.SceneGamma();
                             Wp().flash.SetScene(ds, dg, preGun ? nullptr : Wp().rend.DistortDepth());
                         }
-                        g_fprof.Mark("distort");
                         if (hasMf || hasCam)
                             Wp().flash.Draw(ctx, rtv, Wp().rend.Depth(td.Width, td.Height), td.Width, td.Height, hw, Now(), hasMf ? &mf : nullptr,
                                          hasCam ? &wc : nullptr, Wp().set);
-                        g_fprof.Mark("flash");
                         LauncherDraw(dev, ctx, rtv, bb, td.Width, td.Height, hw, look);
-                        g_fprof.Mark("launcher");
                         if (part == kPartAll) HudCoverRestore(ctx, bb);
                     }
                     if (part != kPartGun && g_fp) {
@@ -2242,7 +2182,6 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                         float cspread, calpha;
                         if (CrossFrame(cs, cspread, calpha)) g_cross.Draw(ctx, rtv, td.Width, td.Height, hw, cs, cspread, calpha);
                     }
-                    g_fprof.Mark("cross");
                     ctx->Release();
                     if (gun) {
                         InterlockedIncrement(&g_muz.seq);
@@ -2268,19 +2207,6 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
     }
     dev->Release();
     double ms = (Now() - t0) * 1000.0;
-    {
-        bool first = g_fp && !g_profWasFp;
-        if (g_fp) g_profWasFp = true;
-        if (first) g_profLogs = 0;
-        if (g_slowFrameMs > 0 && (first || (ms >= g_slowFrameMs && g_profLogs < 40))) {
-            ++g_profLogs;
-            char segs[640];
-            g_fprof.Format(segs, sizeof segs);
-            const vm::DrawProf& dp = gunProf;
-            g_log("frame-prof: %s %.1f ms (part %d, weapon %d): %s | gun draw: depth %.1f, scene copy %.1f, wh3 material %.1f, total %.1f",
-                  first ? "first first-person frame" : "slow frame", ms, part, g_modelIdx, segs, dp.depth, dp.scene, dp.wh3, dp.total);
-        }
-    }
     g_st.msSum += ms;
     if (ms > g_st.msMax) g_st.msMax = ms;
     if (part != kPartGun) ++g_st.frames;
@@ -2373,7 +2299,6 @@ void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
         g_enabled, g_staticOk, g_testKey, g_reloadKey, g_animKey, g_modelKey, g_modelCount, g_models[0], Wp().set.fovDeg,
         Wp().set.offset[0], Wp().set.offset[1], Wp().set.offset[2], Wp().set.rotDeg[0], Wp().set.rotDeg[1], Wp().set.rotDeg[2]);
     LauncherSetup(dllDir);
-    g_slowFrameMs = static_cast<double>(GetPrivateProfileIntW(L"viewmodel", L"slow_frame_ms", 20, g_ini));
     if (g_enabled && (g_staticOk || !exeBase)) {
         g_preloadOnBattle = GetPrivateProfileIntW(L"viewmodel", L"preload_on_battle", 1, g_ini) != 0;
         wcsncpy(g_armoryPath, g_ini, MAX_PATH - 1);
@@ -2828,6 +2753,9 @@ void LauncherCast(int kind, bool driven, float windup) {
 }
 void LauncherFire() { InterlockedExchange64(&g_lc.fireUs, static_cast<LONG64>(Now() * 1e6)); }
 void LauncherAbort() { InterlockedExchange64(&g_lc.abortUs, static_cast<LONG64>(Now() * 1e6)); }
+void LauncherCue(int cue, int kind) {
+    if (cue >= 0 && cue < 2 && kind >= 0 && kind < kLauncherKinds) InterlockedOr(&g_lc.cueReq, 1L << (cue * kLauncherKinds + kind));
+}
 bool MeleeActive() { return g_meleeOn != 0; }
 void MeleeInput(bool attack, bool block) { InterlockedExchange(&g_meleeIn, (attack ? 1 : 0) | (block ? 2 : 0)); }
 int TakeMeleeStrike(int* cat) {
