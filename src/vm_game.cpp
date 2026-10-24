@@ -2519,6 +2519,7 @@ __attribute__((noinline)) HRESULT STDMETHODCALLTYPE HkPresent(IDXGISwapChain* sc
             g_probeMute = false;
             UiLayerBbStep();
             UiLayerCompStep();
+            UiLayerViewStep();
         }
     } else if (InterlockedIncrement(&g_foreignPresents) <= 3) {
         g_log("viewmodel: Present from elsewhere (return %p, thread %lu) - forwarded without drawing", (void*)ret,
@@ -2555,6 +2556,10 @@ bool VerifyStatic(uintptr_t exeBase, LogFn log, const RenderAddrs& addrs) {
         static_cast<unsigned long long>(g_ra.vtComposite), static_cast<unsigned long long>(g_ra.oFrameGraph),
         static_cast<unsigned long long>(g_ra.oPassList), static_cast<unsigned long long>(g_ra.oAaSetting),
         g_compRouteOk ? "ok" : "does not match this exe - without an upscaler the gun stays at Present (drawn over the UI)");
+    g_viewRouteOk = ok && ViewRouteVerify(exeBase);
+    log("ui-layer: frame view route (vtable e+%llx, sub-object e+%llx, UI slot +0x%llx) %s", static_cast<unsigned long long>(g_ra.vtView),
+        static_cast<unsigned long long>(g_ra.vtViewSub), static_cast<unsigned long long>(kViewUiSlot),
+        g_viewRouteOk ? "ok" : "does not match this exe - with anti-aliasing off the gun stays at Present (drawn over the UI)");
     return ok;
 }
 void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
@@ -3057,9 +3062,6 @@ void LauncherCast(int kind, bool driven, float windup) {
 }
 void LauncherFire() { InterlockedExchange64(&g_lc.fireUs, static_cast<LONG64>(Now() * 1e6)); }
 void LauncherAbort() { InterlockedExchange64(&g_lc.abortUs, static_cast<LONG64>(Now() * 1e6)); }
-void LauncherCue(int cue, int kind) {
-    if (cue >= 0 && cue < 2 && kind >= 0 && kind < kLauncherKinds) InterlockedOr(&g_lc.cueReq, 1L << (cue * kLauncherKinds + kind));
-}
 bool MeleeActive() { return g_meleeOn != 0; }
 void MeleeInput(bool attack, bool block) { InterlockedExchange(&g_meleeIn, (attack ? 1 : 0) | (block ? 2 : 0)); }
 int TakeMeleeStrike(int* cat) {

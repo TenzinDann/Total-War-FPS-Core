@@ -76,6 +76,8 @@ struct UiLayerStat {
     bool loggedMid, loggedFallback, loggedThread, loggedState;
     UINT midComp, skipAa, skipRt;
     bool loggedComp, loggedAa, loggedRt;
+    UINT midView, skipViewRt;
+    bool loggedView, loggedViewRt;
 } g_uls = {};
 void UiLayerAfterCopy(ID3D11DeviceContext* c, ID3D11Resource* dst, void* ret);
 constexpr uintptr_t kBbCopySlot = 0x28, kBbTexOff = 0x28, kRctxCtxOff = 0x18;
@@ -96,6 +98,15 @@ uintptr_t g_compObj = 0;
 uintptr_t* g_compVtCopy = nullptr;
 bool g_compLoggedList = false, g_compLoggedMissing = false;
 ID3D11DeviceContext* g_layerCtx = nullptr;
+bool g_viewRouteOk = false;
+constexpr uintptr_t kViewUiSlot = 0x90;
+using FnViewUi = uintptr_t (*)(void* self, uintptr_t a2, uintptr_t a3, uintptr_t a4);
+FnViewUi g_viewUiOrig = nullptr;
+constexpr int kMaxViews = 4;
+uintptr_t g_viewObjs[kMaxViews] = {};
+int g_viewN = 0;
+uintptr_t* g_viewVtCopy = nullptr;
+bool g_viewLoggedMissing = false;
 uintptr_t g_probeOwn[24];
 int g_probeOwnN = 0;
 void ProbeStack(void** out) {
@@ -485,16 +496,16 @@ void UiLayerOnPresent(ID3D11DeviceContext* ctx, ID3D11Texture2D* bb, UINT bbW, U
     double now = Now();
     if (g_uiLayerMode == 1 && g_fp && now - g_uls.t >= 5.0) {
         if (g_uls.mid || g_uls.fallback)
-            g_log("ui-layer: 5s gun drawn under the UI %u frames (%u after the composite step, the rest after the back-buffer copy), at Present (fallback) %u frames; "
-                  "skipped: other thread %u, no state %u, anti-aliasing off %u, render target not the back buffer %u",
-                  g_uls.mid, g_uls.midComp, g_uls.fallback, g_uls.skipThread, g_uls.skipState, g_uls.skipAa, g_uls.skipRt);
+            g_log("ui-layer: 5s gun drawn under the UI %u frames (%u after the composite step, %u before the frame view's UI, the rest after the back-buffer copy), "
+                  "at Present (fallback) %u frames; skipped: other thread %u, no state %u, anti-aliasing off at the composite step %u, render target not the back buffer %u / %u",
+                  g_uls.mid, g_uls.midComp, g_uls.midView, g_uls.fallback, g_uls.skipThread, g_uls.skipState, g_uls.skipAa, g_uls.skipRt, g_uls.skipViewRt);
         g_uls.t = now, g_uls.mid = g_uls.fallback = g_uls.skipThread = g_uls.skipState = 0;
-        g_uls.midComp = g_uls.skipAa = g_uls.skipRt = 0;
+        g_uls.midComp = g_uls.skipAa = g_uls.skipRt = g_uls.midView = g_uls.skipViewRt = 0;
     }
 }
 int UiLayerPresentPart() {
     int part = g_midDone ? kPartCross : kPartAll;
-    if (!g_midDone && g_uiLayerMode == 1 && (g_bbObj || g_compObj) && g_fp) {
+    if (!g_midDone && g_uiLayerMode == 1 && (g_bbObj || g_compObj || g_viewN) && g_fp) {
         ++g_uls.fallback;
         if (!g_uls.loggedFallback) {
             g_uls.loggedFallback = true;
@@ -686,7 +697,7 @@ void UiLayerAfterComposite(void* ret) {
         ++g_uls.skipAa;
         if (!g_uls.loggedAa) {
             g_uls.loggedAa = true;
-            g_log("ui-layer: anti-aliasing setting %d - the game's composite step does nothing this frame; gun stays at Present (over the UI)", aa);
+            g_log("ui-layer: anti-aliasing setting %d - the game's composite step does nothing this frame; the frame view draws the scene (its UI hook draws the gun)", aa);
         }
         return;
     }
@@ -803,4 +814,139 @@ void UiLayerCompStep() {
     }
     g_compObj = obj;
     g_log("ui-layer: hooked the game's composite step %p (entry %d of %u, %d with that vtable); D3D context untouched", (void*)obj, at, n, found);
+}
+bool ViewRouteVerify(uintptr_t e) {
+    if (!g_ra.vtView || !g_ra.vtViewSub || !g_ra.fnViewDraw || !g_ra.fnViewUi || !g_ra.insViewTailUi || !g_ra.insHelperCallDraw) return false;
+    static const unsigned char kTail[] = {0x48, 0x8B, 0x06, 0x49, 0x8B, 0xD6, 0x48, 0x8B, 0xCE, 0x48, 0x8B, 0x5C, 0x24, 0x68, 0x48, 0x8B, 0x6C, 0x24, 0x70, 0x48,
+                                          0x83, 0xC4, 0x30, 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5C, 0x5F, 0x5E, 0x48, 0xFF, 0xA0, 0x90, 0x00, 0x00, 0x00, 0xCC};
+    static const unsigned char kUiHead[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x99, 0xE0, 0x00,
+                                            0x00, 0x00, 0x48, 0x8B, 0xF2};
+    static const unsigned char kHelper[] = {0x48, 0x8B, 0x0B, 0x48, 0x8B, 0x53, 0x08, 0x48, 0x8B, 0x01, 0xFF, 0x90, 0xF8, 0x00, 0x00, 0x00};
+    static const unsigned char kThunk[] = {0x48, 0x83, 0xE9, 0x18, 0xE9};
+    const uintptr_t thunk = Ptr(e + g_ra.vtViewSub);
+    return Ptr(e + g_ra.vtView + 0xf8) == e + g_ra.fnViewDraw && Ptr(e + g_ra.vtView + kViewUiSlot) == e + g_ra.fnViewUi &&
+           BytesMatch(e + g_ra.insViewTailUi, kTail, sizeof kTail) && g_ra.insViewTailUi > g_ra.fnViewDraw &&
+           g_ra.insViewTailUi < g_ra.fnViewDraw + 0x400 && BytesMatch(e + g_ra.fnViewUi, kUiHead, sizeof kUiHead) &&
+           BytesMatch(e + g_ra.insHelperCallDraw, kHelper, sizeof kHelper) && thunk && BytesMatch(thunk, kThunk, sizeof kThunk);
+}
+void UiLayerBeforeViewUi(void* ret) {
+    if (g_probeMute || g_uiLayerMode != 1 || g_midDone || !g_lastSc || !g_probeBb || !g_layerCtx) return;
+    if (!InExe(ret) || g_failed || !(g_fp || g_testLayer)) return;
+    ID3D11RenderTargetView* rtv = nullptr;
+    g_layerCtx->OMGetRenderTargets(1, &rtv, nullptr);
+    ID3D11Resource* res = nullptr;
+    if (rtv) rtv->GetResource(&res);
+    const bool onBb = res && reinterpret_cast<uintptr_t>(res) == g_probeBb;
+    if (!onBb && !g_uls.loggedViewRt) {
+        UINT w = 0, h = 0, fmt = 0;
+        ProbeTexInfo(res, &w, &h, &fmt);
+        g_uls.loggedViewRt = true;
+        g_log("ui-layer: when the frame view starts its UI the bound render target is %p (%ux%u fmt %u), not the back buffer %p; gun stays at Present",
+              (void*)res, w, h, fmt, (void*)g_probeBb);
+    }
+    if (res) res->Release();
+    if (rtv) rtv->Release();
+    if (!onBb) {
+        ++g_uls.skipViewRt;
+        return;
+    }
+    if (!UiLayerMidDraw(g_layerCtx)) return;
+    ++g_uls.midView;
+    if (!g_uls.loggedView) {
+        char who[96];
+        ProbeFmtAddr(ret, who, sizeof who);
+        int aa = -1;
+        uintptr_t gfx = Ptr(g_base + g_ra.globalGfx);
+        if (gfx) Rd(gfx + g_ra.oAaSetting, aa);
+        g_uls.loggedView = true;
+        g_log("ui-layer: gun drawn right before the game's frame view draws the UI (the view drew the scene itself; caller %s, anti-aliasing %d); UI now draws on top",
+              who, aa);
+    }
+}
+__attribute__((noinline)) uintptr_t HkViewUi(void* self, uintptr_t a2, uintptr_t a3, uintptr_t a4) {
+    UiLayerBeforeViewUi(__builtin_return_address(0));
+    return g_viewUiOrig(self, a2, a3, a4);
+}
+void ViewUnhookAt(int i, const char* why, bool write) {
+    uintptr_t o = g_viewObjs[i];
+    if (write && Ptr(o) == reinterpret_cast<uintptr_t>(g_viewVtCopy)) {
+        uintptr_t orig = g_base + g_ra.vtView;
+        SIZE_T w = 0;
+        WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<LPVOID>(o), &orig, sizeof orig, &w);
+        g_log("ui-layer: frame view %p vtable restored (%s)", (void*)o, why);
+    } else {
+        g_log("ui-layer: frame view %p released without writing it (%s)", (void*)o, why);
+    }
+    g_viewObjs[i] = g_viewObjs[--g_viewN];
+    g_viewObjs[g_viewN] = 0;
+}
+void UiLayerViewStep() {
+    UiLayerReadIni();
+    bool want = g_uiLayerMode == 1 && g_viewRouteOk && (g_fp || g_testLayer) && !g_failed;
+    if (!want) {
+        while (g_viewN) ViewUnhookAt(g_viewN - 1, !(g_fp || g_testLayer) ? "first person off" : "frame view route off", true);
+        return;
+    }
+    uintptr_t gfx = Ptr(g_base + g_ra.globalGfx), fg = gfx ? Ptr(gfx + g_ra.oFrameGraph) : 0, arr = 0;
+    uint32_t n = 0;
+    if (!fg || !Rd(fg + g_ra.oPassList + 4, n) || !n || n > 1024 || !(arr = Ptr(fg + g_ra.oPassList + 8))) return;
+    const uintptr_t vtSub = g_base + g_ra.vtViewSub, vtGame = g_base + g_ra.vtView;
+    uintptr_t ours = reinterpret_cast<uintptr_t>(g_viewVtCopy), found[kMaxViews] = {};
+    int nf = 0;
+    for (uint32_t i = 0; i < n && nf < kMaxViews; ++i) {
+        uintptr_t p = Ptr(arr + 8 * i);
+        if (!p || Ptr(p) != vtSub) continue;
+        uintptr_t v = p - 0x18, vt = Ptr(v);
+        if (vt == vtGame || (ours && vt == ours)) found[nf++] = v;
+    }
+    for (int i = g_viewN - 1; i >= 0; --i) {
+        bool still = false;
+        for (int k = 0; k < nf; ++k) still |= found[k] == g_viewObjs[i];
+        if (!still) ViewUnhookAt(i, "frame view gone from the pass list", false);
+    }
+    if (!nf) {
+        if (!g_viewLoggedMissing) {
+            g_viewLoggedMissing = true;
+            g_log("ui-layer: frame view (sub-object vtable e+%llx) not in the %u-entry render pass list; with anti-aliasing off the gun stays at Present",
+                  static_cast<unsigned long long>(g_ra.vtViewSub), n);
+        }
+        return;
+    }
+    for (int k = 0; k < nf; ++k) {
+        uintptr_t v = found[k];
+        if (Ptr(v) == ours && ours) {
+            bool listed = false;
+            for (int i = 0; i < g_viewN; ++i) listed |= g_viewObjs[i] == v;
+            if (!listed && g_viewN < kMaxViews) g_viewObjs[g_viewN++] = v;
+            continue;
+        }
+        if (!g_viewVtCopy) {
+            constexpr int kMax = 64;
+            int c = 0;
+            for (; c < kMax; ++c) {
+                uintptr_t x = 0;
+                if (!Rd(vtGame + 8 * c, x) || !InExe(reinterpret_cast<void*>(x))) break;
+            }
+            if (c <= static_cast<int>(kViewUiSlot / 8)) return;
+            auto* copy = static_cast<uintptr_t*>(VirtualAlloc(nullptr, (c + 2) * sizeof(uintptr_t), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+            if (!copy) return;
+            copy[0] = Ptr(vtGame - 16);
+            copy[1] = Ptr(vtGame - 8);
+            for (int i = 0; i < c; ++i) copy[2 + i] = Ptr(vtGame + 8 * i);
+            g_viewUiOrig = reinterpret_cast<FnViewUi>(copy[2 + kViewUiSlot / 8]);
+            copy[2 + kViewUiSlot / 8] = reinterpret_cast<uintptr_t>(&HkViewUi);
+            DWORD old;
+            VirtualProtect(copy, (c + 2) * sizeof(uintptr_t), PAGE_READONLY, &old);
+            g_viewVtCopy = copy + 2, ours = reinterpret_cast<uintptr_t>(g_viewVtCopy);
+            g_log("ui-layer: frame view vtable e+%llx copied (%d slots), slot +0x%llx -> our hook", static_cast<unsigned long long>(g_ra.vtView), c,
+                  static_cast<unsigned long long>(kViewUiSlot));
+        }
+        SIZE_T w = 0;
+        if (!WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<LPVOID>(v), &ours, sizeof ours, &w) || w != sizeof ours) {
+            g_log("ui-layer: vptr write failed on frame view %p", (void*)v);
+            continue;
+        }
+        if (g_viewN < kMaxViews) g_viewObjs[g_viewN++] = v;
+        g_log("ui-layer: hooked the game's frame view %p (%d with that vtable in the %u-entry pass list); D3D context untouched", (void*)v, nf, n);
+    }
 }

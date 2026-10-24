@@ -33,6 +33,12 @@ struct RenderAddrs {
     uintptr_t insFrameGraphLoad;
     uintptr_t insPassListLea;
     uintptr_t insPassListRead;
+    uintptr_t vtViewSub;
+    uintptr_t vtView;
+    uintptr_t fnViewDraw;
+    uintptr_t fnViewUi;
+    uintptr_t insViewTailUi;
+    uintptr_t insHelperCallDraw;
 };
 bool VerifyStatic(uintptr_t exeBase, LogFn log, const RenderAddrs& addrs);
 void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log);
@@ -111,5 +117,4 @@ bool LauncherBusy();
 void LauncherCast(int kind, bool driven = false, float windup = 0.f);
 void LauncherFire();
 void LauncherAbort();
-void LauncherCue(int cue, int kind);
 }
