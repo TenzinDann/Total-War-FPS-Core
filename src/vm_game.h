@@ -66,6 +66,7 @@ void SpreadDir(const float fwd[3], const float right[3], const float up[3], floa
 void SpreadSeed(unsigned seed);
 void PublishCamera(const float eye[3], const float right[3], const float up[3], const float fwd[3], float fovY);
 void Tracer(const float from[3], const float to[3]);
+void GameThreadTime(double ms);
 void HitFx(const float pos[3], const float dir[3], bool kill);
 void HitFxStats(int* shown, int* kills);
 bool Muzzle(float* ndcX, float* ndcY, float* aspect);
@@ -99,5 +100,4 @@ bool LauncherBusy();
 void LauncherCast(int kind, bool driven = false, float windup = 0.f);
 void LauncherFire();
 void LauncherAbort();
-void LauncherCue(int cue, int kind);
 }

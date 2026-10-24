@@ -690,6 +690,10 @@ void AnimStatePop();
 namespace prefetch {
 bool Model(int tag, const wchar_t* hvmPath, int* files, size_t* bytes, char* err, size_t errLen);
 void Drop(int tag);
+bool SetDevice(ID3D11Device* dev);
+int Upgrade(int tag);
+bool ShieldModel(int tag, const wchar_t* hsmPath, int* files, size_t* bytes);
+void Counters(long* built, long* taken);
 int WarmShaders();
 }
 }

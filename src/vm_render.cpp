@@ -59,11 +59,17 @@ struct PreEntry {
     size_t len;
     ULONGLONG size;
     FILETIME stamp;
+    bool srgb;
+    bool bgTried;
+    ID3D11ShaderResourceView* srv;
+    ID3D11Device* dev;
 };
 constexpr int kMaxPre = 256;
 PreEntry g_pre[kMaxPre];
 int g_preN = 0;
 SRWLOCK g_preLock = SRWLOCK_INIT;
+ID3D11Device* g_preDev = nullptr;
+volatile LONG g_preBuilt = 0, g_preTaken = 0;
 bool FileStamp(const wchar_t* path, ULONGLONG* size, FILETIME* stamp) {
     WIN32_FILE_ATTRIBUTE_DATA fa;
     if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fa)) return false;
@@ -71,23 +77,50 @@ bool FileStamp(const wchar_t* path, ULONGLONG* size, FILETIME* stamp) {
     *stamp = fa.ftLastWriteTime;
     return true;
 }
-void PutPrefetched(int tag, bool hvm, const wchar_t* path, unsigned char* data, size_t len, ULONGLONG size, FILETIME stamp) {
+void PutPrefetched(int tag, bool hvm, const wchar_t* path, unsigned char* data, size_t len, ULONGLONG size, FILETIME stamp, bool srgb = false,
+                   ID3D11ShaderResourceView* srv = nullptr, ID3D11Device* dev = nullptr, bool bgTried = false) {
     AcquireSRWLockExclusive(&g_preLock);
     if (g_preN < kMaxPre && wcslen(path) < MAX_PATH * 2) {
         PreEntry& e = g_pre[g_preN++];
         e.tag = tag, e.hvm = hvm, e.data = data, e.len = len, e.size = size, e.stamp = stamp;
+        e.srgb = srgb, e.srv = srv, e.dev = dev, e.bgTried = bgTried || srv;
         wcscpy(e.path, path);
         data = nullptr;
+        srv = nullptr;
     }
     ReleaseSRWLockExclusive(&g_preLock);
     delete[] data;
+    if (srv) srv->Release();
+}
+bool TakePrefetchedSrv(const wchar_t* path, bool srgb, ID3D11Device* dev, ID3D11ShaderResourceView** out) {
+    PreEntry got = {};
+    bool found = false;
+    AcquireSRWLockExclusive(&g_preLock);
+    for (int i = 0; i < g_preN; ++i) {
+        if (g_pre[i].hvm || !g_pre[i].srv || g_pre[i].srgb != srgb || g_pre[i].dev != dev || _wcsicmp(g_pre[i].path, path)) continue;
+        got = g_pre[i];
+        g_pre[i] = g_pre[--g_preN];
+        found = true;
+        break;
+    }
+    ReleaseSRWLockExclusive(&g_preLock);
+    if (!found) return false;
+    ULONGLONG size = 0;
+    FILETIME stamp = {};
+    if (!FileStamp(path, &size, &stamp) || size != got.size || CompareFileTime(&stamp, &got.stamp)) {
+        got.srv->Release();
+        return false;
+    }
+    *out = got.srv;
+    InterlockedIncrement(&g_preTaken);
+    return true;
 }
 bool TakePrefetched(const wchar_t* path, bool hvm, unsigned char** out, size_t* outLen) {
     PreEntry got = {};
     bool found = false;
     AcquireSRWLockExclusive(&g_preLock);
     for (int i = 0; i < g_preN; ++i) {
-        if (g_pre[i].hvm != hvm || _wcsicmp(g_pre[i].path, path)) continue;
+        if (g_pre[i].hvm != hvm || !g_pre[i].data || _wcsicmp(g_pre[i].path, path)) continue;
         got = g_pre[i];
         g_pre[i] = g_pre[--g_preN];
         found = true;
@@ -143,14 +176,8 @@ UINT BlockBytes(DXGI_FORMAT f) {
     default: return 0;
     }
 }
-bool LoadDds(ID3D11Device* dev, const wchar_t* path, bool srgb, ID3D11ShaderResourceView** srvOut, char* err,
-             size_t errLen) {
-    unsigned char* data = nullptr;
-    size_t len = 0;
-    if (!TakePrefetched(path, false, &data, &len) && !ReadFileAll(path, &data, &len)) {
-        SetErr(err, errLen, "texture missing: %ls", path);
-        return false;
-    }
+bool DdsCreate(ID3D11Device* dev, const unsigned char* data, size_t len, bool srgb, const wchar_t* path, ID3D11ShaderResourceView** srvOut,
+               char* err, size_t errLen) {
     bool ok = false;
     do {
         if (len < 4 + sizeof(DdsHeader) || memcmp(data, "DDS ", 4) != 0) {
@@ -245,6 +272,18 @@ bool LoadDds(ID3D11Device* dev, const wchar_t* path, bool srgb, ID3D11ShaderReso
         }
         ok = true;
     } while (false);
+    return ok;
+}
+bool LoadDds(ID3D11Device* dev, const wchar_t* path, bool srgb, ID3D11ShaderResourceView** srvOut, char* err,
+             size_t errLen) {
+    if (TakePrefetchedSrv(path, srgb, dev, srvOut)) return true;
+    unsigned char* data = nullptr;
+    size_t len = 0;
+    if (!TakePrefetched(path, false, &data, &len) && !ReadFileAll(path, &data, &len)) {
+        SetErr(err, errLen, "texture missing: %ls", path);
+        return false;
+    }
+    bool ok = DdsCreate(dev, data, len, srgb, path, srvOut, err, errLen);
     delete[] data;
     return ok;
 }
@@ -5468,6 +5507,122 @@ void Shield::Release() {
     for (UINT& c : kindCount_) c = 0;
 }
 namespace prefetch {
+ID3D11Device* DeviceRef() {
+    AcquireSRWLockShared(&g_preLock);
+    ID3D11Device* d = g_preDev;
+    if (d) d->AddRef();
+    ReleaseSRWLockShared(&g_preLock);
+    return d;
+}
+void PutTexture(int tag, const wchar_t* path, unsigned char* data, size_t len, ULONGLONG size, FILETIME stamp, bool srgb) {
+    ID3D11Device* d = DeviceRef();
+    ID3D11ShaderResourceView* srv = nullptr;
+    char err[8];
+    if (d && DdsCreate(d, data, len, srgb, path, &srv, err, sizeof err)) {
+        delete[] data;
+        InterlockedIncrement(&g_preBuilt);
+        PutPrefetched(tag, false, path, nullptr, 0, size, stamp, srgb, srv, d, true);
+    } else {
+        PutPrefetched(tag, false, path, data, len, size, stamp, srgb, nullptr, nullptr, d != nullptr);
+    }
+    if (d) d->Release();
+}
+bool SetDevice(ID3D11Device* dev) {
+    const bool mt = dev && !(dev->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED);
+    ID3D11ShaderResourceView* old[kMaxPre];
+    int n = 0;
+    AcquireSRWLockExclusive(&g_preLock);
+    ID3D11Device* prev = g_preDev;
+    g_preDev = mt ? dev : nullptr;
+    if (g_preDev) g_preDev->AddRef();
+    for (int i = 0; i < g_preN;) {
+        if (g_pre[i].srv && g_pre[i].dev != g_preDev) {
+            old[n++] = g_pre[i].srv;
+            g_pre[i] = g_pre[--g_preN];
+        } else {
+            ++i;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_preLock);
+    for (int k = 0; k < n; ++k) old[k]->Release();
+    if (prev) prev->Release();
+    return mt;
+}
+int Upgrade(int tag) {
+    ID3D11Device* d = DeviceRef();
+    if (!d) return 0;
+    int n = 0;
+    for (;;) {
+        PreEntry e = {};
+        bool got = false;
+        AcquireSRWLockExclusive(&g_preLock);
+        for (int i = 0; i < g_preN; ++i) {
+            if (g_pre[i].tag != tag || g_pre[i].hvm || !g_pre[i].data || g_pre[i].bgTried) continue;
+            e = g_pre[i];
+            g_pre[i] = g_pre[--g_preN];
+            got = true;
+            break;
+        }
+        ReleaseSRWLockExclusive(&g_preLock);
+        if (!got) break;
+        ID3D11ShaderResourceView* srv = nullptr;
+        char err[8];
+        if (DdsCreate(d, e.data, e.len, e.srgb, e.path, &srv, err, sizeof err)) {
+            delete[] e.data;
+            InterlockedIncrement(&g_preBuilt);
+            PutPrefetched(e.tag, false, e.path, nullptr, 0, e.size, e.stamp, e.srgb, srv, d, true);
+            ++n;
+        } else {
+            PutPrefetched(e.tag, false, e.path, e.data, e.len, e.size, e.stamp, e.srgb, nullptr, nullptr, true);
+        }
+    }
+    d->Release();
+    return n;
+}
+bool ShieldModel(int tag, const wchar_t* hsmPath, int* files, size_t* bytes) {
+    *files = 0;
+    *bytes = 0;
+    unsigned char* data = nullptr;
+    size_t len = 0;
+    if (!ReadFileAll(hsmPath, &data, &len)) return false;
+    uint32_t h[7];
+    bool ok = len >= sizeof h && !memcmp(data, "HSM1", 4);
+    if (ok) memcpy(h, data, sizeof h);
+    ok = ok && h[1] == 1 && h[6] >= 1 && h[6] <= 12;
+    wchar_t dir[520];
+    wcsncpy(dir, hsmPath, 519);
+    dir[519] = 0;
+    if (wchar_t* sl = wcsrchr(dir, L'\\')) *sl = 0;
+    size_t p = sizeof h;
+    for (uint32_t t = 0; ok && t < h[6]; ++t) {
+        if (p + 2 > len) break;
+        uint16_t n = static_cast<uint16_t>(data[p] | (data[p + 1] << 8));
+        p += 2;
+        if (!n || n > 400 || p + n + 1 > len) break;
+        wchar_t rel[512], full[1040];
+        int wn = MultiByteToWideChar(CP_UTF8, 0, reinterpret_cast<const char*>(data + p), n, rel, 511);
+        rel[wn > 0 ? wn : 0] = 0;
+        for (wchar_t* c = rel; *c; ++c)
+            if (*c == L'/') *c = L'\\';
+        bool srgb = data[p + n] != 0;
+        p += n + 1;
+        swprintf(full, 1040, L"%ls\\%ls", dir, rel);
+        ULONGLONG size = 0;
+        FILETIME stamp = {};
+        unsigned char* d = nullptr;
+        size_t l = 0;
+        if (!FileStamp(full, &size, &stamp) || !ReadFileAll(full, &d, &l)) continue;
+        ++*files;
+        *bytes += l;
+        PutTexture(tag, full, d, l, size, stamp, srgb);
+    }
+    delete[] data;
+    return ok;
+}
+void Counters(long* built, long* taken) {
+    *built = g_preBuilt;
+    *taken = g_preTaken;
+}
 bool Model(int tag, const wchar_t* hvmPath, int* files, size_t* bytes, char* err, size_t errLen) {
     *files = 0;
     *bytes = 0;
@@ -5511,12 +5666,13 @@ bool Model(int tag, const wchar_t* hvmPath, int* files, size_t* bytes, char* err
         if (!FileStamp(full, &size, &stamp) || !ReadFileAll(full, &d, &l)) continue;
         ++*files;
         *bytes += l;
-        PutPrefetched(tag, false, full, d, l, size, stamp);
+        PutTexture(tag, full, d, l, size, stamp, tex[t].srgb != 0);
     }
     return true;
 }
 void Drop(int tag) {
     unsigned char* del[kMaxPre];
+    ID3D11ShaderResourceView* srv[kMaxPre];
     int n = 0;
     AcquireSRWLockExclusive(&g_preLock);
     for (int i = 0; i < g_preN;) {
@@ -5524,11 +5680,15 @@ void Drop(int tag) {
             ++i;
             continue;
         }
-        del[n++] = g_pre[i].data;
+        del[n] = g_pre[i].data;
+        srv[n++] = g_pre[i].srv;
         g_pre[i] = g_pre[--g_preN];
     }
     ReleaseSRWLockExclusive(&g_preLock);
-    for (int k = 0; k < n; ++k) delete[] del[k];
+    for (int k = 0; k < n; ++k) {
+        delete[] del[k];
+        if (srv[k]) srv[k]->Release();
+    }
 }
 int WarmShaders() {
     FnD3DCompile compile = GetCompiler();

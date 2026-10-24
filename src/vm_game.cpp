@@ -1544,9 +1544,11 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
 }
 constexpr int kPrefetchAhead = 2;
 constexpr int kPrefetchPcmCap = 1024;
+constexpr int kShieldPreTag = kMaxModels + 1;
 struct PrefetchJob {
     int state = 0;
     bool cancel = false;
+    bool upgrade = false;
     vm::Settings* set = nullptr;
     void** pcm = nullptr;
     int nPcm = 0;
@@ -1621,8 +1623,13 @@ void PrefetchWork(int idx, const vm::Settings& s, void** pcm, int* nPcm) {
             fclose(f);
         }
     }
-    g_log("prefetch: [%d] model %s (%d files, %.1f MB) %.1f ms, %d sounds %.1f ms", idx, ok ? "ok" : err, files, bytes / 1048576.0,
-          (t1 - t0) * 1000.0, *nPcm, (Now() - t1) * 1000.0);
+    int sf = 0;
+    size_t sb = 0;
+    if (s.shieldAllow && s.shieldModel[0]) vm::prefetch::ShieldModel(kShieldPreTag, s.shieldModel, &sf, &sb);
+    long built = 0, taken = 0;
+    vm::prefetch::Counters(&built, &taken);
+    g_log("prefetch: [%d] model %s (%d files, %.1f MB) %.1f ms, %d sounds %.1f ms%s (textures built in the background so far %ld, used %ld)", idx,
+          ok ? "ok" : err, files, bytes / 1048576.0, (t1 - t0) * 1000.0, *nPcm, (Now() - t1) * 1000.0, sf ? ", + shield textures" : "", built, taken);
 }
 DWORD WINAPI PrefetchThread(void*) {
     double t0 = Now();
@@ -1634,12 +1641,14 @@ DWORD WINAPI PrefetchThread(void*) {
         AcquireSRWLockExclusive(&g_pfLock);
         int ready = 0;
         for (int k = 0; k < g_pfOrderN; ++k) ready += g_pfJob[g_pfOrder[k]].state == 3;
+        bool upgrade = false;
         for (int k = 0; k < g_pfOrderN && ready < kPrefetchAhead; ++k) {
             PrefetchJob& j = g_pfJob[g_pfOrder[k]];
             if (j.state != 1) continue;
             idx = g_pfOrder[k];
             j.state = 2;
             j.cancel = false;
+            upgrade = j.upgrade;
             set = j.set;
             j.set = nullptr;
             break;
@@ -1648,6 +1657,27 @@ DWORD WINAPI PrefetchThread(void*) {
         if (idx < 0) {
             WaitForSingleObject(g_pfWake, 500);
             ArmoryWatch();
+            continue;
+        }
+        if (upgrade) {
+            double tu = Now();
+            int n = vm::prefetch::Upgrade(idx);
+            g_log("prefetch: [%d] %d textures built in the background after the device arrived (%.1f ms)", idx, n, (Now() - tu) * 1000.0);
+            AcquireSRWLockExclusive(&g_pfLock);
+            PrefetchJob& j = g_pfJob[idx];
+            j.upgrade = false;
+            bool drop = j.cancel;
+            j.state = drop ? 0 : 3;
+            void** pcm = drop ? j.pcm : nullptr;
+            int nPcm = drop ? j.nPcm : 0;
+            if (drop) j.pcm = nullptr, j.nPcm = 0;
+            ReleaseSRWLockExclusive(&g_pfLock);
+            InterlockedExchange64(&g_pfProgressUs, static_cast<LONG64>(Now() * 1e6));
+            if (drop) {
+                for (int k = 0; k < nPcm; ++k) vm::GunSound::Unprefetch(pcm[k]);
+                delete[] pcm;
+                vm::prefetch::Drop(idx);
+            }
             continue;
         }
         void** pcm = new void*[kPrefetchPcmCap];
@@ -1681,7 +1711,15 @@ void PrefetchDiscard(int i) {
     bool drop = false;
     AcquireSRWLockExclusive(&g_pfLock);
     PrefetchJob& j = g_pfJob[i];
-    if (j.state == 1) {
+    if (j.state == 1 && j.upgrade) {
+        pcm = j.pcm;
+        nPcm = j.nPcm;
+        j.pcm = nullptr;
+        j.nPcm = 0;
+        j.state = 0;
+        j.upgrade = false;
+        drop = true;
+    } else if (j.state == 1) {
         set = j.set;
         j.set = nullptr;
         j.state = 0;
@@ -1731,6 +1769,25 @@ void PrefetchQueue(const volatile LONG* order, LONG n) {
     InterlockedExchange64(&g_pfProgressUs, static_cast<LONG64>(Now() * 1e6));
     SetEvent(g_pfWake);
 }
+bool g_bgTextures = true;
+ID3D11Device* g_pfDev = nullptr;
+void PrefetchDevice(ID3D11Device* dev) {
+    if (!g_bgTextures || dev == g_pfDev || !g_pfRunning) return;
+    g_pfDev = dev;
+    bool bg = vm::prefetch::SetDevice(dev);
+    int n = 0;
+    if (bg) {
+        AcquireSRWLockExclusive(&g_pfLock);
+        for (int k = 0; k < g_pfOrderN; ++k) {
+            PrefetchJob& j = g_pfJob[g_pfOrder[k]];
+            if (j.state == 3 && !g_w[g_pfOrder[k]].rend.Ready()) j.upgrade = true, j.state = 1, ++n;
+        }
+        ReleaseSRWLockExclusive(&g_pfLock);
+        if (n) SetEvent(g_pfWake);
+    }
+    g_log("prefetch: weapon textures are built %s (device %p, creation flags 0x%x); %d already-read weapons queued to build theirs", bg ?
+          "on the background thread" : "on the render thread (device is single-threaded)", (void*)dev, dev->GetCreationFlags(), n);
+}
 bool PrefetchReady(int i) {
     if (!g_pfRunning) return true;
     AcquireSRWLockShared(&g_pfLock);
@@ -1742,6 +1799,9 @@ bool PrefetchReady(int i) {
     g_pfStallLogged = true;
     return true;
 }
+bool g_initOnly = false;
+bool g_shieldPreDone = false;
+bool g_rosterNoLoad = false;
 bool EnsureWeapon(int idx, ID3D11Device* dev) {
     if (idx < 0 || idx >= g_modelCount) return false;
     Weapon& w = g_w[idx];
@@ -1763,7 +1823,7 @@ bool EnsureWeapon(int idx, ID3D11Device* dev) {
             MagApply();
         }
     }
-    if (w.fxDirty) {
+    if (w.fxDirty && !g_initOnly) {
         LoadWeaponFx(idx, dev);
         PrefetchDiscard(idx);
     }
@@ -1935,8 +1995,9 @@ void RosterStep(ID3D11Device* dev) {
     if (!all)
         g_log("weapon: slots 1 primary %d / 2 primary %d / 3 pistol %d / 4 melee %d (model index, -1 = empty)", slot[0], slot[1], slot[2], slot[3]);
     g_preloadNext = 0;
+    g_shieldPreDone = false;
     PrefetchQueue(g_roster, n);
-    if (!curOk && g_sw.phase == 0 && EnsureWeapon(g_roster[0], dev)) {
+    if (!curOk && g_sw.phase == 0 && (g_rosterNoLoad || EnsureWeapon(g_roster[0], dev))) {
         g_modelIdx = g_roster[0];
         InterlockedExchange(&g_wantIdx, g_modelIdx);
         AnimReset(Now());
@@ -1965,6 +2026,21 @@ void UnloadStep() {
     }
     g_unloadPending = left;
 }
+void ShieldPreload(ID3D11Device* dev) {
+    if (g_shieldPreDone) return;
+    g_shieldPreDone = true;
+    const vm::Settings* s = Wp().set.shieldAllow ? &Wp().set : nullptr;
+    for (LONG k = 0; !s && k < g_rosterN; ++k)
+        if (g_w[g_roster[k]].set.shieldAllow) s = &g_w[g_roster[k]].set;
+    if (s && !g_shieldR.BuiltFor(*s)) {
+        double t0 = Now();
+        char err[256] = {};
+        bool ok = g_shieldR.Load(dev, *s, err, sizeof err);
+        g_log("viewmodel: shield preloaded for %ls in %.1f ms (%s)%s%s", s->weaponId, (Now() - t0) * 1000.0,
+              !ok ? "failed" : g_shieldR.HasModel() ? "model" : "built-in mesh", err[0] ? ": " : "", err);
+    }
+    vm::prefetch::Drop(kShieldPreTag);
+}
 void PreloadStep(ID3D11Device* dev) {
     UnloadStep();
     if (g_preloadNext < 0 || g_sw.phase) return;
@@ -1972,6 +2048,13 @@ void PreloadStep(ID3D11Device* dev) {
         int i = g_roster[g_preloadNext];
         if (!g_w[i].rend.Ready() || g_w[i].fxDirty) {
             if (!PrefetchReady(i)) return;
+            if (!g_w[i].rend.Ready() && i != g_modelIdx) {
+                g_initOnly = true;
+                bool ok = EnsureWeapon(i, dev);
+                g_initOnly = false;
+                if (!ok) ++g_preloadNext;
+                return;
+            }
             ++g_preloadNext;
             EnsureWeapon(i, dev);
             return;
@@ -1979,6 +2062,7 @@ void PreloadStep(ID3D11Device* dev) {
         ++g_preloadNext;
     }
     g_preloadNext = -1;
+    ShieldPreload(dev);
 }
 void SwitchStep(ID3D11Device* dev) {
     double now = Now();
@@ -2065,6 +2149,86 @@ struct FrameProf {
 };
 FrameProf g_fprof;
 bool g_profWasFp = false;
+bool g_gpuTimer = true;
+struct GpuTimer {
+    static constexpr int kSlots = 8;
+    ID3D11Device* dev = nullptr;
+    ID3D11Query *dj[kSlots] = {}, *t0[kSlots] = {}, *t1[kSlots] = {};
+    bool pending[kSlots] = {};
+    int head = 0;
+    double sum = 0, max = 0;
+    unsigned n = 0, busy = 0;
+    bool broken = false;
+    void Release() {
+        for (int k = 0; k < kSlots; ++k) {
+            if (dj[k]) dj[k]->Release();
+            if (t0[k]) t0[k]->Release();
+            if (t1[k]) t1[k]->Release();
+            dj[k] = t0[k] = t1[k] = nullptr;
+            pending[k] = false;
+        }
+        dev = nullptr;
+    }
+    bool Ensure(ID3D11Device* d) {
+        if (broken) return false;
+        if (d == dev && dj[0]) return true;
+        Release();
+        D3D11_QUERY_DESC qd = {D3D11_QUERY_TIMESTAMP_DISJOINT, 0}, qt = {D3D11_QUERY_TIMESTAMP, 0};
+        for (int k = 0; k < kSlots; ++k)
+            if (FAILED(d->CreateQuery(&qd, &dj[k])) || FAILED(d->CreateQuery(&qt, &t0[k])) || FAILED(d->CreateQuery(&qt, &t1[k]))) {
+                Release();
+                broken = true;
+                return false;
+            }
+        dev = d;
+        return true;
+    }
+    void Collect(ID3D11DeviceContext* c) {
+        for (int k = 0; k < kSlots; ++k) {
+            if (!pending[k]) continue;
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dd;
+            if (c->GetData(dj[k], &dd, sizeof dd, D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
+            pending[k] = false;
+            UINT64 a = 0, b = 0;
+            if (dd.Disjoint || !dd.Frequency || c->GetData(t0[k], &a, sizeof a, D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK ||
+                c->GetData(t1[k], &b, sizeof b, D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK || b < a)
+                continue;
+            double ms = static_cast<double>(b - a) * 1000.0 / static_cast<double>(dd.Frequency);
+            sum += ms;
+            if (ms > max) max = ms;
+            ++n;
+        }
+    }
+    int Begin(ID3D11Device* d, ID3D11DeviceContext* c) {
+        if (!g_gpuTimer || !Ensure(d)) return -1;
+        Collect(c);
+        int k = head;
+        if (pending[k]) {
+            ++busy;
+            return -1;
+        }
+        c->Begin(dj[k]);
+        c->End(t0[k]);
+        return k;
+    }
+    void End(ID3D11DeviceContext* c, int k) {
+        if (k < 0) return;
+        c->End(t1[k]);
+        c->End(dj[k]);
+        pending[k] = true;
+        head = (head + 1) % kSlots;
+    }
+} g_gpu;
+SRWLOCK g_gtLock = SRWLOCK_INIT;
+double g_gtSum = 0, g_gtMax = 0;
+unsigned g_gtN = 0;
+void GameThreadAdd(double ms) {
+    AcquireSRWLockExclusive(&g_gtLock);
+    g_gtSum += ms;
+    if (ms > g_gtMax) g_gtMax = ms;
+    ++g_gtN;
+    ReleaseSRWLockExclusive(&g_gtLock);
+}
 int g_profLogs = 0, g_warmProfLogs = 0;
 void WarmStep(IDXGISwapChain* sc) {
     ID3D11Device* dev = nullptr;
@@ -2073,6 +2237,16 @@ void WarmStep(IDXGISwapChain* sc) {
         return;
     }
     if (InterlockedCompareExchange(&g_warm, 2, 1) == 1) g_warmT0 = Now(), g_warmProfLogs = 0;
+    PrefetchDevice(dev);
+    if (g_reqRoster) {
+        g_rosterNoLoad = true;
+        RosterStep(dev);
+        g_rosterNoLoad = false;
+    }
+    if (!g_w[g_modelIdx].rend.Ready() && !PrefetchReady(g_modelIdx)) {
+        dev->Release();
+        return;
+    }
     FrameProf wp;
     wp.Start(Now());
     CheckDevice(dev);
@@ -2133,6 +2307,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
         g_failed = true;
         return;
     }
+    PrefetchDevice(dev);
     if (part != kPartCross) {
         CheckDevice(dev);
         g_fprof.Mark("device");
@@ -2171,6 +2346,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                 dev->GetImmediateContext(&ctx);
                 if (ctx) {
                     g_fprof.Mark("rtv");
+                    const int gpuSlot = g_gpu.Begin(dev, ctx);
                     if (part != kPartGun) UiLayerOnPresent(ctx, bb, td.Width, td.Height);
                     g_fprof.Mark("ui");
                     float mx = 0, my = 0, ma = 1;
@@ -2243,6 +2419,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                         if (CrossFrame(cs, cspread, calpha)) g_cross.Draw(ctx, rtv, td.Width, td.Height, hw, cs, cspread, calpha);
                     }
                     g_fprof.Mark("cross");
+                    g_gpu.End(ctx, gpuSlot);
                     ctx->Release();
                     if (gun) {
                         InterlockedIncrement(&g_muz.seq);
@@ -2286,12 +2463,22 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
     if (part != kPartGun) ++g_st.frames;
     double now = Now();
     if (now - g_st.tStat >= 5.0) {
+        AcquireSRWLockExclusive(&g_gtLock);
+        double gtSum = g_gtSum, gtMax = g_gtMax;
+        unsigned gtN = g_gtN;
+        g_gtSum = g_gtMax = 0;
+        g_gtN = 0;
+        ReleaseSRWLockExclusive(&g_gtLock);
         if (g_st.frames)
-            g_log("viewmodel: 5s frames=%u draws=%u cpu avg %.3f ms max %.3f ms fp=%d test=%d", g_st.frames, g_st.draws,
-                  g_st.msSum / g_st.frames, g_st.msMax, (int)g_fp, (int)g_testLayer);
+            g_log("viewmodel: 5s frames=%u draws=%u cpu avg %.3f ms max %.3f ms fp=%d test=%d | gpu avg %.3f ms max %.3f ms (%u timed, %u skipped) | "
+                  "game thread avg %.3f ms max %.3f ms (%u frames)",
+                  g_st.frames, g_st.draws, g_st.msSum / g_st.frames, g_st.msMax, (int)g_fp, (int)g_testLayer, g_gpu.n ? g_gpu.sum / g_gpu.n : 0.0,
+                  g_gpu.max, g_gpu.n, g_gpu.busy, gtN ? gtSum / gtN : 0.0, gtMax, gtN);
         g_st.tStat = now;
         g_st.frames = g_st.draws = 0;
         g_st.msSum = g_st.msMax = 0;
+        g_gpu.sum = g_gpu.max = 0;
+        g_gpu.n = g_gpu.busy = 0;
     }
 }
 volatile LONG g_foreignPresents = 0;
@@ -2376,6 +2563,8 @@ void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
     g_slowFrameMs = static_cast<double>(GetPrivateProfileIntW(L"viewmodel", L"slow_frame_ms", 20, g_ini));
     if (g_enabled && (g_staticOk || !exeBase)) {
         g_preloadOnBattle = GetPrivateProfileIntW(L"viewmodel", L"preload_on_battle", 1, g_ini) != 0;
+        g_bgTextures = GetPrivateProfileIntW(L"viewmodel", L"bg_textures", 1, g_ini) != 0;
+        g_gpuTimer = GetPrivateProfileIntW(L"viewmodel", L"gpu_timer", 1, g_ini) != 0;
         wcsncpy(g_armoryPath, g_ini, MAX_PATH - 1);
         g_armoryPath[MAX_PATH - 1] = 0;
         if (wchar_t* slash = wcsrchr(g_armoryPath, L'\\')) wcscpy(slash + 1, L"tenzin_fps_armory.txt");
@@ -2680,6 +2869,7 @@ void HitFxStats(int* shown, int* kills) {
     *shown = g_hitFxCount;
     *kills = g_hitFxKills;
 }
+void GameThreadTime(double ms) { GameThreadAdd(ms); }
 void HitFx(const float pos[3], const float dir[3], bool kill) {
     AcquireSRWLockExclusive(&g_hitq.lock);
     if (g_hitq.n < 16) {
@@ -2828,9 +3018,6 @@ void LauncherCast(int kind, bool driven, float windup) {
 }
 void LauncherFire() { InterlockedExchange64(&g_lc.fireUs, static_cast<LONG64>(Now() * 1e6)); }
 void LauncherAbort() { InterlockedExchange64(&g_lc.abortUs, static_cast<LONG64>(Now() * 1e6)); }
-void LauncherCue(int cue, int kind) {
-    if (cue >= 0 && cue < 2 && kind >= 0 && kind < kLauncherKinds) InterlockedOr(&g_lc.cueReq, 1L << (cue * kLauncherKinds + kind));
-}
 bool MeleeActive() { return g_meleeOn != 0; }
 void MeleeInput(bool attack, bool block) { InterlockedExchange(&g_meleeIn, (attack ? 1 : 0) | (block ? 2 : 0)); }
 int TakeMeleeStrike(int* cat) {
