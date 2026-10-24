@@ -494,7 +494,7 @@ struct Config {
     float bldLow = 1.f, bldHigh = 2.05f, bldSkin = 0.4f;
     bool wallUp = true;
     unsigned wallUpKey = 'E';
-    float wallUpReach = 3.f, wallUpMin = 3.f, wallUpMaxH = 30.f, wallUpGateR = 8.f;
+    float wallUpReach = 3.f, wallUpMin = 3.f, wallUpMaxH = 30.f, wallUpGateR = 8.f, wallUpBase = 3.f;
     bool wallBody = true;
     float wallBodyMargin = 1.f;
     bool ghost = false;
@@ -758,8 +758,10 @@ void LoadConfig() {
     if (!(cfg.wallUpMaxH > cfg.wallUpMin && cfg.wallUpMaxH <= 80.f)) cfg.wallUpMaxH = 30.f;
     cfg.wallUpGateR = IniF(L"move", L"wall_up_gate_radius", 8.f, ini);
     if (!(cfg.wallUpGateR >= 0.f && cfg.wallUpGateR <= 40.f)) cfg.wallUpGateR = 8.f;
-    Log("wall-up: enabled=%d key=0x%02X reach=%.2f min_height=%.2f max_height=%.1f gate_radius=%.1f", cfg.wallUp, cfg.wallUpKey, cfg.wallUpReach,
-        cfg.wallUpMin, cfg.wallUpMaxH, cfg.wallUpGateR);
+    cfg.wallUpBase = IniF(L"move", L"wall_up_base", 3.f, ini);
+    if (!(cfg.wallUpBase >= 0.f && cfg.wallUpBase <= 10.f)) cfg.wallUpBase = 3.f;
+    Log("wall-up: enabled=%d key=0x%02X reach=%.2f min_height=%.2f max_height=%.1f gate_radius=%.1f base=%.1f", cfg.wallUp, cfg.wallUpKey, cfg.wallUpReach,
+        cfg.wallUpMin, cfg.wallUpMaxH, cfg.wallUpGateR, cfg.wallUpBase);
     cfg.wallBody = GetPrivateProfileIntW(L"move", L"wall_body", 1, ini) != 0;
     cfg.wallBodyMargin = IniF(L"move", L"wall_body_margin", 1.f, ini);
     if (!(cfg.wallBodyMargin >= 0.f && cfg.wallBodyMargin <= 3.f)) cfg.wallBodyMargin = 1.f;
@@ -4641,8 +4643,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4713,7 +4713,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4796,26 +4795,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -4906,7 +4896,7 @@ bool FindWallUp(float x, float z, float foot, float fx, float fz, float out[3], 
     float hp[3] = {};
     const float p0[2] = {x, z}, pr[2] = {x + fx * cfg.wallUpReach, z + fz * cfg.wallUpReach};
     const bool bld = TallWallBetween(p0, pr, foot, &t, hp);
-    const float maxD = cfg.wallUpReach + (bld ? kWallUpThick : 0.f);
+    const float maxD = cfg.wallUpReach + (bld ? kWallUpThick : cfg.wallUpBase);
     float bodyD = -1.f;
     for (float d = kWallUpStep; d <= maxD + 1e-3f; d += kWallUpStep) {
         int m = SurfacesAt(x + fx * d, z + fz * d, s);
