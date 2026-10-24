@@ -9,6 +9,7 @@ namespace {
 IXAudio2* g_xa = nullptr;
 IXAudio2MasteringVoice* g_master = nullptr;
 bool g_xaTried = false, g_xaOk = false;
+constexpr float kMasterGain = 0.56234133f;
 bool EngineLocked(char* err, size_t errLen) {
     if (g_xaTried) {
         if (!g_xaOk) snprintf(err, errLen, "xaudio2 unavailable");
@@ -41,6 +42,7 @@ bool EngineLocked(char* err, size_t errLen) {
         g_xa = nullptr;
         return false;
     }
+    g_master->SetVolume(kMasterGain);
     g_xaOk = true;
     return true;
 }
@@ -161,6 +163,13 @@ int GunSound::Prefetch(const wchar_t* dir, const wchar_t* list, void** handles, 
 }
 void GunSound::Unprefetch(void* handle) { ReleasePcm(static_cast<unsigned char*>(handle)); }
 bool GunSound::WarmEngine(char* err, size_t errLen) { return Engine(err, errLen); }
+float GunSound::MasterVolume() {
+    AcquireSRWLockExclusive(&g_xaLock);
+    float v = -1.f;
+    if (g_xaOk && g_master) g_master->GetVolume(&v);
+    ReleaseSRWLockExclusive(&g_xaLock);
+    return v;
+}
 bool GunSound::Load(const wchar_t* dir, const wchar_t* list, int maxVoices, char* err, size_t errLen) {
     Release();
     wchar_t buf[1024];

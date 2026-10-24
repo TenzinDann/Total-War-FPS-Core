@@ -15,6 +15,7 @@ public:
     static int Prefetch(const wchar_t* dir, const wchar_t* list, void** handles, int cap);
     static void Unprefetch(void* handle);
     static bool WarmEngine(char* err, size_t errLen);
+    static float MasterVolume();
     bool Loaded() const { return nPcm_ > 0; }
     int Variants() const { return nPcm_; }
     float Seconds() const;

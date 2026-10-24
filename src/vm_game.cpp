@@ -1586,7 +1586,9 @@ void ArmoryWatch() {
     double t0 = Now();
     char err[128] = {};
     bool audio = vm::GunSound::WarmEngine(err, sizeof err);
-    g_log("warm: audio engine %s in %.1f ms", audio ? "ready" : err, (Now() - t0) * 1000.0);
+    float mv = vm::GunSound::MasterVolume();
+    g_log("warm: audio engine %s in %.1f ms, master volume %.1f dB", audio ? "ready" : err, (Now() - t0) * 1000.0,
+          mv > 0.f ? 20.f * std::log10(mv) : -999.f);
     InterlockedExchange(&g_reqRoster, 1);
     InterlockedExchange(&g_warm, 1);
     bool hooked = InstallPresentHook();
