@@ -24,6 +24,15 @@ struct RenderAddrs {
     uintptr_t fnGetBb;
     uintptr_t oBackBufferObj;
     uintptr_t fnBbCopy;
+    uintptr_t globalGfx;
+    uintptr_t oFrameGraph;
+    uintptr_t oPassList;
+    uintptr_t vtComposite;
+    uintptr_t fnCompositeExec;
+    uintptr_t oAaSetting;
+    uintptr_t insFrameGraphLoad;
+    uintptr_t insPassListLea;
+    uintptr_t insPassListRead;
 };
 bool VerifyStatic(uintptr_t exeBase, LogFn log, const RenderAddrs& addrs);
 void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log);
@@ -102,5 +111,4 @@ bool LauncherBusy();
 void LauncherCast(int kind, bool driven = false, float windup = 0.f);
 void LauncherFire();
 void LauncherAbort();
-void LauncherCue(int cue, int kind);
 }

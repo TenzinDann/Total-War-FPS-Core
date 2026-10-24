@@ -74,6 +74,8 @@ struct UiLayerStat {
     UINT mid, fallback, skipThread, skipState;
     double t;
     bool loggedMid, loggedFallback, loggedThread, loggedState;
+    UINT midComp, skipAa, skipRt;
+    bool loggedComp, loggedAa, loggedRt;
 } g_uls = {};
 void UiLayerAfterCopy(ID3D11DeviceContext* c, ID3D11Resource* dst, void* ret);
 constexpr uintptr_t kBbCopySlot = 0x28, kBbTexOff = 0x28, kRctxCtxOff = 0x18;
@@ -86,6 +88,14 @@ FnBbCopy g_bbCopyOrig = nullptr;
 uintptr_t g_bbObj = 0, g_bbVtOrig = 0;
 uintptr_t* g_bbVtCopy = nullptr;
 bool g_bbLoggedMissing = false, g_bbLoggedSlot = false;
+bool g_compRouteOk = false;
+constexpr uintptr_t kCompExecSlot = 0x8;
+using FnCompExec = uintptr_t (*)(void* self, uintptr_t a2, uintptr_t a3, uintptr_t a4);
+FnCompExec g_compExecOrig = nullptr;
+uintptr_t g_compObj = 0;
+uintptr_t* g_compVtCopy = nullptr;
+bool g_compLoggedList = false, g_compLoggedMissing = false;
+ID3D11DeviceContext* g_layerCtx = nullptr;
 uintptr_t g_probeOwn[24];
 int g_probeOwnN = 0;
 void ProbeStack(void** out) {
@@ -448,6 +458,7 @@ void UiLayerReadIni() {
 }
 void UiLayerOnPresent(ID3D11DeviceContext* ctx, ID3D11Texture2D* bb, UINT bbW, UINT bbH) {
     UiLayerReadIni();
+    g_layerCtx = ctx;
     g_probeBb = reinterpret_cast<uintptr_t>(bb), g_probeBbW = bbW, g_probeBbH = bbH;
     bool want = g_probeEnabled && g_probeState < 3 && (g_fp || g_testLayer);
     if (want) {
@@ -474,14 +485,16 @@ void UiLayerOnPresent(ID3D11DeviceContext* ctx, ID3D11Texture2D* bb, UINT bbW, U
     double now = Now();
     if (g_uiLayerMode == 1 && g_fp && now - g_uls.t >= 5.0) {
         if (g_uls.mid || g_uls.fallback)
-            g_log("ui-layer: 5s gun drawn under the UI %u frames, at Present (fallback, no back-buffer copy seen) %u frames; skipped: other thread %u, no state %u",
-                  g_uls.mid, g_uls.fallback, g_uls.skipThread, g_uls.skipState);
+            g_log("ui-layer: 5s gun drawn under the UI %u frames (%u after the composite step, the rest after the back-buffer copy), at Present (fallback) %u frames; "
+                  "skipped: other thread %u, no state %u, anti-aliasing off %u, render target not the back buffer %u",
+                  g_uls.mid, g_uls.midComp, g_uls.fallback, g_uls.skipThread, g_uls.skipState, g_uls.skipAa, g_uls.skipRt);
         g_uls.t = now, g_uls.mid = g_uls.fallback = g_uls.skipThread = g_uls.skipState = 0;
+        g_uls.midComp = g_uls.skipAa = g_uls.skipRt = 0;
     }
 }
 int UiLayerPresentPart() {
     int part = g_midDone ? kPartCross : kPartAll;
-    if (!g_midDone && g_uiLayerMode == 1 && g_bbObj && g_fp) {
+    if (!g_midDone && g_uiLayerMode == 1 && (g_bbObj || g_compObj) && g_fp) {
         ++g_uls.fallback;
         if (!g_uls.loggedFallback) {
             g_uls.loggedFallback = true;
@@ -518,17 +531,14 @@ bool UiLayerStateReady(ID3D11DeviceContext* c) {
     dev->Release();
     return ok;
 }
-void UiLayerAfterCopy(ID3D11DeviceContext* c, ID3D11Resource* dst, void* ret) {
-    if (g_probeMute || g_uiLayerMode != 1 || g_midDone || !g_lastSc || !g_probeBb) return;
-    if (reinterpret_cast<uintptr_t>(dst) != g_probeBb || !InExe(ret)) return;
-    if (g_failed || !(g_fp || g_testLayer)) return;
+bool UiLayerMidDraw(ID3D11DeviceContext* c) {
     if (GetCurrentThreadId() != g_presentTid) {
         ++g_uls.skipThread;
         if (!g_uls.loggedThread) {
             g_uls.loggedThread = true;
-            g_log("ui-layer: back-buffer copy on thread %lu, Present runs on %lu; not drawing there", GetCurrentThreadId(), g_presentTid);
+            g_log("ui-layer: mid-frame hook on thread %lu, Present runs on %lu; not drawing there", GetCurrentThreadId(), g_presentTid);
         }
-        return;
+        return false;
     }
     if (!UiLayerStateReady(c)) {
         ++g_uls.skipState;
@@ -536,7 +546,7 @@ void UiLayerAfterCopy(ID3D11DeviceContext* c, ID3D11Resource* dst, void* ret) {
             g_uls.loggedState = true;
             g_log("ui-layer: no ID3D11DeviceContext1 state object; gun stays at Present");
         }
-        return;
+        return false;
     }
     ID3DDeviceContextState* prev = nullptr;
     g_ctx1->SwapDeviceContextState(g_ourState, &prev);
@@ -550,6 +560,13 @@ void UiLayerAfterCopy(ID3D11DeviceContext* c, ID3D11Resource* dst, void* ret) {
     if (prev) prev->Release();
     g_midDone = true;
     ++g_uls.mid;
+    return true;
+}
+void UiLayerAfterCopy(ID3D11DeviceContext* c, ID3D11Resource* dst, void* ret) {
+    if (g_probeMute || g_uiLayerMode != 1 || g_midDone || !g_lastSc || !g_probeBb) return;
+    if (reinterpret_cast<uintptr_t>(dst) != g_probeBb || !InExe(ret)) return;
+    if (g_failed || !(g_fp || g_testLayer)) return;
+    if (!UiLayerMidDraw(c)) return;
     if (!g_uls.loggedMid) {
         char who[96];
         ProbeFmtAddr(ret, who, sizeof who);
@@ -635,4 +652,155 @@ void UiLayerBbStep() {
     g_bbObj = t;
     g_log("ui-layer: hooked the game's back-buffer object %p (renderer %p +0x%llx); D3D context untouched", (void*)t, (void*)r,
           static_cast<unsigned long long>(g_ra.oBackBufferObj));
+}
+bool CompRouteVerify(uintptr_t e) {
+    if (!g_ra.vtComposite || !g_ra.fnCompositeExec || !g_ra.globalGfx || !g_ra.insFrameGraphLoad || !g_ra.insPassListLea || !g_ra.insPassListRead)
+        return false;
+    static const unsigned char kHead[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x18, 0x48, 0x89, 0x74, 0x24,
+                                          0x20, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x30, 0x48, 0x8B, 0x05};
+    static const unsigned char kRead[] = {0x8B, 0x4E, 0x04, 0x48, 0x8B, 0x5E, 0x08};
+    static const unsigned char kAl1[] = {0xB0, 0x01, 0xC3};
+    unsigned char aa[] = {0x48, 0x8B, 0xF1, 0x8B, 0x90, 0, 0, 0, 0, 0xFF, 0xCA, 0x83, 0xFA, 0x02, 0x0F, 0x87};
+    unsigned char fg[] = {0x48, 0x8B, 0x8B, 0, 0, 0, 0, 0xE8};
+    unsigned char pl[] = {0x4C, 0x8D, 0x8F, 0, 0, 0, 0};
+    uint32_t off = static_cast<uint32_t>(g_ra.oAaSetting);
+    memcpy(aa + 5, &off, 4);
+    off = static_cast<uint32_t>(g_ra.oFrameGraph);
+    memcpy(fg + 3, &off, 4);
+    off = static_cast<uint32_t>(g_ra.oPassList);
+    memcpy(pl + 3, &off, 4);
+    const uintptr_t f = e + g_ra.fnCompositeExec, slot10 = Ptr(e + g_ra.vtComposite + 0x10);
+    int32_t disp = 0;
+    return Ptr(e + g_ra.vtComposite + kCompExecSlot) == f && BytesMatch(f, kHead, sizeof kHead) && Rd(f + sizeof kHead, disp) &&
+           f + sizeof kHead + 4 + static_cast<intptr_t>(disp) == e + g_ra.globalGfx && BytesMatch(f + sizeof kHead + 4, aa, sizeof aa) &&
+           slot10 && BytesMatch(slot10, kAl1, sizeof kAl1) && BytesMatch(e + g_ra.insFrameGraphLoad, fg, sizeof fg) &&
+           BytesMatch(e + g_ra.insPassListLea, pl, sizeof pl) && BytesMatch(e + g_ra.insPassListRead, kRead, sizeof kRead);
+}
+void UiLayerAfterComposite(void* ret) {
+    if (g_probeMute || g_uiLayerMode != 1 || g_midDone || !g_lastSc || !g_probeBb || !g_layerCtx) return;
+    if (!InExe(ret) || g_failed || !(g_fp || g_testLayer)) return;
+    uintptr_t gfx = Ptr(g_base + g_ra.globalGfx);
+    int aa = 0;
+    if (!gfx || !Rd(gfx + g_ra.oAaSetting, aa)) return;
+    if (aa < 1 || aa > 3) {
+        ++g_uls.skipAa;
+        if (!g_uls.loggedAa) {
+            g_uls.loggedAa = true;
+            g_log("ui-layer: anti-aliasing setting %d - the game's composite step does nothing this frame; gun stays at Present (over the UI)", aa);
+        }
+        return;
+    }
+    ID3D11RenderTargetView* rtv = nullptr;
+    g_layerCtx->OMGetRenderTargets(1, &rtv, nullptr);
+    ID3D11Resource* res = nullptr;
+    if (rtv) rtv->GetResource(&res);
+    const bool onBb = res && reinterpret_cast<uintptr_t>(res) == g_probeBb;
+    if (!onBb && !g_uls.loggedRt) {
+        UINT w = 0, h = 0, fmt = 0;
+        ProbeTexInfo(res, &w, &h, &fmt);
+        g_uls.loggedRt = true;
+        g_log("ui-layer: after the composite step the bound render target is %p (%ux%u fmt %u), not the back buffer %p; gun stays at Present",
+              (void*)res, w, h, fmt, (void*)g_probeBb);
+    }
+    if (res) res->Release();
+    if (rtv) rtv->Release();
+    if (!onBb) {
+        ++g_uls.skipRt;
+        return;
+    }
+    if (!UiLayerMidDraw(g_layerCtx)) return;
+    ++g_uls.midComp;
+    if (!g_uls.loggedComp) {
+        char who[96];
+        ProbeFmtAddr(ret, who, sizeof who);
+        g_uls.loggedComp = true;
+        g_log("ui-layer: gun drawn right after the game's composite step drew the scene into the back buffer (no upscaler copy; caller %s, "
+              "anti-aliasing %d); UI now draws on top", who, aa);
+    }
+}
+__attribute__((noinline)) uintptr_t HkCompExec(void* self, uintptr_t a2, uintptr_t a3, uintptr_t a4) {
+    uintptr_t r = g_compExecOrig(self, a2, a3, a4);
+    UiLayerAfterComposite(__builtin_return_address(0));
+    return r;
+}
+void CompUnhook(const char* why, bool write = true) {
+    if (!g_compObj) return;
+    if (write && Ptr(g_compObj) == reinterpret_cast<uintptr_t>(g_compVtCopy)) {
+        uintptr_t orig = g_base + g_ra.vtComposite;
+        SIZE_T w = 0;
+        WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<LPVOID>(g_compObj), &orig, sizeof orig, &w);
+        g_log("ui-layer: composite step %p vtable restored (%s)", (void*)g_compObj, why);
+    } else {
+        g_log("ui-layer: composite step %p released without writing it (%s)", (void*)g_compObj, why);
+    }
+    g_compObj = 0;
+}
+void UiLayerCompStep() {
+    UiLayerReadIni();
+    bool want = g_uiLayerMode == 1 && g_compRouteOk && (g_fp || g_testLayer) && !g_failed;
+    if (!want) {
+        CompUnhook(!(g_fp || g_testLayer) ? "first person off" : "composite route off");
+        return;
+    }
+    uintptr_t gfx = Ptr(g_base + g_ra.globalGfx), fg = gfx ? Ptr(gfx + g_ra.oFrameGraph) : 0, arr = 0;
+    uint32_t n = 0;
+    if (!fg || !Rd(fg + g_ra.oPassList + 4, n) || !n || n > 1024 || !(arr = Ptr(fg + g_ra.oPassList + 8))) {
+        if (!g_compLoggedList) {
+            g_compLoggedList = true;
+            g_log("ui-layer: render pass list not found (graphics %p frame graph %p count %u array %p); without an upscaler the gun stays at Present this frame",
+                  (void*)gfx, (void*)fg, n, (void*)arr);
+        }
+        return;
+    }
+    const uintptr_t vtGame = g_base + g_ra.vtComposite;
+    uintptr_t ours = reinterpret_cast<uintptr_t>(g_compVtCopy), obj = 0;
+    int found = 0, at = -1;
+    for (uint32_t i = 0; i < n; ++i) {
+        uintptr_t p = Ptr(arr + 8 * i), v = p ? Ptr(p) : 0;
+        if (v && (v == vtGame || (ours && v == ours))) {
+            if (!obj) obj = p, at = static_cast<int>(i);
+            ++found;
+        }
+    }
+    if (!obj) {
+        if (!g_compLoggedMissing) {
+            g_compLoggedMissing = true;
+            g_log("ui-layer: composite step (vtable e+%llx) not in the %u-entry render pass list; without an upscaler the gun stays at Present",
+                  static_cast<unsigned long long>(g_ra.vtComposite), n);
+        }
+        CompUnhook("composite step gone from the pass list", false);
+        return;
+    }
+    if (obj == g_compObj && Ptr(obj) == ours) return;
+    if (g_compObj && g_compObj != obj) CompUnhook("composite step object changed");
+    if (Ptr(obj) != ours) {
+        if (!g_compVtCopy) {
+            constexpr int kMax = 64;
+            int k = 0;
+            for (; k < kMax; ++k) {
+                uintptr_t v = 0;
+                if (!Rd(vtGame + 8 * k, v) || !InExe(reinterpret_cast<void*>(v))) break;
+            }
+            if (k <= static_cast<int>(kCompExecSlot / 8)) return;
+            auto* copy = static_cast<uintptr_t*>(VirtualAlloc(nullptr, (k + 2) * sizeof(uintptr_t), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+            if (!copy) return;
+            copy[0] = Ptr(vtGame - 16);
+            copy[1] = Ptr(vtGame - 8);
+            for (int i = 0; i < k; ++i) copy[2 + i] = Ptr(vtGame + 8 * i);
+            g_compExecOrig = reinterpret_cast<FnCompExec>(copy[2 + kCompExecSlot / 8]);
+            copy[2 + kCompExecSlot / 8] = reinterpret_cast<uintptr_t>(&HkCompExec);
+            DWORD old;
+            VirtualProtect(copy, (k + 2) * sizeof(uintptr_t), PAGE_READONLY, &old);
+            g_compVtCopy = copy + 2, ours = reinterpret_cast<uintptr_t>(g_compVtCopy);
+            g_log("ui-layer: composite step vtable e+%llx copied (%d slots), slot +0x%llx -> our hook", static_cast<unsigned long long>(g_ra.vtComposite), k,
+                  static_cast<unsigned long long>(kCompExecSlot));
+        }
+        SIZE_T w = 0;
+        if (!WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<LPVOID>(obj), &ours, sizeof ours, &w) || w != sizeof ours) {
+            g_log("ui-layer: vptr write failed on composite step %p", (void*)obj);
+            return;
+        }
+    }
+    g_compObj = obj;
+    g_log("ui-layer: hooked the game's composite step %p (entry %d of %u, %d with that vtable); D3D context untouched", (void*)obj, at, n, found);
 }
