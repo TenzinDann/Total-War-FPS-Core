@@ -491,6 +491,9 @@ struct Config {
     float dropClearance = 3.5f, dropPushSpeed = 6.f, dropMaxPush = 6.f;
     bool building = true;
     float bldLow = 1.f, bldHigh = 2.05f, bldSkin = 0.4f;
+    bool wallUp = true;
+    unsigned wallUpKey = 'E';
+    float wallUpReach = 3.f, wallUpMin = 3.f, wallUpMaxH = 30.f;
     bool wallBody = true;
     float wallBodyMargin = 1.f;
     bool ghost = false;
@@ -741,6 +744,17 @@ void LoadConfig() {
     if (!(cfg.bldHigh >= cfg.bldLow && cfg.bldHigh <= 6.f)) cfg.bldHigh = 2.05f;
     if (!(cfg.bldSkin >= 0.f && cfg.bldSkin <= 2.f)) cfg.bldSkin = 0.4f;
     Log("wall: building=%d building_low=%.2f building_high=%.2f building_skin=%.2f", cfg.building, cfg.bldLow, cfg.bldHigh, cfg.bldSkin);
+    cfg.wallUp = GetPrivateProfileIntW(L"move", L"wall_up", 1, ini) != 0;
+    cfg.wallUpKey = GetPrivateProfileIntW(L"move", L"wall_up_key", 'E', ini);
+    if (!(cfg.wallUpKey > 0 && cfg.wallUpKey < 0xFF)) cfg.wallUpKey = 'E';
+    cfg.wallUpReach = IniF(L"move", L"wall_up_reach", 3.f, ini);
+    cfg.wallUpMin = IniF(L"move", L"wall_up_min_height", 3.f, ini);
+    cfg.wallUpMaxH = IniF(L"move", L"wall_up_max_height", 30.f, ini);
+    if (!(cfg.wallUpReach >= 0.5f && cfg.wallUpReach <= 10.f)) cfg.wallUpReach = 3.f;
+    if (!(cfg.wallUpMin >= 1.5f && cfg.wallUpMin <= 20.f)) cfg.wallUpMin = 3.f;
+    if (!(cfg.wallUpMaxH > cfg.wallUpMin && cfg.wallUpMaxH <= 80.f)) cfg.wallUpMaxH = 30.f;
+    Log("wall-up: enabled=%d key=0x%02X reach=%.2f min_height=%.2f max_height=%.1f", cfg.wallUp, cfg.wallUpKey, cfg.wallUpReach,
+        cfg.wallUpMin, cfg.wallUpMaxH);
     cfg.wallBody = GetPrivateProfileIntW(L"move", L"wall_body", 1, ini) != 0;
     cfg.wallBodyMargin = IniF(L"move", L"wall_body_margin", 1.f, ini);
     if (!(cfg.wallBodyMargin >= 0.f && cfg.wallBodyMargin <= 3.f)) cfg.wallBodyMargin = 1.f;
@@ -1035,6 +1049,11 @@ struct State {
     bool bldInside = false, bldRecheck = false;
     double tBldCheck = 0;
     int bldBlocks = 0, bldLogs = 0;
+    int prompt = 0, wallUps = 0, wallUpLogs = 0;
+    bool ePrev = true, wallUpOk = false;
+    float wallUpTo[3] = {};
+    uintptr_t wallUpBlk = 0;
+    double tWallScan = 0;
     bool bodyInside = false;
     int bodyLogs = 0, censusLogs = 0;
     double tLastTp = 0;
@@ -4495,6 +4514,89 @@ void LauncherReset() {
     InterlockedExchange(&g_reqLauncher, 0);
     InterlockedExchange(&g_heroLauncher, 0);
 }
+constexpr float kWallUpStep = 0.25f, kWallUpInset = 0.6f;
+bool FindWallUp(float x, float z, float foot, float fx, float fz, float out[3], uintptr_t* blkOut) {
+    float fl = std::sqrt(fx * fx + fz * fz);
+    if (!(fl > 1e-4f)) return false;
+    fx /= fl;
+    fz /= fl;
+    Surf s[kMaxSurf];
+    float bodyD = -1.f;
+    for (float d = kWallUpStep; d <= cfg.wallUpReach + 1e-3f; d += kWallUpStep) {
+        int n = SurfacesAt(x + fx * d, z + fz * d, s);
+        if (!n) return false;
+        if (StructureOver(s, n, foot, cfg.wallUpMin, cfg.stepDown)) {
+            bodyD = d;
+            break;
+        }
+    }
+    if (bodyD < 0.f) return false;
+    uint32_t t = 0;
+    float hp[3] = {};
+    const float p0[2] = {x, z}, p1[2] = {x + fx * bodyD, z + fz * bodyD};
+    if (TallWallBetween(p0, p1, foot, &t, hp)) return false;
+    int n = SurfacesAt(p1[0], p1[1], s), top = -1;
+    for (int i = 0; i < n; ++i)
+        if (s[i].blk && (top < 0 || s[i].h > s[top].h)) top = i;
+    if (top < 0 || s[top].h < foot + cfg.wallUpMin || s[top].h > foot + cfg.wallUpMaxH) return false;
+    uintptr_t blk = s[top].blk;
+    float land = bodyD, h = s[top].h;
+    for (float in : {kWallUpInset, kWallUpInset * 0.5f}) {
+        int m = SurfacesAt(x + fx * (bodyD + in), z + fz * (bodyD + in), s), j = -1, hi = -1;
+        for (int i = 0; i < m; ++i) {
+            if (s[i].blk == blk) j = i;
+            if (s[i].blk && (hi < 0 || s[i].h > s[hi].h)) hi = i;
+        }
+        if (j >= 0 && j == hi) {
+            land = bodyD + in;
+            h = s[j].h;
+            break;
+        }
+    }
+    out[0] = x + fx * land;
+    out[1] = h;
+    out[2] = z + fz * land;
+    if (InsideBuilding(out[0], out[2], h)) return false;
+    *blkOut = blk;
+    return true;
+}
+void WallUpFrame(double now, bool fg, bool paused, bool pinned) {
+    bool e = fg && KeyDown(static_cast<int>(cfg.wallUpKey));
+    bool press = e && !S.ePrev;
+    S.ePrev = e;
+    if (!cfg.wallUp || !cfg.wall || !g_wallOk || S.air || pinned || paused || S.stuck || S.ghostWanted || S.flyer) {
+        S.prompt = 0;
+        S.wallUpOk = false;
+        return;
+    }
+    if (press || now - S.tWallScan >= 0.1) {
+        S.tWallScan = now;
+        bool was = S.wallUpOk;
+        S.wallUpOk = FindWallUp(S.kinPos[0], S.kinPos[1], S.footY, std::sin(S.yaw), std::cos(S.yaw), S.wallUpTo, &S.wallUpBlk);
+        if (S.wallUpOk && !was && S.wallUpLogs++ < 40)
+            Log("wall-up: prompt on - wall top %.2f,%.2f h %.2f (%.1f m above the foot %.2f) on block %p", S.wallUpTo[0], S.wallUpTo[2], S.wallUpTo[1],
+                S.wallUpTo[1] - S.footY, S.footY, (void*)S.wallUpBlk);
+    }
+    S.prompt = S.wallUpOk ? 1 : 0;
+    if (!press || !S.wallUpOk) return;
+    const float from[3] = {S.kinPos[0], S.footY, S.kinPos[1]};
+    S.kinPos[0] = S.wallUpTo[0];
+    S.kinPos[1] = S.wallUpTo[2];
+    S.footY = S.wallUpTo[1];
+    S.footBlk = S.wallUpBlk;
+    S.kinVel[0] = S.kinVel[1] = 0;
+    S.air = S.airFar = S.dropActive = false;
+    S.vy = S.airGap = 0;
+    S.tLastTp = 0;
+    S.tLand = now;
+    S.bldRecheck = true;
+    S.bodyInside = false;
+    S.wallUpOk = false;
+    S.prompt = 0;
+    ++S.wallUps;
+    Log("wall-up: E -> onto the wall top at %.2f,%.2f h %.2f on block %p (from %.2f,%.2f foot %.2f, %.1f m up; %d this time)", S.kinPos[0],
+        S.kinPos[1], S.footY, (void*)S.footBlk, from[0], from[2], from[1], S.footY - from[1], S.wallUps);
+}
 void Apply(uintptr_t mgr) {
     double now = Now();
     uintptr_t ent = EntityByPath(S.unit, S.entPath);
@@ -4679,6 +4781,7 @@ void Apply(uintptr_t mgr) {
             S.air = S.airFar = S.dropActive = false;
             S.vy = S.airGap = S.landY = S.landV = S.landPunch = 0;
             S.tLand = -1;
+            S.prompt = 0, S.wallUpOk = false, S.ePrev = true, S.wallUps = 0;
             {
                 Surf sf[kMaxSurf];
                 int ns = SurfacesAt(raw[0], raw[2], sf), bi = -1;
@@ -4792,6 +4895,7 @@ void Apply(uintptr_t mgr) {
                     S.vy);
         }
         S.spacePrev = space;
+        WallUpFrame(now, fg, paused, pinned);
         if (pinned && S.air) {
             S.air = S.airFar = S.dropActive = false;
             S.vy = 0;
@@ -5582,6 +5686,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
         }
         if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D')) return 0;
+        if (S.active && cfg.wallUp && w == cfg.wallUpKey) return 0;
         if (S.active && w == VK_SPACE && cfg.jumpHeight > 0.f) return 0;
         break;
     case WM_KEYUP:
@@ -6322,6 +6427,10 @@ int View(void* L) {
     for (float v : d) f.pushnumber(L, v);
     return 6;
 }
+int Prompt(void* L) {
+    f.pushnumber(L, S.active && S.lastMode == 0 ? static_cast<float>(S.prompt) : 0.f);
+    return 1;
+}
 int ExitFirstPerson(void* L) {
     (void)L;
     if (S.active) {
@@ -6340,7 +6449,7 @@ int PushTable(void* L) {
     const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_enabled", HudEnabled},
                                                         {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"cast_event", CastEvent},
                                                         {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson},
-                                                        {"tac_stamina", TacStaminaApi}, {"refill_ammo", RefillAmmoApi}};
+                                                        {"tac_stamina", TacStaminaApi}, {"refill_ammo", RefillAmmoApi}, {"prompt", Prompt}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);
