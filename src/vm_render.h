@@ -518,8 +518,32 @@ private:
     ID3D11DepthStencilState* dss_ = nullptr;
     bool failed_ = false;
 };
+struct ScreenBufs {
+    ID3D11Device* dev = nullptr;
+    ID3D11Texture2D* depthTex = nullptr;
+    ID3D11DepthStencilView* dsv = nullptr;
+    UINT depthW = 0, depthH = 0;
+    ID3D11Texture2D* sceneTex = nullptr;
+    ID3D11ShaderResourceView* sceneSrv = nullptr;
+    UINT sceneW = 0, sceneH = 0, sceneMips = 0;
+    DXGI_FORMAT sceneFmt = DXGI_FORMAT_UNKNOWN;
+    ID3D11Texture2D* distTex = nullptr;
+    ID3D11ShaderResourceView* distSrv = nullptr;
+    UINT distW = 0, distH = 0;
+    DXGI_FORMAT distFmt = DXGI_FORMAT_UNKNOWN;
+    ID3D11Texture2D* distDepthTex = nullptr;
+    ID3D11ShaderResourceView* distDepthSrv = nullptr;
+    UINT distDepthW = 0, distDepthH = 0;
+    void Release();
+};
+void ReleaseSharedScreenBuffers();
+struct DrawProf {
+    double depth = 0, scene = 0, wh3 = 0, total = 0;
+};
+extern DrawProf g_drawProf;
 class Renderer {
 public:
+    void ShareScreenBuffers(bool on) { shareScreen_ = on; }
     bool Init(ID3D11Device* dev, const wchar_t* hvmPath, char* err, size_t errLen);
     bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11Texture2D* sceneTex, UINT w, UINT h,
               bool rtvEncodesSrgb, const Settings& s, const Look& look);
@@ -567,11 +591,14 @@ public:
     bool ClipLoops(int i) const;
     bool Muzzle(float* ndcX, float* ndcY, float* aspect) const;
     bool MuzzleView(MuzzleFrame* f) const;
-    ID3D11DepthStencilView* Depth(UINT w, UINT h) const { return dsv_ && depthW_ == w && depthH_ == h ? dsv_ : nullptr; }
-    ID3D11ShaderResourceView* SceneSrv() const { return sceneFresh_ ? sceneSrv_ : nullptr; }
+    ID3D11DepthStencilView* Depth(UINT w, UINT h) const {
+        const ScreenBufs& b = Sb();
+        return b.dev == dev_ && b.dsv && b.depthW == w && b.depthH == h ? b.dsv : nullptr;
+    }
+    ID3D11ShaderResourceView* SceneSrv() const { return sceneFresh_ ? Sb().sceneSrv : nullptr; }
     bool SceneGamma() const { return sceneGammaEnc_; }
     ID3D11ShaderResourceView* CopyForDistort(ID3D11DeviceContext* ctx, ID3D11Texture2D* backBuffer, UINT w, UINT h, bool* gamma);
-    ID3D11ShaderResourceView* DistortDepth() const { return distDepthOk_ ? distDepthSrv_ : nullptr; }
+    ID3D11ShaderResourceView* DistortDepth() const { return distDepthOk_ ? Sb().distDepthSrv : nullptr; }
 private:
     struct Submesh {
         uint32_t firstIndex, indexCount;
@@ -611,23 +638,13 @@ private:
     ID3D11DepthStencilState* dss_ = nullptr;
     ID3D11BlendState* bs_ = nullptr;
     ID3D11SamplerState* samp_ = nullptr;
-    ID3D11Texture2D* depthTex_ = nullptr;
-    ID3D11DepthStencilView* dsv_ = nullptr;
-    UINT depthW_ = 0, depthH_ = 0;
-    ID3D11Texture2D* sceneTex_ = nullptr;
-    ID3D11ShaderResourceView* sceneSrv_ = nullptr;
-    UINT sceneW_ = 0, sceneH_ = 0, sceneMips_ = 0;
-    DXGI_FORMAT sceneFmt_ = DXGI_FORMAT_UNKNOWN;
+    ScreenBufs own_;
+    bool shareScreen_ = false;
+    ScreenBufs& Sb();
+    const ScreenBufs& Sb() const;
     bool sceneBroken_ = false;
     bool sceneFresh_ = false, sceneGammaEnc_ = false;
-    ID3D11Texture2D* distTex_ = nullptr;
-    ID3D11ShaderResourceView* distSrv_ = nullptr;
-    UINT distW_ = 0, distH_ = 0;
-    DXGI_FORMAT distFmt_ = DXGI_FORMAT_UNKNOWN;
     bool distBroken_ = false;
-    ID3D11Texture2D* distDepthTex_ = nullptr;
-    ID3D11ShaderResourceView* distDepthSrv_ = nullptr;
-    UINT distDepthW_ = 0, distDepthH_ = 0;
     bool distDepthOk_ = false;
     static constexpr unsigned kMaxTextures = 64;
     ID3D11ShaderResourceView* srv_[kMaxTextures] = {};
