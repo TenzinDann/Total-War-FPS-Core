@@ -4643,8 +4643,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4715,7 +4713,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4798,26 +4795,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -4850,7 +4838,7 @@ void LauncherReset() {
     InterlockedExchange(&g_heroLauncher, 0);
 }
 enum WallUpWhy { kWhyNone = 0, kWhyNoWall, kWhyPaused, kWhyNotGround, kWhyNoTop, kWhyHeight, kWhyGate, kWhyInside, kWhyRoof };
-constexpr float kWallUpStep = 0.25f, kWallUpInset = 0.6f, kWallUpThick = 6.f, kWallUpGround = 2.f;
+constexpr float kWallUpStep = 0.25f, kWallUpInset = 0.6f, kWallUpThick = 6.f, kWallUpGround = 2.f, kWallUpSameH = 0.5f, kWallUpKeep = 1.f;
 const char* WallUpWhyText(int why) {
     switch (why) {
         case kWhyNoTop: return "tall building wall ahead but no wall-top nav block behind it (house / tower without a walkway)";
@@ -4926,18 +4914,26 @@ bool FindWallUp(float x, float z, float foot, float fx, float fz, float out[3], 
         if (s[i].blk && (top < 0 || s[i].h > s[top].h)) top = i;
     if (top < 0 || s[top].h < foot + cfg.wallUpMin || s[top].h > foot + cfg.wallUpMaxH) return no(kWhyHeight);
     uintptr_t blk = s[top].blk;
-    float land = bodyD, h = s[top].h;
-    for (float in : {kWallUpInset, kWallUpInset * 0.5f}) {
-        int m = SurfacesAt(x + fx * (bodyD + in), z + fz * (bodyD + in), s), j = -1, hi = -1;
-        for (int i = 0; i < m; ++i) {
-            if (s[i].blk == blk) j = i;
+    const float topH = s[top].h;
+    float land = bodyD, h = topH;
+    auto onTop = [&](float d, uintptr_t* b, float* hh) {
+        int m = SurfacesAt(x + fx * d, z + fz * d, s), hi = -1;
+        for (int i = 0; i < m; ++i)
             if (s[i].blk && (hi < 0 || s[i].h > s[hi].h)) hi = i;
-        }
-        if (j >= 0 && j == hi) {
-            land = bodyD + in;
-            h = s[j].h;
-            break;
-        }
+        if (hi < 0 || std::fabs(s[hi].h - topH) > kWallUpSameH) return false;
+        *b = s[hi].blk;
+        *hh = s[hi].h;
+        return true;
+    };
+    for (float in : {2.f, 1.5f, 1.f, kWallUpInset, kWallUpInset * 0.5f}) {
+        uintptr_t b = 0, b2 = 0;
+        float hh = 0.f, h2 = 0.f;
+        if (!onTop(bodyD + in, &b, &hh)) continue;
+        if (in > kWallUpInset && !onTop(bodyD + in + kWallUpKeep, &b2, &h2)) continue;
+        land = bodyD + in;
+        h = hh;
+        blk = b;
+        break;
     }
     out[0] = x + fx * land;
     out[1] = h;
@@ -4949,14 +4945,14 @@ bool FindWallUp(float x, float z, float foot, float fx, float fz, float out[3], 
     *why = kWhyNone;
     return true;
 }
-void WallUpFrame(double now, bool fg, bool paused, bool pinned) {
+bool WallUpFrame(double now, bool fg, bool paused, bool pinned) {
     bool e = fg && KeyDown(static_cast<int>(cfg.wallUpKey));
     bool press = e && !S.ePrev;
     S.ePrev = e;
     if (!cfg.wallUp || !cfg.wall || !g_wallOk || S.air || pinned || paused || S.stuck || S.ghostWanted || S.flyer) {
         S.prompt = 0;
         S.wallUpOk = false;
-        return;
+        return false;
     }
     if (press || now - S.tWallScan >= 0.1) {
         S.tWallScan = now;
@@ -4975,7 +4971,7 @@ void WallUpFrame(double now, bool fg, bool paused, bool pinned) {
                 S.wallUpTo[1] - S.footY, S.footY, (void*)S.wallUpBlk);
     }
     S.prompt = S.wallUpOk ? 1 : 0;
-    if (!press || !S.wallUpOk) return;
+    if (!press || !S.wallUpOk) return false;
     const float from[3] = {S.kinPos[0], S.footY, S.kinPos[1]};
     S.kinPos[0] = S.wallUpTo[0];
     S.kinPos[1] = S.wallUpTo[2];
@@ -4993,6 +4989,7 @@ void WallUpFrame(double now, bool fg, bool paused, bool pinned) {
     ++S.wallUps;
     Log("wall-up: E -> onto the wall top at %.2f,%.2f h %.2f on block %p (from %.2f,%.2f foot %.2f, %.1f m up; %d this time)", S.kinPos[0],
         S.kinPos[1], S.footY, (void*)S.footBlk, from[0], from[2], from[1], S.footY - from[1], S.wallUps);
+    return true;
 }
 constexpr float kLeadAdjMax = 0.12f;
 bool LeashSkipAhead(float ex, float ez, const float vel[2], float ed, float leash) {
@@ -5300,7 +5297,7 @@ void Apply(uintptr_t mgr) {
                     S.vy);
         }
         S.spacePrev = space;
-        WallUpFrame(now, fg, paused, pinned);
+        if (WallUpFrame(now, fg, paused, pinned)) unbound = true;
         if (pinned && S.air) {
             S.air = S.airFar = S.dropActive = false;
             S.vy = 0;
