@@ -1067,6 +1067,8 @@ struct State {
     float stuckPos[3] = {};
     float leadPos[2] = {0, 0};
     double tGuard = -1, tLeadLog = 0;
+    double tLeashHit = -10, tBump = -10;
+    unsigned bumpSig = 0, leashAhead = 0;
     float leadOffSum = 0;
     int leadOffN = 0;
     bool pinned = false;
@@ -4491,8 +4493,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4563,7 +4563,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4646,26 +4645,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -4779,6 +4769,13 @@ void WallUpFrame(double now, bool fg, bool paused, bool pinned) {
     ++S.wallUps;
     Log("wall-up: E -> onto the wall top at %.2f,%.2f h %.2f on block %p (from %.2f,%.2f foot %.2f, %.1f m up; %d this time)", S.kinPos[0],
         S.kinPos[1], S.footY, (void*)S.footBlk, from[0], from[2], from[1], S.footY - from[1], S.wallUps);
+}
+constexpr float kLeadAdjMax = 0.12f;
+bool LeashSkipAhead(float ex, float ez, const float vel[2], float ed, float leash) {
+    float v = std::sqrt(vel[0] * vel[0] + vel[1] * vel[1]);
+    if (!(v > 1.f) || !(ed > 1e-4f)) return false;
+    float along = -(ex * vel[0] + ez * vel[1]) / v;
+    return along > 0.5f * ed && ed < leash + v * 0.5f + 2.f;
 }
 void Apply(uintptr_t mgr) {
     double now = Now();
@@ -4965,6 +4962,7 @@ void Apply(uintptr_t mgr) {
             S.vy = S.airGap = S.landY = S.landV = S.landPunch = 0;
             S.tLand = -1;
             S.prompt = 0, S.wallUpOk = false, S.ePrev = true, S.wallUps = 0;
+            for (float& a : g_leadAdj) a = std::fmin(a, kLeadAdjMax);
             {
                 Surf sf[kMaxSurf];
                 int ns = SurfacesAt(raw[0], raw[2], sf), bi = -1;
@@ -5154,11 +5152,15 @@ void Apply(uintptr_t mgr) {
         float leash = S.stuck ? cfg.stuckLeash : cfg.leash;
         float ex = S.kinPos[0] - raw[0], ez = S.kinPos[1] - raw[2];
         float ed = std::sqrt(ex * ex + ez * ez);
-        if (ed > leash && !unbound && !pinned) {
+        const bool skipAhead = !S.stuck && ed > leash && LeashSkipAhead(ex, ez, S.kinVel, ed, leash);
+        if (skipAhead && S.leashAhead++ < 5)
+            Log("move(teleport): hero %.1f m ahead of the camera (teleport lead) - leash not pulling the camera forward", ed);
+        if (ed > leash && !unbound && !pinned && !skipAhead) {
             float k2 = dt > 0.f && S.stuck ? 1.f - std::exp(-dt / 0.1f) : 1.f;
             S.kinPos[0] -= ex * (1.f - leash / ed) * k2;
             S.kinPos[1] -= ez * (1.f - leash / ed) * k2;
             ++S.leashHits;
+            S.tLeashHit = now;
         }
         Surf sf[kMaxSurf];
         int ns = SurfacesAt(S.kinPos[0], S.kinPos[1], sf), si = -1;
@@ -5395,14 +5397,19 @@ void Apply(uintptr_t mgr) {
         camPos[0] = S.kinPos[0];
         camPos[1] = S.kinY + S.landY;
         camPos[2] = S.kinPos[1];
+        {
+            unsigned sig = static_cast<unsigned>(S.bldBlocks) + S.blocks + static_cast<unsigned>(S.bodyLogs);
+            if (sig != S.bumpSig) S.bumpSig = sig, S.tBump = now;
+        }
         if (cfg.leadAuto && cfg.tpLead > 0.f && dt > 0.f && !S.stuck && !paused && !unbound && !pinned && !S.air && now - S.tGuard > 0.5 &&
-            (S.tLand < 0 || now - S.tLand > 0.5)) {
+            (S.tLand < 0 || now - S.tLand > 0.5) && now - S.tLeashHit > 1.0 && now - S.tBump > 0.5 &&
+            std::fabs(S.outPos[1] - S.footY) < 0.8f) {
             float v = std::sqrt(S.kinVel[0] * S.kinVel[0] + S.kinVel[1] * S.kinVel[1]);
             float tvx = mx * spd, tvz = mz * spd, tv = std::sqrt(tvx * tvx + tvz * tvz);
             if (v > 1.5f && tv > 1.5f && std::fabs(v - tv) < 0.12f * tv) {
                 float d = ((S.outPos[0] - S.kinPos[0]) * S.kinVel[0] + (S.outPos[2] - S.kinPos[1]) * S.kinVel[1]) / v;
                 int b = LeadBand(tv);
-                g_leadAdj[b] = LeadAutoStep(g_leadAdj[b], d, v, dt, cfg.leadAutoTau, -cfg.tpLead, 0.25f);
+                g_leadAdj[b] = LeadAutoStep(g_leadAdj[b], d, v, dt, cfg.leadAutoTau, -cfg.tpLead, kLeadAdjMax);
                 S.leadOffSum += d;
                 ++S.leadOffN;
                 if (now - S.tLeadLog > 5.0 && S.leadOffN > 30) {
@@ -5419,7 +5426,7 @@ void Apply(uintptr_t mgr) {
         if (!S.stuck && !paused && !unbound && !pinned && !S.air && cfg.tpLead > 0.f) {
             float L = cfg.tpLead, tau = cfg.accelTau;
             float vtx = mx * spd, vtz = mz * spd;
-            if (cfg.leadAuto) L = std::fmin(0.45f, std::fmax(0.f, cfg.tpLead + g_leadAdj[LeadBand(std::sqrt(vtx * vtx + vtz * vtz))]));
+            if (cfg.leadAuto) L = std::fmin(cfg.tpLead + kLeadAdjMax, std::fmax(0.f, cfg.tpLead + g_leadAdj[LeadBand(std::sqrt(vtx * vtx + vtz * vtz))]));
             float f = tau > 0.001f ? tau * (1.f - std::exp(-L / tau)) : 0.f;
             S.leadPos[0] += vtx * L + (S.kinVel[0] - vtx) * f;
             S.leadPos[1] += vtz * L + (S.kinVel[1] - vtz) * f;
