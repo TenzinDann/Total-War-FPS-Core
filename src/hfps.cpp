@@ -60,6 +60,12 @@ template <size_t N>
 constexpr PrintSet Prints(const CodePrint (&a)[N]) {
     return {a, N};
 }
+const CodePrint kNetPrints904[] = {
+    {0x2f8fbd8, 0x2bc, 0xdb3588364c85fa39ull},
+    {0x2f795c0, 0x13f, 0x3bf77016869b3696ull},
+    {0x310d064, 0x71d, 0xe696c21e9c1292a5ull},
+    {0x3110ff0, 0x46, 0x3860f3f85297a94dull},
+    {0x3132178, 0x4e, 0x9306c6b89a050292ull}};
 const CodePrint kArrowPrints904[] = {
     {0x2fd07d0, 0x20e, 0x6ec8c833b7e346d3ull},
     {0x2fd09e0, 0x3d62, 0x54ddff0da7591a60ull},
@@ -255,6 +261,7 @@ const CodePrint kBuildPrints904[] = {
 constexpr uintptr_t kFnSegQuery904 = 0x2db3470, oWorldCollide = 0x150;
 constexpr uint32_t kBuildMask = 0x4800;
 bool g_buildOk = false;
+bool g_netOk = false;
 const CodePrint kGameVolPrints904[] = {
     {0x5af310, 0x161, 0x0caa95b7b9f64779ull},
     {0x5aecd4, 0x16, 0x3a3f3a78d580c508ull},
@@ -528,6 +535,7 @@ struct Config {
     float wallUpReach = 3.f, wallUpMin = 3.f, wallUpMaxH = 30.f, wallUpGateR = 8.f, wallUpBase = 3.f;
     bool wallBody = true;
     float wallBodyMargin = 1.f;
+    bool wallBodyNet = true;
     bool ghost = false;
     bool revealEnemies = true;
     bool noMelee = true;
@@ -823,7 +831,8 @@ void LoadConfig() {
     cfg.wallBody = GetPrivateProfileIntW(L"move", L"wall_body", 1, ini) != 0;
     cfg.wallBodyMargin = IniF(L"move", L"wall_body_margin", 1.f, ini);
     if (!(cfg.wallBodyMargin >= 0.f && cfg.wallBodyMargin <= 3.f)) cfg.wallBodyMargin = 1.f;
-    Log("wall: wall_body=%d wall_body_margin=%.2f", cfg.wallBody, cfg.wallBodyMargin);
+    cfg.wallBodyNet = GetPrivateProfileIntW(L"move", L"wall_body_net", 1, ini) != 0;
+    Log("wall: wall_body=%d wall_body_margin=%.2f wall_body_net=%d", cfg.wallBody, cfg.wallBodyMargin, cfg.wallBodyNet);
     Log("wall: drop_clearance=%.2f drop_push_speed=%.1f drop_max_push=%.1f", cfg.dropClearance, cfg.dropPushSpeed, cfg.dropMaxPush);
     Log("wall: wall=%d step_up=%.2f step_down=%.2f gravity=%.1f jump_height=%.2f air_control=%.2f air_teleport_max=%.2f land_dip=%.3f",
         cfg.wall, cfg.stepUp, cfg.stepDown, cfg.gravity, cfg.jumpHeight, cfg.airControl, cfg.airTpMax, cfg.landDip);
@@ -1129,6 +1138,9 @@ struct State {
     double tWallWhy = -10;
     bool bodyInside = false;
     int bodyLogs = 0, censusLogs = 0;
+    unsigned netPass = 0;
+    double tNetLog = -10;
+    int netLogs = 0;
     double tLastTp = 0;
     unsigned tpSent = 0, tpFailed = 0, tpLogs = 0, leashHits = 0;
     int lastMode = -1;
@@ -3081,6 +3093,125 @@ bool InsideStructure(float x, float z, float foot, float up = -1.f) {
     Surf s[kMaxSurf];
     int n = SurfacesAt(x, z, s);
     return StructureOver(s, n, foot, up > 0.f ? up : cfg.stepUp, cfg.stepDown);
+}
+constexpr uintptr_t oWorldRegionNet = 0x168, oNetCells = 0x0, oNetShift = 0x10, oNetDim = 0x14, oNetOff = 0x18, oNetMax = 0x1c, oNetScale = 0x2c,
+                    oNetRegions = 0x50, oRegCount = 0x44, oRegArray = 0x48, oRegPoly = 0x10, oRegSub = 0x18, oRegIdx = 0x3c, oRegBlk = 0x48,
+                    oRegOff = 0xb4, oEdgeNext = 0x10, oEdgeXZ = 0x18, oEdgeFlags = 0x50, kVtRegionSub904 = 0x3ad5ec0, kFnRegionOn904 = 0x3110ff0;
+constexpr uint8_t kEdgePortal = 0x2;
+bool NetContains(uintptr_t poly, float x, float z);
+struct RegionNet {
+    uintptr_t cells = 0, regs = 0;
+    uint32_t count = 0, dim = 0, shift = 0, maxIdx = 0;
+    int32_t off = 0;
+    float scale = 0;
+};
+bool RegionNetRead(uintptr_t world, RegionNet* n) {
+    *n = RegionNet();
+    uintptr_t g = world ? Ptr(world + oWorldRegionNet) : 0, c = g ? Ptr(g + oNetRegions) : 0;
+    if (!g || !c || !Rd(g + oNetCells, n->cells) || !Rd(g + oNetShift, n->shift) || !Rd(g + oNetDim, n->dim) || !Rd(g + oNetOff, n->off) ||
+        !Rd(g + oNetMax, n->maxIdx) || !Rd(g + oNetScale, n->scale) || !Rd(c + oRegCount, n->count) || !Rd(c + oRegArray, n->regs))
+        return false;
+    n->shift &= 31;
+    return n->cells && n->regs && n->count > 0 && n->count < 0xfffe && n->scale > 0.f && n->scale < 100.f && n->dim > 0 && n->dim <= 0x10000 &&
+           n->maxIdx < 0x10000;
+}
+uint32_t NetCell(const RegionNet& n, float v) {
+    uint32_t i = static_cast<uint32_t>(static_cast<int32_t>(std::floor(n.scale * v)) + n.off);
+    return i > n.maxIdx ? n.maxIdx : i;
+}
+uintptr_t GroundRegionAt(const RegionNet& n, float x, float z, uintptr_t* any) {
+    *any = 0;
+    const uint32_t xi = NetCell(n, x), zi = NetCell(n, z);
+    uintptr_t cand[32];
+    int nc = 0;
+    auto add = [&](uintptr_t r) {
+        for (int i = 0; i < nc; ++i)
+            if (cand[i] == r) return;
+        if (r && nc < 32) cand[nc++] = r;
+    };
+    for (uint32_t cz = zi; cz < zi + 2; ++cz)
+        for (uint32_t cx = xi; cx < xi + 2; ++cx) {
+            if (cx >= n.dim || cz >= n.dim) continue;
+            const uintptr_t cell = n.cells + ((static_cast<uintptr_t>(cz) << n.shift) + cx) * 0x10;
+            uint16_t v = 0xffff;
+            if (!Rd(cell + 8, v)) continue;
+            if (v < 0xfffe) {
+                if (v < n.count) add(Ptr(n.regs + static_cast<uintptr_t>(v) * 8));
+            } else if (v == 0xfffe) {
+                uintptr_t node = Ptr(cell);
+                for (int guard = 0; node && guard < 64; ++guard, node = Ptr(node + 8)) add(Ptr(node));
+            }
+        }
+    for (int i = 0; i < nc; ++i) {
+        const uintptr_t r = cand[i], poly = Ptr(r + oRegPoly);
+        uint32_t offCount = 1;
+        if (Ptr(r + oRegSub) != g_base + kVtRegionSub904 || Ptr(r + oRegBlk) || !poly || !NetContains(poly, x, z)) continue;
+        if (!*any) *any = r;
+        if (Rd(r + oRegOff, offCount) && offCount == 0) return r;
+    }
+    return 0;
+}
+bool RegionWallCrossed(uintptr_t r, float ax, float az, float bx, float bz) {
+    const uintptr_t poly = Ptr(r + oRegPoly);
+    auto side = [](float px, float pz, float qx, float qz, float x, float z) { return (qx - px) * (z - pz) - (qz - pz) * (x - px); };
+    uintptr_t p = poly;
+    for (int guard = 0; p && guard < 256; ++guard) {
+        const uintptr_t q = Ptr(p + oEdgeNext);
+        float e0[2], e1[2];
+        uint8_t fl = 0;
+        if (!q || !Rd(p + oEdgeXZ, e0) || !Rd(q + oEdgeXZ, e1) || !Rd(p + oEdgeFlags, fl)) return false;
+        if (!(fl & kEdgePortal)) {
+            const float d1 = side(ax, az, bx, bz, e0[0], e0[1]), d2 = side(ax, az, bx, bz, e1[0], e1[1]);
+            const float d3 = side(e0[0], e0[1], e1[0], e1[1], ax, az), d4 = side(e0[0], e0[1], e1[0], e1[1], bx, bz);
+            if ((d1 > 0.f) != (d2 > 0.f) && (d3 > 0.f) != (d4 > 0.f)) return true;
+        }
+        p = q;
+        if (p == poly) break;
+    }
+    return false;
+}
+int NetStep(const RegionNet& n, float ax, float az, float bx, float bz, uintptr_t* hit) {
+    uintptr_t anyB = 0, anyA = 0;
+    const uintptr_t B = GroundRegionAt(n, bx, bz, &anyB);
+    *hit = B ? B : anyB;
+    if (!B) return anyB ? 2 : 1;
+    const uintptr_t A = GroundRegionAt(n, ax, az, &anyA);
+    if (!A) {
+        *hit = anyA;
+        return 4;
+    }
+    if (A == B) return 0;
+    if (RegionWallCrossed(A, ax, az, bx, bz)) {
+        *hit = A;
+        return 3;
+    }
+    if (RegionWallCrossed(B, ax, az, bx, bz)) return 3;
+    return 0;
+}
+bool NetContains(uintptr_t poly, float x, float z) {
+    using FnContains = char (*)(uintptr_t, const float*, float);
+    const float xz[2] = {x, z};
+    return reinterpret_cast<FnContains>(g_base + kFnBlockContains904)(poly, xz, 0.f) == 1;
+}
+bool RegionNetNow(RegionNet* n) {
+    uintptr_t battle = 0;
+    return CmdQueue(&battle) && battle && RegionNetRead(Ptr(battle + oBattlePath), n);
+}
+bool InsideWallBody(float x, float z, float foot) {
+    if (!InsideStructure(x, z, foot)) return false;
+    RegionNet net;
+    uintptr_t hit = 0;
+    return !(cfg.wallBodyNet && g_netOk && RegionNetNow(&net)) || NetStep(net, x, z, x, z, &hit) != 0;
+}
+const char* NetWhyText(bool netOk, int why) {
+    if (!netOk) return "net off (old rule)";
+    switch (why) {
+        case 1: return "no ground region here";
+        case 2: return "ground region disabled";
+        case 3: return "crosses a closed edge of region";
+        case 4: return "start not on the net (old rule)";
+    }
+    return "?";
 }
 struct SegQuery {
     int32_t kind;
@@ -5341,7 +5472,7 @@ void Apply(uintptr_t mgr) {
                 S.bldInside = cfg.building && g_buildOk && InsideBuilding(raw[0], raw[2], S.footY);
                 S.tBldCheck = now;
                 if (S.bldInside && S.bldLogs++ < 30) Log("wall: entered inside a building - its walls let through until out");
-                S.bodyInside = cfg.wallBody && cfg.wall && g_wallOk && InsideStructure(raw[0], raw[2], S.footY);
+                S.bodyInside = cfg.wallBody && cfg.wall && g_wallOk && InsideWallBody(raw[0], raw[2], S.footY);
                 if (S.bodyInside && S.bodyLogs++ < 20) Log("wall: entered inside a wall body / tower footprint - let through until out");
                 if (S.censusLogs++ < 6) CollisionCensus("enter", raw[0], raw[2], S.footY);
             }
@@ -5572,9 +5703,33 @@ void Apply(uintptr_t mgr) {
                         if (S.bodyLogs++ < 20) Log("wall: out of the wall body / tower footprint at %.2f,%.2f - solid again", S.kinPos[0], S.kinPos[1]);
                     }
                 } else if (bl > 1e-4f) {
+                    RegionNet net;
+                    const bool netOk = cfg.wallBodyNet && g_netOk && RegionNetNow(&net);
+                    int netWhy = 0;
+                    uintptr_t netHit = 0;
+                    auto wallAt = [&](float px, float pz, float up) {
+                        if (!InsideStructure(px, pz, S.footY, up)) return false;
+                        if (!netOk) return true;
+                        uintptr_t hit = 0;
+                        const int v = NetStep(net, prevKin[0], prevKin[1], px, pz, &hit);
+                        if (v != 0) {
+                            netWhy = v, netHit = hit;
+                            return true;
+                        }
+                        ++S.netPass;
+                        if (now - S.tNetLog >= 1.0 && S.netLogs < 60) {
+                            uint32_t idx = 0;
+                            Rd(hit + oRegIdx, idx);
+                            ++S.netLogs;
+                            Log("wall: walkway overhead but the game's ground net lets it through at %.2f,%.2f (region #%u, %u step(s) since last line) - arch / open passage",
+                                px, pz, idx, S.netPass);
+                            S.tNetLog = now, S.netPass = 0;
+                        }
+                        return false;
+                    };
                     auto bodyAt = [&](float px, float pz, float ux, float uz) {
-                        return InsideStructure(px, pz, S.footY) ||
-                               (cfg.wallBodyMargin > 0.f && InsideStructure(px + ux * cfg.wallBodyMargin, pz + uz * cfg.wallBodyMargin, S.footY, 2.f));
+                        return wallAt(px, pz, -1.f) ||
+                               (cfg.wallBodyMargin > 0.f && wallAt(px + ux * cfg.wallBodyMargin, pz + uz * cfg.wallBodyMargin, 2.f));
                     };
                     if (bodyAt(S.kinPos[0], S.kinPos[1], bx / bl, bz / bl)) {
                         const float tryPos[2][2] = {{S.kinPos[0], prevKin[1]}, {prevKin[0], S.kinPos[1]}};
@@ -5603,9 +5758,13 @@ void Apply(uintptr_t mgr) {
                             ns = SurfacesAt(S.kinPos[0], S.kinPos[1], sf);
                             si = ns ? WalkPick(sf, ns, S.footBlk, S.footY, cfg.stepUp, cfg.stepDown, &edge) : -1;
                         }
-                        if (S.bodyLogs++ < 20)
-                            Log("wall: wall body / tower footprint (nav block overhead, ground under it) at %.2f,%.2f going from %.2f,%.2f (foot %.2f) - %s",
-                                S.kinPos[0], S.kinPos[1], prevKin[0], prevKin[1], S.footY, slid ? "slid along one axis" : "held");
+                        if (S.bodyLogs++ < 20) {
+                            uint32_t idx = 0;
+                            if (netHit) Rd(netHit + oRegIdx, idx);
+                            Log("wall: wall body / tower footprint (nav block overhead, ground under it; ground net: %s #%u) at %.2f,%.2f going from %.2f,%.2f "
+                                "(foot %.2f) - %s",
+                                NetWhyText(netOk, netWhy), idx, S.kinPos[0], S.kinPos[1], prevKin[0], prevKin[1], S.footY, slid ? "slid along one axis" : "held");
+                        }
                         if (S.bodyLogs == 1 && S.censusLogs++ < 6) CollisionCensus("first wall body block", prevKin[0], prevKin[1], S.footY);
                     }
                 }
@@ -5723,7 +5882,7 @@ void Apply(uintptr_t mgr) {
                 S.tLastTp = 0;
                 S.tLand = now;
                 S.bldRecheck = true;
-                S.bodyInside = cfg.wallBody && cfg.wall && g_wallOk && InsideStructure(S.kinPos[0], S.kinPos[1], S.footY);
+                S.bodyInside = cfg.wallBody && cfg.wall && g_wallOk && InsideWallBody(S.kinPos[0], S.kinPos[1], S.footY);
                 ++S.lands;
                 S.landV += kick::Impulse(-cfg.landDip * (0.25f + 0.75f * s), 5.f, 0.55f);
                 S.landPunch -= 0.4f + 2.0f * s;
@@ -6552,6 +6711,10 @@ bool VerifyGame() {
             cfg.flyTurnDeg, cfg.flyEyeHeight);
         g_wallOk = PrintsMatch(Prints(kWallPrints904), "wall nav blocks (teleport hint)");
         g_buildOk = PrintsMatch(Prints(kBuildPrints904), "building collision (segment query)");
+        g_netOk = PrintsMatch(Prints(kNetPrints904), "ground region net (arches / passages)") &&
+                  Ptr(g_base + kVtRegionSub904 + 0x10) == g_base + kFnRegionOn904;
+        Log("wall: wall body asks the game's ground region net %s (wall_body_net=%d)",
+            g_netOk ? "ok - arches / open passages under walkways are walkable" : "OFF - every walkway shadow on the ground counts as a wall body", cfg.wallBodyNet);
         g_gameVolOk = PrintsMatch(Prints(kGameVolPrints904), "game volume (audio manager)") &&
                       Ptr(g_base + kVtAudioMgr904 + 0x478) == g_base + kFnAudioSetOn904 &&
                       Ptr(g_base + kVtAudioMgr904 + 0x488) == g_base + kFnAudioSetVol904 &&
