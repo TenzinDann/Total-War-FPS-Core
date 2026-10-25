@@ -204,6 +204,10 @@ const CodePrint kShieldGamePrints904[] = {
     {0x8d3ca0, 0x3, 0x58389c18233078ffull}};
 constexpr uintptr_t kVtSoldier904 = 0x3912950, kFnProjHit904 = 0x306b1a8, kFnProjCanHit904 = 0x305947c, kFnRet0Of1c8_904 = 0x8d3ca0,
                     kFnHitReact904 = 0x307517c, kFnStagger904 = 0x306ee40, kMeleeRet1_904 = 0x3253e70, kMeleeRet2_904 = 0x326565e;
+const CodePrint kArmorPrints904[] = {
+    {0x306ee40, 0x296, 0xa637304bb565fab0ull},
+    {0x306b1a8, 0x8e4, 0x735cc3a5886923b0ull},
+    {0x307517c, 0x68, 0xc7cbd99e65c01a48ull}};
 const CodePrint kAbilityPrints904[] = {
     {0x2f008d0, 0x27b, 0x594cd05ca9272710ull},
     {0x2ea94e8, 0xa0, 0x744ebda3b94ebcedull},
@@ -461,10 +465,11 @@ bool g_shotOk = false;
 bool g_meleeHitOk = false;
 bool g_noKnockOk = false;
 bool g_shieldGameOk = false;
+bool g_armorOk = false;
 bool g_abilityOk = false;
 bool g_charOk = false;
-bool g_routOk = false;
 bool g_arrowOk = false;
+bool g_routOk = false;
 constexpr uintptr_t oUiHudRoot = 0x358, oUicChildCount = 0x1cc, oUicChildren = 0x1d0, oUicId = 0x2a0, oUicVisible = 0x353;
 constexpr int kMaxHideUi = 12;
 constexpr uintptr_t oUicPos = 0x2c0, oUicLayout = 0x2f0, oLayoutW = 0x11c, oLayoutH = 0x120;
@@ -540,6 +545,7 @@ struct Config {
     bool revealEnemies = true;
     bool noMelee = true;
     bool noKnock = true;
+    bool superArmor = true;
     bool heroesOnly = true;
     bool fly = true, flyTakeoff = true;
     float flyAhead = 60.f, flyInterval = 2.0f, flyTurnDeg = 20.f, flyEyeHeight = 1.2f;
@@ -839,6 +845,7 @@ void LoadConfig() {
     cfg.revealEnemies = GetPrivateProfileIntW(L"hero", L"reveal_enemies", 1, ini) != 0;
     cfg.noMelee = GetPrivateProfileIntW(L"hero", L"no_melee", 1, ini) != 0;
     cfg.noKnock = GetPrivateProfileIntW(L"hero", L"no_knockdown", 1, ini) != 0;
+    cfg.superArmor = GetPrivateProfileIntW(L"hero", L"super_armor", 1, ini) != 0;
     cfg.heroesOnly = GetPrivateProfileIntW(L"hero", L"heroes_only", 1, ini) != 0;
     cfg.fly = GetPrivateProfileIntW(L"move", L"fly", 1, ini) != 0;
     cfg.flyTakeoff = GetPrivateProfileIntW(L"move", L"fly_takeoff", 1, ini) != 0;
@@ -4052,6 +4059,9 @@ struct NoKnock {
     uintptr_t copyOf = 0;
     bool copyKnock = false, copyShield = false;
     bool knock = false, shield = false;
+    bool copyArmor = false, armor = false;
+    volatile LONG armorSkipped = 0;
+    LONG armorLogged = 0;
     LONG gen = 0;
     size_t slots = 0;
     volatile LONG blocked[3] = {0, 0, 0};
@@ -4199,6 +4209,10 @@ uint64_t HeroHitReact(uintptr_t self, uintptr_t attacker, uintptr_t delta) {
 }
 using FnHeroStagger = uint64_t (*)(uintptr_t, uintptr_t);
 uint64_t HeroStagger(uintptr_t self, uintptr_t info) {
+    if (g_nk.armor && cfg.superArmor && S.active) {
+        InterlockedIncrement(&g_nk.armorSkipped);
+        return 0;
+    }
     float f = ShieldFrac(self);
     if (f > 0.f && info && shieldhit::EatStagger(f, cfg.shieldStagger)) {
         float v[3] = {};
@@ -4263,8 +4277,10 @@ void NoKnockRemove(const char* why) {
     bool ours = g_nk.copy && Ptr(g_nk.ent) == reinterpret_cast<uintptr_t>(g_nk.copy + 1);
     if (ours) Wr(g_nk.ent, g_nk.origVt);
     g_sb.ent = 0;
-    Log("hero: no-knockdown%s off for %p (%s)%s - blocked knock back %ld, knock down %ld, knock flying %ld", g_nk.shield ? " + shield-game" : "",
-        (void*)g_nk.ent, why, ours ? "" : " (vtable was not ours any more - left alone)", g_nk.blocked[0], g_nk.blocked[1], g_nk.blocked[2]);
+    Log("hero: no-knockdown%s%s off for %p (%s)%s - blocked knock back %ld, knock down %ld, knock flying %ld, hit reactions skipped %ld",
+        g_nk.shield ? " + shield-game" : "", g_nk.armor ? " + super armor" : "", (void*)g_nk.ent, why, ours ? "" : " (vtable was not ours any more - left alone)",
+        g_nk.blocked[0], g_nk.blocked[1], g_nk.blocked[2], g_nk.armorSkipped);
+    g_nk.armor = false;
     if (g_nk.shield)
         Log("shield-game: so far missile 100%% %ld / partial %ld, melee 100%% %ld / partial %ld / miss %ld, side %ld, stagger eaten %ld, hp refunds %ld (+%ld hp)",
             g_sb.missileFull, g_sb.missilePart, g_sb.meleeFull, g_sb.meleePart, g_sb.meleeMiss, g_sb.side, g_sb.stagger, g_sb.refunds, g_sb.refundHp);
@@ -4283,8 +4299,9 @@ bool NoKnockInstall(uintptr_t ent) {
     if (cfg.shieldGame && g_shieldGameOk && !shield && g_nk.logs++ < 8)
         Log("shield-game: entity %p vtable +0x%llx is not the soldier class +0x%llx (or its slots differ) - shield blocks only the debug key", (void*)ent,
             (unsigned long long)(vt - g_base), (unsigned long long)kVtSoldier904);
-    if (!knock && !shield) return false;
-    if (!g_nk.copy || g_nk.copyOf != vt || g_nk.copyKnock != knock || g_nk.copyShield != shield) {
+    bool armor = cfg.superArmor && g_armorOk && Ptr(vt + 0x558) == g_base + kFnStagger904;
+    if (!knock && !shield && !armor) return false;
+    if (!g_nk.copy || g_nk.copyOf != vt || g_nk.copyKnock != knock || g_nk.copyShield != shield || g_nk.copyArmor != armor) {
         size_t slots = 0;
         while (slots < 4096) {
             uintptr_t f = Ptr(vt + 8 * slots);
@@ -4315,7 +4332,12 @@ bool NoKnockInstall(uintptr_t ent) {
             c[1 + 0x3a8 / 8] = reinterpret_cast<uintptr_t>(&HeroHitReact);
             c[1 + 0x558 / 8] = reinterpret_cast<uintptr_t>(&HeroStagger);
         }
+        if (armor && !shield) {
+            g_sb.orig558 = c[1 + 0x558 / 8];
+            c[1 + 0x558 / 8] = reinterpret_cast<uintptr_t>(&HeroStagger);
+        }
         g_nk.copy = c;
+        g_nk.copyArmor = armor;
         g_nk.copyOf = vt;
         g_nk.copyKnock = knock;
         g_nk.copyShield = shield;
@@ -4325,6 +4347,8 @@ bool NoKnockInstall(uintptr_t ent) {
     g_nk.ent = ent;
     g_nk.knock = knock;
     g_nk.shield = shield;
+    g_nk.armor = armor;
+    g_nk.armorSkipped = g_nk.armorLogged = 0;
     g_nk.gen = g_cfgGen;
     if (shield) g_sb.ent = ent;
     bool ok = Wr(ent, reinterpret_cast<uintptr_t>(g_nk.copy + 1));
@@ -4336,7 +4360,7 @@ bool NoKnockInstall(uintptr_t ent) {
     return ok;
 }
 void NoKnockStep() {
-    bool want = S.active && S.entity && ((cfg.noKnock && g_noKnockOk) || (cfg.shieldGame && g_shieldGameOk));
+    bool want = S.active && S.entity && ((cfg.noKnock && g_noKnockOk) || (cfg.shieldGame && g_shieldGameOk) || (cfg.superArmor && g_armorOk));
     if (g_nk.ent && (!want || g_nk.ent != S.entity || g_nk.gen != g_cfgGen))
         NoKnockRemove(!want ? "first person off / switched off" : g_nk.ent != S.entity ? "hero changed" : "ini reloaded");
     if (!want) return;
@@ -4347,6 +4371,10 @@ void NoKnockStep() {
         g_sb.ent = 0;
     }
     if (g_nk.ent != S.entity) NoKnockInstall(S.entity);
+    if (g_nk.armorSkipped != g_nk.armorLogged && g_nk.logs++ < 60) {
+        g_nk.armorLogged = g_nk.armorSkipped;
+        Log("hero: super armor - hit reaction (state 18) skipped, so far %ld this time", g_nk.armorLogged);
+    }
     LONG total = g_nk.blocked[0] + g_nk.blocked[1] + g_nk.blocked[2];
     if (total != g_nk.logged && g_nk.logs++ < 60) {
         g_nk.logged = total;
@@ -4907,8 +4935,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4979,7 +5005,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -5062,26 +5087,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -6706,6 +6722,8 @@ bool VerifyGame() {
                          Ptr(g_base + kVtSoldier904 + 0x3a8) == g_base + kFnHitReact904 && Ptr(g_base + kVtSoldier904 + 0x558) == g_base + kFnStagger904;
         if (g_shieldGameOk) g_hero_1c8_ret1 = g_base + kMeleeRet1_904, g_hero_1c8_ret2 = g_base + kMeleeRet2_904;
         Log("shield-game: shield blocks real hits (missile +0x310 / melee +0x1c8 / stagger +0x558 / hp refund) %s", g_shieldGameOk ? "ok" : "OFF");
+        g_armorOk = PrintsMatch(Prints(kArmorPrints904), "super armor (hit reaction state 18)") && Ptr(g_base + kVtSoldier904 + 0x558) == g_base + kFnStagger904;
+        Log("hero: super armor (no hit-reaction stagger in first person) %s", g_armorOk ? "ok" : "OFF - hits still stagger the hero");
         g_abilityOk = m && PrintsMatch(Prints(kAbilityPrints904), "launcher ability cast") &&
                       Ptr(g_base + kVtAbilityCmd904) == g_base + kFnAbilityCmdWrite904;
         Log("launcher: ability cast (special ability on ground) %s", g_abilityOk ? "ok" : "OFF");
