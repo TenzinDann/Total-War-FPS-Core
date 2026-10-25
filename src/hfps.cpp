@@ -219,12 +219,6 @@ const CodePrint kFlyPrints904[] = {
     {0x1e3f410, 0x6e, 0x231ab3a1d31f4b75ull},
     {0x2ed1160, 0x62, 0x4c0cf35d628b1a09ull},
     {0x2f4ae00, 0xe5, 0x9df247d2bf9b1367ull}};
-const CodePrint kRoutPrints904[] = {
-    {0x2eeb33c, 0x52, 0xe308885f1334b146ull},
-    {0x2eeb570, 0x4b, 0x598a680916059c32ull},
-    {0x30348f0, 0x2f, 0x0fe36b149bafd51full},
-    {0x303482c, 0x53, 0x1dd38af0a1bce2e1ull}};
-constexpr uintptr_t kFnUnitRouting904 = 0x30348f0, oUnitMorale = 0x3b30, oMoraleState = 0x40;
 constexpr uintptr_t oUiCanFly = 0x70f, oUiAlwaysFly = 0x710, oUiCanToggleFly = 0x711, oUiIsFlying = 0x712;
 constexpr uintptr_t kFnFlyCmdCtor904 = 0x2ea9358, kFnFlyCmdIssue904 = 0x1e3f410;
 bool g_flyOk = false;
@@ -447,7 +441,6 @@ bool g_noKnockOk = false;
 bool g_shieldGameOk = false;
 bool g_abilityOk = false;
 bool g_charOk = false;
-bool g_routOk = false;
 constexpr uintptr_t oUiHudRoot = 0x358, oUicChildCount = 0x1cc, oUicChildren = 0x1d0, oUicId = 0x2a0, oUicVisible = 0x353;
 constexpr int kMaxHideUi = 12;
 constexpr uintptr_t oUicPos = 0x2c0, oUicLayout = 0x2f0, oLayoutW = 0x11c, oLayoutH = 0x120;
@@ -579,8 +572,7 @@ enum RefuseCode : LONG {
     kRefuseNotOwner = 3,
     kRefusePaused = 4,
     kRefuseArtillery = 5,
-    kRefuseOther = 6,
-    kRefuseRouting = 7
+    kRefuseOther = 6
 };
 volatile LONG g_status = kStatusStarting;
 volatile LONG g_refuseSeq = 0, g_refuseCode = 0;
@@ -648,12 +640,17 @@ float IniF(const wchar_t* sec, const wchar_t* key, float def, const wchar_t* ini
     return (end != buf && std::isfinite(v)) ? static_cast<float>(v) : def;
 }
 void LoadMeleeCats(const wchar_t* ini);
-extern float g_meleeTargetRadiusMax;
 LONG g_cfgGen = 0;
+const wchar_t* MainIniName() {
+#ifdef HFPS_PACK_ASSETS
+    return packx::MainIniName();
+#else
+    return L"tenzin_fps.ini";
+#endif
+}
 void LoadConfig() {
     wchar_t ini[MAX_PATH];
-    wcscpy(ini, g_dir);
-    wcscat(ini, L"\\tenzin_fps.ini");
+    swprintf(ini, MAX_PATH, L"%ls\\%ls", g_dir, MainIniName());
     InterlockedIncrement(&g_cfgGen);
     cfg.enabled = GetPrivateProfileIntW(L"general", L"enabled", 1, ini) != 0;
     UINT key = GetPrivateProfileIntW(L"general", L"toggle_key", VK_F6, ini);
@@ -857,10 +854,6 @@ void LoadConfig() {
     cfg.meleeHeavyReach = IniF(L"melee", L"heavy_reach", cfg.meleeHeavyReach, ini);
     if (!(cfg.meleeHeavyReach >= 0.5f && cfg.meleeHeavyReach <= 3.f)) cfg.meleeHeavyReach = 1.3f;
     LoadMeleeCats(ini);
-    g_meleeTargetRadiusMax = IniF(L"melee", L"target_radius_max", 4.f, ini);
-    if (!(g_meleeTargetRadiusMax >= 0.f && g_meleeTargetRadiusMax <= 12.f)) g_meleeTargetRadiusMax = 4.f;
-    Log("melee: riders are hit through their mounts; big targets measured to their edge (radius counted up to %.1f m, 0 = off)",
-        g_meleeTargetRadiusMax);
     cfg.hideHud = GetPrivateProfileIntW(L"ui", L"hide_hud", 1, ini) != 0;
     cfg.hideCursor = GetPrivateProfileIntW(L"ui", L"hide_cursor", 1, ini) != 0;
     cfg.hidePaths = GetPrivateProfileIntW(L"ui", L"hide_paths", 1, ini) != 0;
@@ -1120,6 +1113,7 @@ struct State {
     double tLastTp = 0;
     unsigned tpSent = 0, tpFailed = 0, tpLogs = 0, leashHits = 0;
     int lastMode = -1;
+    float eyeHeight = 1.75f;
     bool flyer = false;
     TpRec tpHist[8] = {};
     unsigned tpHead = 0;
@@ -1402,13 +1396,35 @@ void Exit(uintptr_t mgr, const char* why, bool release = true) {
     Log("FPS exit reason=%s restoredPrev=%d active=%p prev=%p", why, restored, (void*)active,
         (void*)S.prevActive);
 }
-bool HeroRouting(uintptr_t unit, int* state = nullptr) {
-    int32_t st = -1;
-    if (state) *state = -1;
-    if (!g_routOk || !Plausible(unit) || !Rd(unit + oUnitMorale + oMoraleState, st)) return false;
-    if (state) *state = st;
-    using FnRouting = char (*)(uintptr_t morale);
-    return reinterpret_cast<FnRouting>(g_base + kFnUnitRouting904)(unit + oUnitMorale) != 0;
+struct UnitKeyRec {
+    uintptr_t unit;
+    char key[48];
+};
+UnitKeyRec g_unitKeyTab[64];
+int g_unitKeyNext = 0;
+SRWLOCK g_unitKeyLock = SRWLOCK_INIT;
+void RememberUnitKey(uintptr_t unit, const char* key) {
+    AcquireSRWLockExclusive(&g_unitKeyLock);
+    int slot = -1;
+    for (int i = 0; i < 64 && slot < 0; ++i)
+        if (g_unitKeyTab[i].unit == unit) slot = i;
+    if (slot < 0) slot = g_unitKeyNext, g_unitKeyNext = (g_unitKeyNext + 1) % 64;
+    g_unitKeyTab[slot].unit = unit;
+    snprintf(g_unitKeyTab[slot].key, sizeof g_unitKeyTab[slot].key, "%s", key);
+    ReleaseSRWLockExclusive(&g_unitKeyLock);
+}
+void ForgetUnitKeys() {
+    AcquireSRWLockExclusive(&g_unitKeyLock);
+    memset(g_unitKeyTab, 0, sizeof g_unitKeyTab);
+    g_unitKeyNext = 0;
+    ReleaseSRWLockExclusive(&g_unitKeyLock);
+}
+void UnitKeyOf(uintptr_t unit, char* out, size_t n) {
+    out[0] = 0;
+    AcquireSRWLockShared(&g_unitKeyLock);
+    for (int i = 0; i < 64; ++i)
+        if (unit && g_unitKeyTab[i].unit == unit) snprintf(out, n, "%s", g_unitKeyTab[i].key);
+    ReleaseSRWLockShared(&g_unitKeyLock);
 }
 void Enter(uintptr_t mgr) {
     uintptr_t battle = Ptr(mgr + oMgrBattle);
@@ -1460,11 +1476,12 @@ void Enter(uintptr_t mgr) {
         }
         Log("enter: lord / hero check passed (IsCharacter key len %d, IsGeneral %d)", keyLen, general ? 1 : 0);
     }
-    int moraleState = -1;
-    if (HeroRouting(unit, &moraleState)) {
-        Refuse(kRefuseRouting);
-        Log("enter refused: unit %p is routing (morale state %d; 6 routing / 7 shattered) - first person is back once it rallies", (void*)unit,
-            moraleState);
+    char heroKey[48];
+    UnitKeyOf(unit, heroKey, sizeof heroKey);
+    if (!vmgame::UnitAllowed(heroKey)) {
+        Refuse(kRefuseNotOwner);
+        Log("enter refused: unit %p (unit key '%s') is not a weapon pack's hero - without hero_fps.pack only those heroes may enter (allowed: %s)",
+            (void*)unit, heroKey, vmgame::UnitKeys());
         return;
     }
     bool flyer = false, flyAlways = false;
@@ -1578,6 +1595,9 @@ void Enter(uintptr_t mgr) {
     SetupMouse();
     CastReset();
     S.active = true;
+    vmgame::SetHeroKey(heroKey);
+    S.eyeHeight = vmgame::EyeHeightFor(heroKey, cfg.eyeHeight);
+    if (S.eyeHeight != cfg.eyeHeight) Log("enter: eye height %.3f m for '%s' (weapon pack [character]; config %.2f)", S.eyeHeight, heroKey, cfg.eyeHeight);
     vmgame::SetFirstPerson(true);
     if (S.exitStage == 2) {
         Log("ghost: pending release cancelled - first person entered again");
@@ -2261,21 +2281,6 @@ uint64_t MeleeRosterSig(const uintptr_t* ents, unsigned n) {
 }
 constexpr unsigned kMeleeExtSlots = 2048;
 constexpr float kMeleeStepSpread = 5.f;
-float g_meleeTargetRadiusMax = 4.f;
-constexpr float kMeleeBodyRef = 0.6f;
-constexpr float kMeleeMountSlack = 1.f;
-float MeleeBigSlack() { return (g_meleeTargetRadiusMax > kMeleeBodyRef ? g_meleeTargetRadiusMax - kMeleeBodyRef : 0.f) + kMeleeMountSlack; }
-float MeleeTargetExtra(uintptr_t e) {
-    if (!(g_meleeTargetRadiusMax > kMeleeBodyRef)) return 0.f;
-    float r = 0.f;
-    if (!Rd(e + 0xa0, r) || !(r > kMeleeBodyRef && r < 50.f)) return 0.f;
-    return (r < g_meleeTargetRadiusMax ? r : g_meleeTargetRadiusMax) - kMeleeBodyRef;
-}
-float MeleeWideCos(float halfDeg, float extra, float d) {
-    float a = halfDeg + (extra >= d ? 90.f : std::asin(extra / d) * 180.f / kPi);
-    return a >= 180.f ? -2.f : std::cos(a * kPi / 180.f);
-}
-int g_meleeBigLogs = 0;
 MeleeUnitExt g_mext[kMeleeExtSlots];
 uintptr_t g_mextWorld = 0;
 struct MeleeSoldier {
@@ -2408,7 +2413,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         const int cat = rq.cat >= 0 && rq.cat < vmgame::kMeleeCats ? rq.cat : vmgame::kMeleeCatSword;
         const MeleeKindCfg& arc = g_meleeCat[cat].k[rq.kind];
         org[no][0] = rq.ox, org[no][1] = rq.oz;
-        org[no][2] = arc.reach + (arc.splashR > 0.f && arc.splashMax > 0 ? arc.splashR : 0.f) + MeleeBigSlack();
+        org[no][2] = arc.reach + (arc.splashR > 0.f && arc.splashMax > 0 ? arc.splashR : 0.f);
         ++no;
     }
     unsigned unitsSkipped = 0, unitsAll = 0;
@@ -2438,50 +2443,21 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         static Cand cand[96];
         int nc = 0;
         unsigned scanned = 0;
-        const float bigSlack = MeleeBigSlack();
-        int nMount = 0, nBig = 0;
         for (unsigned g = 0; g < ng; ++g) {
-            const uintptr_t rider = g_mgather[g].e;
+            const uintptr_t e = g_mgather[g].e;
             const float* q = g_mgather[g].q;
             ++scanned;
             float vx = q[0] - rq.ox, vz = q[2] - rq.oz, d = std::sqrt(vx * vx + vz * vz);
-            if (d > scanR + bigSlack || std::fabs(q[1] - (rq.oy - 1.7f)) > 3.f) continue;
-            uintptr_t e = rider;
-            float tx = q[0], tz = q[2];
-            const uintptr_t mount = Ptr(rider + 0x2e0);
-            if (mount) {
-                float mq[3];
-                if (!Plausible(mount) || Ptr(rider + 0x80) == heroSide || !EntPos(mount, mq)) continue;
-                bool dup = false;
-                for (int c = 0; c < nc && !dup; ++c) dup = cand[c].e == mount;
-                if (dup) continue;
-                e = mount, tx = mq[0], tz = mq[2];
-                vx = tx - rq.ox, vz = tz - rq.oz, d = std::sqrt(vx * vx + vz * vz);
-            }
-            const float extra = MeleeTargetExtra(e), de = d - extra;
-            if (de > scanR) continue;
-            bool inArc = de <= reach && (d <= 0.6f || (vx * rq.dx + vz * rq.dz) / d >= (extra > 0.f ? MeleeWideCos(arc.halfDeg, extra, d) : cosHalf));
+            if (d > scanR || std::fabs(q[1] - (rq.oy - 1.7f)) > 3.f) continue;
+            bool inArc = d <= reach && (d <= 0.6f || (vx * rq.dx + vz * rq.dz) / d >= cosHalf);
             if (!inArc && !splash) continue;
             uint32_t hp = 0, l6c = 0;
             uint8_t f108 = 0, f68 = 0;
             if (!Rd(e + 0xb1c, hp) || !hp || !Rd(e + 0x108, f108) || !(f108 & 0x10) || !Rd(e + 0x68, f68) || !(f68 & 1) ||
-                !Rd(e + 0x6c, l6c) || Ptr(e + 0x80) == heroSide || !(l6c & heroL6c & 2) ||
-                !reinterpret_cast<FnCanHit>(g_base + kFnCanBeHit904)(e)) {
-                if ((mount || extra > 0.f) && inArc && Ptr(e + 0x80) != heroSide && g_meleeBigLogs < 24) {
-                    ++g_meleeBigLogs;
-                    Log("melee-engine: %s %p (radius +%.2f m, %.1f m to its edge) skipped: hp %u f108 0x%x f68 0x%x l6c 0x%x (hero 0x%x)",
-                        mount ? "mount" : "big target", (void*)e, extra, de, hp, f108, f68, l6c, heroL6c);
-                }
+                !Rd(e + 0x6c, l6c) || Ptr(e + 0x80) == heroSide || !(l6c & heroL6c & 2))
                 continue;
-            }
-            if (mount) ++nMount;
-            if (extra > 0.f) ++nBig;
-            if ((mount || extra > 0.f) && inArc && g_meleeBigLogs < 24) {
-                ++g_meleeBigLogs;
-                Log("melee-engine: %s %p in reach (radius +%.2f m, %.1f m from the camera, %.1f m to its edge)", mount ? "mount" : "big target",
-                    (void*)e, extra, d, de);
-            }
-            Cand cd = {e, de, tx, tz, inArc, false};
+            if (!reinterpret_cast<FnCanHit>(g_base + kFnCanBeHit904)(e)) continue;
+            Cand cd = {e, d, q[0], q[2], inArc, false};
             if (nc < 96) {
                 cand[nc++] = cd;
             } else {
@@ -2552,9 +2528,9 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         vmgame::MeleeHitFeedback(hits + sHits);
         if (g_mq.logs++ < 200)
             Log("melee-engine: cat %d kind %d %s (reach %.2f m, arc %.0f, splash %.1f m x%d) (%.0f ms after queue) scanned %u (units %u, %u skipped far, %.2f ms), "
-                "in arc %d (candidates: %d mounts, %d big), hit %d, killed %d, damage [%s] | splash hit %d, killed %d [%s] (forced hits so far %ld, fallback damage so far %ld)",
+                "in arc %d, hit %d, killed %d, damage [%s] | splash hit %d, killed %d [%s] (forced hits so far %ld, fallback damage so far %ld)",
                 cat, rq.kind, heavy ? "heavy" : "light", reach, arc.halfDeg * 2.f, splashR, splashMax, (Now() - rq.t) * 1000.0, scanned, unitsAll,
-                unitsSkipped, gatherMs, inArc, nMount, nBig, hits, kills, dl, sHits, sKills, sl, g_mq.forced, g_mq.fallback);
+                unitsSkipped, gatherMs, inArc, hits, kills, dl, sHits, sKills, sl, g_mq.forced, g_mq.fallback);
     }
 }
 #include "hero_fire_fx.inc"
@@ -5143,16 +5119,6 @@ void Apply(uintptr_t mgr) {
             return;
         }
     }
-    static double s_tRoutCheck = -1.0;
-    if (g_routOk && (now - s_tRoutCheck >= 0.25 || now < s_tRoutCheck)) {
-        s_tRoutCheck = now;
-        int st = -1;
-        if (HeroRouting(S.unit, &st)) {
-            Log("hero: routing (morale state %d) - leaving first person, the hero is released to flee", st);
-            Exit(mgr, "hero-routing");
-            return;
-        }
-    }
     if (!S.havePos) {
         memcpy(S.outPos, raw, sizeof raw);
         memcpy(S.from, raw, sizeof raw);
@@ -5898,7 +5864,7 @@ void Apply(uintptr_t mgr) {
     const float* vRight = kv.right;
     const float* vUp = kv.up;
     vmgame::PublishView(S.yaw, S.pitch, (S.flyer || (mode == 0 && S.air)) ? 0.f : S.camSpeed);
-    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : cfg.eyeHeight),
+    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : S.eyeHeight),
                     camPos[2] + cy * cfg.eyeForward};
     float target[3] = {eye[0] + vFwd[0] * 10.f, eye[1] + vFwd[1] * 10.f, eye[2] + vFwd[2] * 10.f};
     float up[3] = {0.f, 1.f, 0.f};
@@ -6482,8 +6448,6 @@ bool VerifyGame() {
         g_charOk = PrintsMatch(Prints(kCharPrints904), "lord / hero check (IsCharacter)");
         Log("hero: lords / heroes only check %s (heroes_only=%d)", g_charOk ? "ok" : "OFF - nobody can enter while heroes_only=1",
             cfg.heroesOnly);
-        g_routOk = PrintsMatch(Prints(kRoutPrints904), "hero routing check (is_routing)");
-        Log("hero: leave first person when the hero routs %s", g_routOk ? "ok" : "OFF - a routing hero stays controllable");
         g_flyOk = PrintsMatch(Prints(kFlyPrints904), "flying heroes (CanFly / desired flying state)");
         Log("fly: flying heroes %s (fly=%d takeoff=%d ahead=%.0f interval=%.2f turn=%.0f eye=%.2f)",
             g_flyOk ? "ok" : "OFF - flying heroes use the normal movement", cfg.fly, cfg.flyTakeoff, cfg.flyAhead, cfg.flyInterval,
@@ -6562,7 +6526,17 @@ DWORD WINAPI InitThread(LPVOID) {
             return 0;
         }
         Log("loader: version.dll = %ls (%s), module dir %ls", vp[0] ? vp : L"(none)",
-            inDir ? "in the game folder, another tool's (no hero_fps / tenzin_fps proxy signature) - carrying on" : "not ours", g_dir);
+            inDir ? "in the game folder, another tool's (no tenzin_fps / tenzin_fps proxy signature) - carrying on" : "not ours", g_dir);
+    }
+    {
+        wchar_t name[64];
+        swprintf(name, 64, L"Local\\tenzin_fps_native_%lu", GetCurrentProcessId());
+        HANDLE mx = CreateMutexW(nullptr, FALSE, name);
+        if (mx && GetLastError() == ERROR_ALREADY_EXISTS) {
+            Log("loader: another tenzin_fps_native is already running in this process - this copy stays idle");
+            g_status = kStatusOtherCopy;
+            return 0;
+        }
     }
 #ifdef HFPS_PACK_ASSETS
     if (!packx::ExtractFromPack(g_dir, &Log)) {
@@ -6570,6 +6544,7 @@ DWORD WINAPI InitThread(LPVOID) {
         g_status = kStatusAssets;
         return 0;
     }
+    vmgame::SetPayloads(packx::MainIniName(), packx::FullMod(), packx::AddonIds());
 #endif
 #else
     Log("==== tenzin_fps native M1 + viewmodel test loaded (version.dll proxy) pid=%lu", GetCurrentProcessId());
@@ -6578,7 +6553,7 @@ DWORD WINAPI InitThread(LPVOID) {
     if (!VerifyGame()) return 0;
     LoadConfig();
     if (!cfg.enabled) {
-        Log("disabled by tenzin_fps.ini");
+        Log("disabled by %ls", MainIniName());
         g_status = kStatusDisabled;
         return 0;
     }
@@ -6940,6 +6915,7 @@ struct Fns {
     float (*tonumber)(void*, int);
     int (*type)(void*, int);
     size_t (*objlen)(void*, int);
+    const char* (*tolstring)(void*, int, size_t*);
 } f;
 int g_state = -1;
 char g_missing[48] = "";
@@ -6961,12 +6937,44 @@ bool Resolve() {
         }
         memcpy(e.slot, &p, sizeof p);
     }
+    if (FARPROC p = exe ? GetProcAddress(exe, "lua_tolstring") : nullptr) memcpy(&f.tolstring, &p, sizeof p);
     g_state = 1;
     return true;
 }
 int Api(void* L) {
     f.pushnumber(L, 5.f);
     return 1;
+}
+int UnitKeysFn(void* L) {
+    f.pushstring(L, vmgame::UnitKeys());
+    return 1;
+}
+int AccessAll(void* L) {
+    f.pushboolean(L, vmgame::UnitAllowed("") ? 1 : 0);
+    return 1;
+}
+int SetUnit(void* L) {
+    bool ok = false;
+    if (f.tolstring && f.type(L, 1) == kTUserdata && f.objlen(L, 1) >= sizeof(uintptr_t)) {
+        const void* blk = f.touserdata(L, 1);
+        uintptr_t wrap = 0;
+        if (blk) memcpy(&wrap, blk, sizeof wrap);
+        const uintptr_t p = wrap ? Ptr(wrap + 8) : 0;
+        size_t n = 0;
+        const char* key = f.tolstring(L, 2, &n);
+        if (p && key && n > 0 && n < 48) {
+            RememberUnitKey(p, key);
+            ok = true;
+        }
+    }
+    f.pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
+int BattleStarted(void*) {
+    ForgetUnitKeys();
+    vmgame::NoteNewBattle();
+    Log("lua-api: battle started (unit keys cleared)");
+    return 0;
 }
 int Active(void* L) {
     f.pushboolean(L, S.active && S.unit ? 1 : 0);
@@ -7144,17 +7152,18 @@ int PushTable(void* L) {
         Log("lua-api: %s not exported by the game - no interface table (luaopen #%ld)", g_missing, n);
         return 0;
     }
-    f.createtable(L, 0, 11);
+    f.createtable(L, 0, 22);
     const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_enabled", HudEnabled},
-                                                        {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"cast_event", CastEvent},
-                                                        {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson},
-                                                        {"tac_stamina", TacStaminaApi}, {"refill_ammo", RefillAmmoApi}, {"prompt", Prompt}, {"refused", Refused}, {"status", Status},
-                                                        {"cast_marker", CastMarkerApi}, {"cast_target", CastTargetApi}, {"cast_point", CastPointApi}};
+                                                        {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"unit_keys", UnitKeysFn}, {"access_all", AccessAll},
+                                                        {"set_unit", SetUnit}, {"battle_started", BattleStarted}, {"cast_event", CastEvent}, {"set_armed", SetArmed},
+                                                        {"view", View}, {"exit_first_person", ExitFirstPerson}, {"tac_stamina", TacStaminaApi}, {"refill_ammo", RefillAmmoApi},
+                                                        {"prompt", Prompt}, {"refused", Refused}, {"status", Status}, {"cast_marker", CastMarkerApi},
+                                                        {"cast_target", CastTargetApi}, {"cast_point", CastPointApi}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);
     }
-    Log("lua-api: interface table v4 returned (luaopen #%ld, lua state %p)", n, L);
+    Log("lua-api: interface table v4 returned (luaopen #%ld, lua state %p%s)", n, L, f.tolstring ? "" : ", lua_tolstring missing - set_unit off");
     return 1;
 }
 }
