@@ -228,6 +228,12 @@ const CodePrint kFlyPrints904[] = {
     {0x1e3f410, 0x6e, 0x231ab3a1d31f4b75ull},
     {0x2ed1160, 0x62, 0x4c0cf35d628b1a09ull},
     {0x2f4ae00, 0xe5, 0x9df247d2bf9b1367ull}};
+const CodePrint kRoutPrints904[] = {
+    {0x2eeb33c, 0x52, 0xe308885f1334b146ull},
+    {0x2eeb570, 0x4b, 0x598a680916059c32ull},
+    {0x30348f0, 0x2f, 0x0fe36b149bafd51full},
+    {0x303482c, 0x53, 0x1dd38af0a1bce2e1ull}};
+constexpr uintptr_t kFnUnitRouting904 = 0x30348f0, oUnitMorale = 0x3b30, oMoraleState = 0x40;
 constexpr uintptr_t oUiCanFly = 0x70f, oUiAlwaysFly = 0x710, oUiCanToggleFly = 0x711, oUiIsFlying = 0x712;
 constexpr uintptr_t kFnFlyCmdCtor904 = 0x2ea9358, kFnFlyCmdIssue904 = 0x1e3f410;
 bool g_flyOk = false;
@@ -450,6 +456,7 @@ bool g_noKnockOk = false;
 bool g_shieldGameOk = false;
 bool g_abilityOk = false;
 bool g_charOk = false;
+bool g_routOk = false;
 bool g_arrowOk = false;
 constexpr uintptr_t oUiHudRoot = 0x358, oUicChildCount = 0x1cc, oUicChildren = 0x1d0, oUicId = 0x2a0, oUicVisible = 0x353;
 constexpr int kMaxHideUi = 12;
@@ -583,7 +590,8 @@ enum RefuseCode : LONG {
     kRefuseNotOwner = 3,
     kRefusePaused = 4,
     kRefuseArtillery = 5,
-    kRefuseOther = 6
+    kRefuseOther = 6,
+    kRefuseRouting = 7
 };
 volatile LONG g_status = kStatusStarting;
 volatile LONG g_refuseSeq = 0, g_refuseCode = 0;
@@ -651,6 +659,7 @@ float IniF(const wchar_t* sec, const wchar_t* key, float def, const wchar_t* ini
     return (end != buf && std::isfinite(v)) ? static_cast<float>(v) : def;
 }
 void LoadMeleeCats(const wchar_t* ini);
+extern float g_meleeTargetRadiusMax;
 LONG g_cfgGen = 0;
 void LoadConfig() {
     wchar_t ini[MAX_PATH];
@@ -860,6 +869,10 @@ void LoadConfig() {
     cfg.meleeHeavyReach = IniF(L"melee", L"heavy_reach", cfg.meleeHeavyReach, ini);
     if (!(cfg.meleeHeavyReach >= 0.5f && cfg.meleeHeavyReach <= 3.f)) cfg.meleeHeavyReach = 1.3f;
     LoadMeleeCats(ini);
+    g_meleeTargetRadiusMax = IniF(L"melee", L"target_radius_max", 4.f, ini);
+    if (!(g_meleeTargetRadiusMax >= 0.f && g_meleeTargetRadiusMax <= 12.f)) g_meleeTargetRadiusMax = 4.f;
+    Log("melee: riders are hit through their mounts; big targets measured to their edge (radius counted up to %.1f m, 0 = off)",
+        g_meleeTargetRadiusMax);
     cfg.hideHud = GetPrivateProfileIntW(L"ui", L"hide_hud", 1, ini) != 0;
     cfg.hideCursor = GetPrivateProfileIntW(L"ui", L"hide_cursor", 1, ini) != 0;
     cfg.hidePaths = GetPrivateProfileIntW(L"ui", L"hide_paths", 1, ini) != 0;
@@ -1401,6 +1414,14 @@ void Exit(uintptr_t mgr, const char* why, bool release = true) {
     Log("FPS exit reason=%s restoredPrev=%d active=%p prev=%p", why, restored, (void*)active,
         (void*)S.prevActive);
 }
+bool HeroRouting(uintptr_t unit, int* state = nullptr) {
+    int32_t st = -1;
+    if (state) *state = -1;
+    if (!g_routOk || !Plausible(unit) || !Rd(unit + oUnitMorale + oMoraleState, st)) return false;
+    if (state) *state = st;
+    using FnRouting = char (*)(uintptr_t morale);
+    return reinterpret_cast<FnRouting>(g_base + kFnUnitRouting904)(unit + oUnitMorale) != 0;
+}
 void Enter(uintptr_t mgr) {
     uintptr_t battle = Ptr(mgr + oMgrBattle);
     uintptr_t ui = Ptr(g_base + kGlobalUi);
@@ -1450,6 +1471,13 @@ void Enter(uintptr_t mgr) {
             return;
         }
         Log("enter: lord / hero check passed (IsCharacter key len %d, IsGeneral %d)", keyLen, general ? 1 : 0);
+    }
+    int moraleState = -1;
+    if (HeroRouting(unit, &moraleState)) {
+        Refuse(kRefuseRouting);
+        Log("enter refused: unit %p is routing (morale state %d; 6 routing / 7 shattered) - first person is back once it rallies", (void*)unit,
+            moraleState);
+        return;
     }
     bool flyer = false, flyAlways = false;
     if (cfg.fly && g_flyOk && g_moveOk && cfg.moveEnabled) {
@@ -2245,6 +2273,21 @@ uint64_t MeleeRosterSig(const uintptr_t* ents, unsigned n) {
 }
 constexpr unsigned kMeleeExtSlots = 2048;
 constexpr float kMeleeStepSpread = 5.f;
+float g_meleeTargetRadiusMax = 4.f;
+constexpr float kMeleeBodyRef = 0.6f;
+constexpr float kMeleeMountSlack = 1.f;
+float MeleeBigSlack() { return (g_meleeTargetRadiusMax > kMeleeBodyRef ? g_meleeTargetRadiusMax - kMeleeBodyRef : 0.f) + kMeleeMountSlack; }
+float MeleeTargetExtra(uintptr_t e) {
+    if (!(g_meleeTargetRadiusMax > kMeleeBodyRef)) return 0.f;
+    float r = 0.f;
+    if (!Rd(e + 0xa0, r) || !(r > kMeleeBodyRef && r < 50.f)) return 0.f;
+    return (r < g_meleeTargetRadiusMax ? r : g_meleeTargetRadiusMax) - kMeleeBodyRef;
+}
+float MeleeWideCos(float halfDeg, float extra, float d) {
+    float a = halfDeg + (extra >= d ? 90.f : std::asin(extra / d) * 180.f / kPi);
+    return a >= 180.f ? -2.f : std::cos(a * kPi / 180.f);
+}
+int g_meleeBigLogs = 0;
 MeleeUnitExt g_mext[kMeleeExtSlots];
 uintptr_t g_mextWorld = 0;
 struct MeleeSoldier {
@@ -2377,7 +2420,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         const int cat = rq.cat >= 0 && rq.cat < vmgame::kMeleeCats ? rq.cat : vmgame::kMeleeCatSword;
         const MeleeKindCfg& arc = g_meleeCat[cat].k[rq.kind];
         org[no][0] = rq.ox, org[no][1] = rq.oz;
-        org[no][2] = arc.reach + (arc.splashR > 0.f && arc.splashMax > 0 ? arc.splashR : 0.f);
+        org[no][2] = arc.reach + (arc.splashR > 0.f && arc.splashMax > 0 ? arc.splashR : 0.f) + MeleeBigSlack();
         ++no;
     }
     unsigned unitsSkipped = 0, unitsAll = 0;
@@ -2407,21 +2450,50 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         static Cand cand[96];
         int nc = 0;
         unsigned scanned = 0;
+        const float bigSlack = MeleeBigSlack();
+        int nMount = 0, nBig = 0;
         for (unsigned g = 0; g < ng; ++g) {
-            const uintptr_t e = g_mgather[g].e;
+            const uintptr_t rider = g_mgather[g].e;
             const float* q = g_mgather[g].q;
             ++scanned;
             float vx = q[0] - rq.ox, vz = q[2] - rq.oz, d = std::sqrt(vx * vx + vz * vz);
-            if (d > scanR || std::fabs(q[1] - (rq.oy - 1.7f)) > 3.f) continue;
-            bool inArc = d <= reach && (d <= 0.6f || (vx * rq.dx + vz * rq.dz) / d >= cosHalf);
+            if (d > scanR + bigSlack || std::fabs(q[1] - (rq.oy - 1.7f)) > 3.f) continue;
+            uintptr_t e = rider;
+            float tx = q[0], tz = q[2];
+            const uintptr_t mount = Ptr(rider + 0x2e0);
+            if (mount) {
+                float mq[3];
+                if (!Plausible(mount) || Ptr(rider + 0x80) == heroSide || !EntPos(mount, mq)) continue;
+                bool dup = false;
+                for (int c = 0; c < nc && !dup; ++c) dup = cand[c].e == mount;
+                if (dup) continue;
+                e = mount, tx = mq[0], tz = mq[2];
+                vx = tx - rq.ox, vz = tz - rq.oz, d = std::sqrt(vx * vx + vz * vz);
+            }
+            const float extra = MeleeTargetExtra(e), de = d - extra;
+            if (de > scanR) continue;
+            bool inArc = de <= reach && (d <= 0.6f || (vx * rq.dx + vz * rq.dz) / d >= (extra > 0.f ? MeleeWideCos(arc.halfDeg, extra, d) : cosHalf));
             if (!inArc && !splash) continue;
             uint32_t hp = 0, l6c = 0;
             uint8_t f108 = 0, f68 = 0;
             if (!Rd(e + 0xb1c, hp) || !hp || !Rd(e + 0x108, f108) || !(f108 & 0x10) || !Rd(e + 0x68, f68) || !(f68 & 1) ||
-                !Rd(e + 0x6c, l6c) || Ptr(e + 0x80) == heroSide || !(l6c & heroL6c & 2))
+                !Rd(e + 0x6c, l6c) || Ptr(e + 0x80) == heroSide || !(l6c & heroL6c & 2) ||
+                !reinterpret_cast<FnCanHit>(g_base + kFnCanBeHit904)(e)) {
+                if ((mount || extra > 0.f) && inArc && Ptr(e + 0x80) != heroSide && g_meleeBigLogs < 24) {
+                    ++g_meleeBigLogs;
+                    Log("melee-engine: %s %p (radius +%.2f m, %.1f m to its edge) skipped: hp %u f108 0x%x f68 0x%x l6c 0x%x (hero 0x%x)",
+                        mount ? "mount" : "big target", (void*)e, extra, de, hp, f108, f68, l6c, heroL6c);
+                }
                 continue;
-            if (!reinterpret_cast<FnCanHit>(g_base + kFnCanBeHit904)(e)) continue;
-            Cand cd = {e, d, q[0], q[2], inArc, false};
+            }
+            if (mount) ++nMount;
+            if (extra > 0.f) ++nBig;
+            if ((mount || extra > 0.f) && inArc && g_meleeBigLogs < 24) {
+                ++g_meleeBigLogs;
+                Log("melee-engine: %s %p in reach (radius +%.2f m, %.1f m from the camera, %.1f m to its edge)", mount ? "mount" : "big target",
+                    (void*)e, extra, d, de);
+            }
+            Cand cd = {e, de, tx, tz, inArc, false};
             if (nc < 96) {
                 cand[nc++] = cd;
             } else {
@@ -2492,9 +2564,9 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         vmgame::MeleeHitFeedback(hits + sHits);
         if (g_mq.logs++ < 200)
             Log("melee-engine: cat %d kind %d %s (reach %.2f m, arc %.0f, splash %.1f m x%d) (%.0f ms after queue) scanned %u (units %u, %u skipped far, %.2f ms), "
-                "in arc %d, hit %d, killed %d, damage [%s] | splash hit %d, killed %d [%s] (forced hits so far %ld, fallback damage so far %ld)",
+                "in arc %d (candidates: %d mounts, %d big), hit %d, killed %d, damage [%s] | splash hit %d, killed %d [%s] (forced hits so far %ld, fallback damage so far %ld)",
                 cat, rq.kind, heavy ? "heavy" : "light", reach, arc.halfDeg * 2.f, splashR, splashMax, (Now() - rq.t) * 1000.0, scanned, unitsAll,
-                unitsSkipped, gatherMs, inArc, hits, kills, dl, sHits, sKills, sl, g_mq.forced, g_mq.fallback);
+                unitsSkipped, gatherMs, inArc, nMount, nBig, hits, kills, dl, sHits, sKills, sl, g_mq.forced, g_mq.fallback);
     }
 }
 #include "hero_fire_fx.inc"
@@ -5095,6 +5167,16 @@ void Apply(uintptr_t mgr) {
             return;
         }
     }
+    static double s_tRoutCheck = -1.0;
+    if (g_routOk && (now - s_tRoutCheck >= 0.25 || now < s_tRoutCheck)) {
+        s_tRoutCheck = now;
+        int st = -1;
+        if (HeroRouting(S.unit, &st)) {
+            Log("hero: routing (morale state %d) - leaving first person, the hero is released to flee", st);
+            Exit(mgr, "hero-routing");
+            return;
+        }
+    }
     if (!S.havePos) {
         memcpy(S.outPos, raw, sizeof raw);
         memcpy(S.from, raw, sizeof raw);
@@ -6424,6 +6506,8 @@ bool VerifyGame() {
         g_charOk = PrintsMatch(Prints(kCharPrints904), "lord / hero check (IsCharacter)");
         Log("hero: lords / heroes only check %s (heroes_only=%d)", g_charOk ? "ok" : "OFF - nobody can enter while heroes_only=1",
             cfg.heroesOnly);
+        g_routOk = PrintsMatch(Prints(kRoutPrints904), "hero routing check (is_routing)");
+        Log("hero: leave first person when the hero routs %s", g_routOk ? "ok" : "OFF - a routing hero stays controllable");
         g_arrowOk = PrintsMatch(Prints(kArrowPrints904), "stuck arrows (arrow visual manager)") &&
                     Ptr(g_base + kVtArrowMgr904) == g_base + kFnArrowUpdate904 && Ptr(g_base + kVtArrowMgr904 + 8) == g_base + kFnArrowDraw904;
         Log("arrows: hide arrows stuck in the hero %s", g_arrowOk ? "ok" : "OFF - arrows that hit the hero stay visible in first person");
