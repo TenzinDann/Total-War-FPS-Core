@@ -8,6 +8,8 @@
 #include "shield_hit.h"
 #include "vm_game.h"
 #include "cast_marker.h"
+#include "game_volume.h"
+#include "vm_audio.h"
 #ifdef HFPS_PACK_ASSETS
 #include "pack_extract.h"
 #endif
@@ -238,6 +240,15 @@ const CodePrint kBuildPrints904[] = {
 constexpr uintptr_t kFnSegQuery904 = 0x2db3470, oWorldCollide = 0x150;
 constexpr uint32_t kBuildMask = 0x4800;
 bool g_buildOk = false;
+const CodePrint kGameVolPrints904[] = {
+    {0x5af310, 0x161, 0x0caa95b7b9f64779ull},
+    {0x5aecd4, 0x16, 0x3a3f3a78d580c508ull},
+    {0x5aecec, 0x1b, 0xa5e7a245781999a6ull},
+    {0x1b4836c, 0x16, 0x03a64b3be52a277aull},
+    {0x8c8db4, 0x65, 0xdd8e36b575767c89ull}};
+constexpr uintptr_t kGlobalAudioMgr904 = 0x3de7f18, kVtAudioMgr904 = 0x34bdd60, kFnAudioSetOn904 = 0x5aecec, kFnAudioSetVol904 = 0x5aecd4,
+                    kFnAudioSetScale904 = 0x1b4836c;
+bool g_gameVolOk = false;
 constexpr uintptr_t oUnitAbilityMgr = 0x3d48, oAbMgrEnd = 0x20, oAbMgrFirst = 0x28, oAbNodeNext = 0x8, oAbNodeDef = 0x70, oAbNodeInst = 0x10;
 constexpr uintptr_t oAbDefId = 0x8, oAbDefWindup = 0x30, oAbDefRange = 0x54, oAbRecId = 0x50;
 constexpr uintptr_t oAbWindSteps = 0x120, oAbCooldown = 0x134, oAbUses = 0xb4, oAbFlags = 0x170;
@@ -4677,8 +4688,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4749,7 +4758,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4832,26 +4840,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -6407,6 +6406,11 @@ bool VerifyGame() {
             cfg.flyTurnDeg, cfg.flyEyeHeight);
         g_wallOk = PrintsMatch(Prints(kWallPrints904), "wall nav blocks (teleport hint)");
         g_buildOk = PrintsMatch(Prints(kBuildPrints904), "building collision (segment query)");
+        g_gameVolOk = PrintsMatch(Prints(kGameVolPrints904), "game volume (audio manager)") &&
+                      Ptr(g_base + kVtAudioMgr904 + 0x478) == g_base + kFnAudioSetOn904 &&
+                      Ptr(g_base + kVtAudioMgr904 + 0x488) == g_base + kFnAudioSetVol904 &&
+                      Ptr(g_base + kVtAudioMgr904 + 0x498) == g_base + kFnAudioSetScale904;
+        Log("audio: follow game master x sfx volume %s", g_gameVolOk ? "ok" : "OFF - first-person sounds stay at fixed -5 dB");
         Log("wall: building walls %s (building=%d)", g_buildOk ? "solid" : "OFF - can walk through buildings", cfg.building);
         Log("wall: city walls / building nav blocks %s (wall=%d)", g_wallOk ? "ok" : "OFF - terrain only, jumping still works", cfg.wall);
         Log("move: unit orders %s, entity halt %s, entity move %s, entity teleport %s (unavailable modes fall back to unit orders)",
@@ -6766,8 +6770,45 @@ void HideSelfStep() {
         }
     }
 }
+struct GameVolState {
+    float applied = -1.f;
+    int fail = -1;
+    bool logPending = false;
+    double changedAt = 0.0;
+    gamevol::Channel master{}, sfx{};
+} g_gv;
+void GameVolumeStep() {
+    if (!g_gameVolOk) return;
+    gamevol::Records recs{};
+    gamevol::Channel m{}, s{};
+    const uintptr_t mgr = Ptr(g_base + kGlobalAudioMgr904);
+    int fail = !mgr ? 1 : Ptr(mgr) != g_base + kVtAudioMgr904 ? 2 : !Rd(mgr + gamevol::oChannels, recs) ? 3 : 0;
+    float f = 1.f;
+    if (!fail) fail = gamevol::Read(recs, &m, &s, &f);
+    if (fail) f = 1.f;
+    const double now = Now();
+    if (fail != g_gv.fail) {
+        if (fail)
+            Log("audio: game volume not readable (%s, audio manager %p) - first-person sounds at fixed -5 dB", gamevol::FailName(fail), (void*)mgr);
+        else
+            g_gv.logPending = true, g_gv.changedAt = now;
+        g_gv.fail = fail;
+    }
+    if (std::fabs(f - g_gv.applied) > 1e-4f) {
+        vm::GunSound::SetGameGain(f);
+        g_gv.applied = f, g_gv.changedAt = now, g_gv.logPending = !fail;
+    }
+    if (!fail) g_gv.master = m, g_gv.sfx = s;
+    if (g_gv.logPending && now - g_gv.changedAt >= 0.5) {
+        g_gv.logPending = false;
+        char line[200];
+        gamevol::Describe(g_gv.master, g_gv.sfx, g_gv.applied, -5.f, line, sizeof line);
+        Log("audio: %s", line);
+    }
+}
 extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     const double tGameFrame = Now();
+    GameVolumeStep();
     if (!g_loggedUpdateThread) {
         g_loggedUpdateThread = true;
         Log("camera update runs on thread %lu (window thread %lu)", GetCurrentThreadId(), g_windowThread);

@@ -16,6 +16,8 @@ public:
     static void Unprefetch(void* handle);
     static bool WarmEngine(char* err, size_t errLen);
     static float MasterVolume();
+    static void SetGameGain(float gain);
+    static float GameGain();
     bool Loaded() const { return nPcm_ > 0; }
     int Variants() const { return nPcm_; }
     float Seconds() const;

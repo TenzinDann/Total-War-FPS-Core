@@ -10,6 +10,7 @@ IXAudio2* g_xa = nullptr;
 IXAudio2MasteringVoice* g_master = nullptr;
 bool g_xaTried = false, g_xaOk = false;
 constexpr float kMasterGain = 0.56234133f;
+float g_gameGain = 1.f;
 bool EngineLocked(char* err, size_t errLen) {
     if (g_xaTried) {
         if (!g_xaOk) snprintf(err, errLen, "xaudio2 unavailable");
@@ -42,7 +43,7 @@ bool EngineLocked(char* err, size_t errLen) {
         g_xa = nullptr;
         return false;
     }
-    g_master->SetVolume(kMasterGain);
+    g_master->SetVolume(kMasterGain * g_gameGain);
     g_xaOk = true;
     return true;
 }
@@ -169,6 +170,20 @@ float GunSound::MasterVolume() {
     if (g_xaOk && g_master) g_master->GetVolume(&v);
     ReleaseSRWLockExclusive(&g_xaLock);
     return v;
+}
+void GunSound::SetGameGain(float gain) {
+    if (!(gain >= 0.f)) gain = 1.f;
+    if (gain > 1.f) gain = 1.f;
+    AcquireSRWLockExclusive(&g_xaLock);
+    g_gameGain = gain;
+    if (g_xaOk && g_master) g_master->SetVolume(kMasterGain * gain);
+    ReleaseSRWLockExclusive(&g_xaLock);
+}
+float GunSound::GameGain() {
+    AcquireSRWLockExclusive(&g_xaLock);
+    float g = g_gameGain;
+    ReleaseSRWLockExclusive(&g_xaLock);
+    return g;
 }
 bool GunSound::Load(const wchar_t* dir, const wchar_t* list, int maxVoices, char* err, size_t errLen) {
     Release();
