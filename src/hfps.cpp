@@ -456,8 +456,8 @@ bool g_noKnockOk = false;
 bool g_shieldGameOk = false;
 bool g_abilityOk = false;
 bool g_charOk = false;
-bool g_routOk = false;
 bool g_arrowOk = false;
+bool g_routOk = false;
 constexpr uintptr_t oUiHudRoot = 0x358, oUicChildCount = 0x1cc, oUicChildren = 0x1d0, oUicId = 0x2a0, oUicVisible = 0x353;
 constexpr int kMaxHideUi = 12;
 constexpr uintptr_t oUicPos = 0x2c0, oUicLayout = 0x2f0, oLayoutW = 0x11c, oLayoutH = 0x120;
@@ -1196,6 +1196,7 @@ struct State {
     long sumDx = 0, sumDy = 0;
 } S;
 volatile LONG g_reqToggle = 0, g_reqExit = 0;
+volatile LONG g_staleFp = 0;
 struct TacStamina {
     float st = 1.f;
     double lastTac = -1e9;
@@ -4772,8 +4773,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4844,7 +4843,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4927,26 +4925,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -6166,6 +6155,11 @@ bool InstallHook() {
     }
     g_installedMgr = mgr;
     Log("hooked battle camera manager %p (battle %p) via vtable copy %p", (void*)mgr, (void*)battle, (void*)ours);
+    if (S.active) {
+        InterlockedExchange(&g_staleFp, 1);
+        Log("FPS: first-person state left over from camera manager %p (battle ended while in first person?) - dropped on the next frame",
+            (void*)S.mgr);
+    }
     return true;
 }
 LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -6194,7 +6188,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
         if (w == cfg.toggleKey) {
-            if (!(l & (1L << 30)) && (S.active || InstallHook())) InterlockedExchange(&g_reqToggle, 1);
+            if (!(l & (1L << 30)) && InstallHook()) InterlockedExchange(&g_reqToggle, 1);
             return 0;
         }
         if (vmgame::Enabled() && w == vmgame::TestKey()) {
@@ -7058,11 +7052,15 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
         g_loggedUpdateThread = true;
         Log("camera update runs on thread %lu (window thread %lu)", GetCurrentThreadId(), g_windowThread);
     }
-    if (S.active && S.mgr != mgr) {
+    const bool staleFp = InterlockedExchange(&g_staleFp, 0) != 0;
+    if (S.active && (S.mgr != mgr || staleFp)) {
         S.active = false;
         ReleaseMouse();
         vmgame::SetFirstPerson(false);
-        Log("FPS state dropped: camera manager changed %p -> %p", (void*)S.mgr, (void*)mgr);
+        const LONG oldExit = InterlockedExchange(&g_reqExit, 0), oldLauncher = InterlockedExchange(&g_reqLauncher, 0);
+        S.exitStage = 0;
+        Log("FPS state dropped: %s %p -> %p (stale exit request %ld, launcher request %ld cleared)",
+            S.mgr != mgr ? "camera manager changed" : "camera manager re-created at the same address", (void*)S.mgr, (void*)mgr, oldExit, oldLauncher);
     }
     if (S.exitStage && (!S.active || S.exitStage == 1)) ExitSequenceStep(mgr);
     if (InterlockedExchange(&g_reqToggle, 0)) {
