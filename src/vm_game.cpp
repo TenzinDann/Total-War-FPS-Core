@@ -473,27 +473,50 @@ volatile LONG g_curveFracMicro = -1, g_curveFovMilli = 0, g_curveFovScaling = 1;
 volatile LONG g_spreadMicro = 0;
 unsigned g_spreadRng = 0x2545f491u;
 volatile LONG64 g_hudCover = 0;
+constexpr int kUiCoverMax = 32;
+SRWLOCK g_uiCoverLock = SRWLOCK_INIT;
+float g_uiCover[kUiCoverMax][4];
+int g_uiCoverN = 0;
 ID3D11Texture2D* g_hudTex = nullptr;
 UINT g_hudTexW = 0, g_hudTexH = 0;
 DXGI_FORMAT g_hudTexFmt = DXGI_FORMAT_UNKNOWN;
-D3D11_BOX g_hudBox = {};
+D3D11_BOX g_hudBox[kUiCoverMax + 1] = {};
+int g_hudBoxN = 0;
+int g_hudBoxLogged = -1, g_hudBoxLogs = 0;
 bool g_hudSaved = false;
 void HudCoverSave(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* bb, const D3D11_TEXTURE2D_DESC& td) {
     g_hudSaved = false;
-    const LONG64 v = g_hudCover;
-    if (!v || !g_fp) return;
-    auto px = [](LONG64 q, UINT size) { return static_cast<UINT>((static_cast<double>(q & 0xffff) / 65535.0) * size + 0.5); };
-    UINT x0 = px(v, td.Width), y0 = px(v >> 16, td.Height), x1 = px(v >> 32, td.Width), y1 = px(v >> 48, td.Height);
-    if (x1 > td.Width) x1 = td.Width;
-    if (y1 > td.Height) y1 = td.Height;
-    if (x1 <= x0 + 1 || y1 <= y0 + 1) return;
-    const UINT w = x1 - x0, h = y1 - y0;
-    if (!g_hudTex || g_hudTexW != w || g_hudTexH != h || g_hudTexFmt != td.Format) {
+    g_hudBoxN = 0;
+    if (!g_fp) return;
+    auto add = [&](float fx0, float fy0, float fx1, float fy1) {
+        auto px = [](float f, UINT size) { return f <= 0.f ? 0u : f >= 1.f ? size : static_cast<UINT>(f * size + 0.5f); };
+        UINT x0 = px(fx0, td.Width), y0 = px(fy0, td.Height), x1 = px(fx1, td.Width), y1 = px(fy1, td.Height);
+        if (x1 > x0 + 1 && y1 > y0 + 1 && g_hudBoxN < kUiCoverMax + 1) g_hudBox[g_hudBoxN++] = {x0, y0, 0, x1, y1, 1};
+    };
+    if (const LONG64 v = g_hudCover) {
+        auto q = [](LONG64 x) { return static_cast<float>(x & 0xffff) / 65535.f; };
+        add(q(v), q(v >> 16), q(v >> 32), q(v >> 48));
+    }
+    AcquireSRWLockShared(&g_uiCoverLock);
+    for (int i = 0; i < g_uiCoverN; ++i) add(g_uiCover[i][0], g_uiCover[i][1], g_uiCover[i][2], g_uiCover[i][3]);
+    ReleaseSRWLockShared(&g_uiCoverLock);
+    if (g_hudBoxN != g_hudBoxLogged && g_hudBoxLogs < 20 && g_log) {
+        ++g_hudBoxLogs;
+        g_hudBoxLogged = g_hudBoxN;
+        char s[400] = "";
+        int k = 0;
+        for (int i = 0; i < g_hudBoxN && i < 8 && k < 340; ++i)
+            k += snprintf(s + k, sizeof s - k, " %u,%u-%u,%u", g_hudBox[i].left, g_hudBox[i].top, g_hudBox[i].right, g_hudBox[i].bottom);
+        g_log("ui-cover: %d interface rect(s) kept above the gun drawn at Present (%ux%u):%s%s", g_hudBoxN, td.Width, td.Height, s,
+              g_hudBoxN > 8 ? " ..." : "");
+    }
+    if (!g_hudBoxN) return;
+    if (!g_hudTex || g_hudTexW != td.Width || g_hudTexH != td.Height || g_hudTexFmt != td.Format) {
         if (g_hudTex) g_hudTex->Release();
         g_hudTex = nullptr;
         D3D11_TEXTURE2D_DESC d = {};
-        d.Width = w;
-        d.Height = h;
+        d.Width = td.Width;
+        d.Height = td.Height;
         d.MipLevels = d.ArraySize = 1;
         d.Format = td.Format;
         d.SampleDesc.Count = 1;
@@ -501,21 +524,20 @@ void HudCoverSave(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* 
         if (FAILED(dev->CreateTexture2D(&d, nullptr, &g_hudTex)) || !g_hudTex) {
             g_hudTex = nullptr;
             static bool told = false;
-            if (!told && g_log) g_log("viewmodel: hud cover texture %ux%u format %d failed - HUD stays under the gun", w, h, td.Format);
+            if (!told && g_log) g_log("viewmodel: interface cover copy %ux%u format %d failed - interface stays under the gun", td.Width, td.Height, td.Format);
             told = true;
             return;
         }
-        g_hudTexW = w;
-        g_hudTexH = h;
+        g_hudTexW = td.Width;
+        g_hudTexH = td.Height;
         g_hudTexFmt = td.Format;
     }
-    g_hudBox = {x0, y0, 0, x1, y1, 1};
-    ctx->CopySubresourceRegion(g_hudTex, 0, 0, 0, 0, bb, 0, &g_hudBox);
+    ctx->CopyResource(g_hudTex, bb);
     g_hudSaved = true;
 }
 void HudCoverRestore(ID3D11DeviceContext* ctx, ID3D11Texture2D* bb) {
     if (!g_hudSaved || !g_hudTex) return;
-    ctx->CopySubresourceRegion(bb, 0, g_hudBox.left, g_hudBox.top, 0, g_hudTex, 0, nullptr);
+    for (int i = 0; i < g_hudBoxN; ++i) ctx->CopySubresourceRegion(bb, 0, g_hudBox[i].left, g_hudBox[i].top, 0, g_hudTex, 0, &g_hudBox[i]);
     g_hudSaved = false;
 }
 bool CurveAdsOn() {
@@ -3001,6 +3023,16 @@ void SetHudCover(float x0, float y0, float x1, float y1) {
     LONG64 v = 0;
     if (x1 > x0 && y1 > y0) v = q(x0) | (q(y0) << 16) | (q(x1) << 32) | (q(y1) << 48);
     InterlockedExchange64(&g_hudCover, v);
+}
+void SetUiCovers(const float* r, int n) {
+    AcquireSRWLockExclusive(&g_uiCoverLock);
+    g_uiCoverN = 0;
+    for (int i = 0; i < n && g_uiCoverN < kUiCoverMax; ++i) {
+        float c[4];
+        for (int k = 0; k < 4; ++k) c[k] = r[i * 4 + k] < 0.f ? 0.f : r[i * 4 + k] > 1.f ? 1.f : r[i * 4 + k];
+        if (c[2] > c[0] && c[3] > c[1]) memcpy(g_uiCover[g_uiCoverN++], c, sizeof c);
+    }
+    ReleaseSRWLockExclusive(&g_uiCoverLock);
 }
 void GetKick(kick::Params* out) {
     int idx = g_modelIdx;

@@ -64,6 +64,7 @@ bool Busy();
 void SetTrigger(bool held);
 int CurrentWeapon();
 void SetHudCover(float x0, float y0, float x1, float y1);
+void SetUiCovers(const float* r, int n);
 void GetKick(kick::Params* out);
 const char* WeaponProjectile(int idx);
 float WeaponFireRange(int idx);
