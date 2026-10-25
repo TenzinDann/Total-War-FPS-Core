@@ -60,6 +60,15 @@ template <size_t N>
 constexpr PrintSet Prints(const CodePrint (&a)[N]) {
     return {a, N};
 }
+const CodePrint kArrowPrints904[] = {
+    {0x2fd07d0, 0x20e, 0x6ec8c833b7e346d3ull},
+    {0x2fd09e0, 0x3d62, 0x54ddff0da7591a60ull},
+    {0x2fa3f64, 0xdee, 0x10284c53e5b108d0ull},
+    {0x2fa3d54, 0x20e, 0xcdc36317d158b862ull},
+    {0x2f98cc2, 0x34, 0x5f1881ec384120feull}};
+constexpr uintptr_t oVisRootArrowMgr = 0x1f0, kVtArrowMgr904 = 0x3ad0490, kFnArrowUpdate904 = 0x2fea7d8, kFnArrowDraw904 = 0x2fd07d0,
+                    kVtArrowVisual2_904 = 0x3ad04b8, oArrowMgrCount = 0x5c, oArrowMgrList = 0x60, oArrowVt2 = 0x10, oArrowSoldierVis = 0xe0,
+                    oArrowBone = 0x144, oArrowFlags = 0x151;
 const CodePrint kCamPrints904[] = {{0x2f1dc80, 0x40, 0x5b87161bbe161bceull},
                                    {0x181c8ac, 0x3b, 0xf51ecd15ecf21432ull},
                                    {0x181c91c, 0x3b, 0x4089e72f9a4161e2ull},
@@ -219,6 +228,12 @@ const CodePrint kFlyPrints904[] = {
     {0x1e3f410, 0x6e, 0x231ab3a1d31f4b75ull},
     {0x2ed1160, 0x62, 0x4c0cf35d628b1a09ull},
     {0x2f4ae00, 0xe5, 0x9df247d2bf9b1367ull}};
+const CodePrint kRoutPrints904[] = {
+    {0x2eeb33c, 0x52, 0xe308885f1334b146ull},
+    {0x2eeb570, 0x4b, 0x598a680916059c32ull},
+    {0x30348f0, 0x2f, 0x0fe36b149bafd51full},
+    {0x303482c, 0x53, 0x1dd38af0a1bce2e1ull}};
+constexpr uintptr_t kFnUnitRouting904 = 0x30348f0, oUnitMorale = 0x3b30, oMoraleState = 0x40;
 constexpr uintptr_t oUiCanFly = 0x70f, oUiAlwaysFly = 0x710, oUiCanToggleFly = 0x711, oUiIsFlying = 0x712;
 constexpr uintptr_t kFnFlyCmdCtor904 = 0x2ea9358, kFnFlyCmdIssue904 = 0x1e3f410;
 bool g_flyOk = false;
@@ -441,6 +456,8 @@ bool g_noKnockOk = false;
 bool g_shieldGameOk = false;
 bool g_abilityOk = false;
 bool g_charOk = false;
+bool g_arrowOk = false;
+bool g_routOk = false;
 constexpr uintptr_t oUiHudRoot = 0x358, oUicChildCount = 0x1cc, oUicChildren = 0x1d0, oUicId = 0x2a0, oUicVisible = 0x353;
 constexpr int kMaxHideUi = 12;
 constexpr uintptr_t oUicPos = 0x2c0, oUicLayout = 0x2f0, oLayoutW = 0x11c, oLayoutH = 0x120;
@@ -499,6 +516,7 @@ struct Config {
     float tpLead = 0.2f;
     bool leadAuto = true, eyeFromHeight = true;
     bool hideSelf = true;
+    bool hideArrows = true;
     float leadAutoTau = 1.5f;
     bool wall = true;
     float stepUp = 0.6f, stepDown = 0.8f, gravity = 20.3f, jumpHeight = 0.f, airControl = 0.35f, airTpMax = 1.5f, landDip = 0.12f;
@@ -572,7 +590,8 @@ enum RefuseCode : LONG {
     kRefuseNotOwner = 3,
     kRefusePaused = 4,
     kRefuseArtillery = 5,
-    kRefuseOther = 6
+    kRefuseOther = 6,
+    kRefuseRouting = 7
 };
 volatile LONG g_status = kStatusStarting;
 volatile LONG g_refuseSeq = 0, g_refuseCode = 0;
@@ -640,6 +659,7 @@ float IniF(const wchar_t* sec, const wchar_t* key, float def, const wchar_t* ini
     return (end != buf && std::isfinite(v)) ? static_cast<float>(v) : def;
 }
 void LoadMeleeCats(const wchar_t* ini);
+extern float g_meleeTargetRadiusMax;
 LONG g_cfgGen = 0;
 void LoadConfig() {
     wchar_t ini[MAX_PATH];
@@ -752,6 +772,7 @@ void LoadConfig() {
     if (!(cfg.leadAutoTau >= 0.2f && cfg.leadAutoTau <= 10.f)) cfg.leadAutoTau = 1.5f;
     cfg.eyeFromHeight = GetPrivateProfileIntW(L"camera", L"eye_from_height", 1, ini) != 0;
     cfg.hideSelf = GetPrivateProfileIntW(L"camera", L"hide_self", 1, ini) != 0;
+    cfg.hideArrows = GetPrivateProfileIntW(L"camera", L"hide_arrows", 1, ini) != 0;
     Log("ghost: teleport_lead=%.3f teleport_lead_auto=%d tau=%.2f eye_from_height=%d", cfg.tpLead, cfg.leadAuto, cfg.leadAutoTau,
         cfg.eyeFromHeight);
     cfg.wall = GetPrivateProfileIntW(L"move", L"wall", 1, ini) != 0;
@@ -848,6 +869,10 @@ void LoadConfig() {
     cfg.meleeHeavyReach = IniF(L"melee", L"heavy_reach", cfg.meleeHeavyReach, ini);
     if (!(cfg.meleeHeavyReach >= 0.5f && cfg.meleeHeavyReach <= 3.f)) cfg.meleeHeavyReach = 1.3f;
     LoadMeleeCats(ini);
+    g_meleeTargetRadiusMax = IniF(L"melee", L"target_radius_max", 4.f, ini);
+    if (!(g_meleeTargetRadiusMax >= 0.f && g_meleeTargetRadiusMax <= 12.f)) g_meleeTargetRadiusMax = 4.f;
+    Log("melee: riders are hit through their mounts; big targets measured to their edge (radius counted up to %.1f m, 0 = off)",
+        g_meleeTargetRadiusMax);
     cfg.hideHud = GetPrivateProfileIntW(L"ui", L"hide_hud", 1, ini) != 0;
     cfg.hideCursor = GetPrivateProfileIntW(L"ui", L"hide_cursor", 1, ini) != 0;
     cfg.hidePaths = GetPrivateProfileIntW(L"ui", L"hide_paths", 1, ini) != 0;
@@ -1389,6 +1414,14 @@ void Exit(uintptr_t mgr, const char* why, bool release = true) {
     Log("FPS exit reason=%s restoredPrev=%d active=%p prev=%p", why, restored, (void*)active,
         (void*)S.prevActive);
 }
+bool HeroRouting(uintptr_t unit, int* state = nullptr) {
+    int32_t st = -1;
+    if (state) *state = -1;
+    if (!g_routOk || !Plausible(unit) || !Rd(unit + oUnitMorale + oMoraleState, st)) return false;
+    if (state) *state = st;
+    using FnRouting = char (*)(uintptr_t morale);
+    return reinterpret_cast<FnRouting>(g_base + kFnUnitRouting904)(unit + oUnitMorale) != 0;
+}
 void Enter(uintptr_t mgr) {
     uintptr_t battle = Ptr(mgr + oMgrBattle);
     uintptr_t ui = Ptr(g_base + kGlobalUi);
@@ -1438,6 +1471,13 @@ void Enter(uintptr_t mgr) {
             return;
         }
         Log("enter: lord / hero check passed (IsCharacter key len %d, IsGeneral %d)", keyLen, general ? 1 : 0);
+    }
+    int moraleState = -1;
+    if (HeroRouting(unit, &moraleState)) {
+        Refuse(kRefuseRouting);
+        Log("enter refused: unit %p is routing (morale state %d; 6 routing / 7 shattered) - first person is back once it rallies", (void*)unit,
+            moraleState);
+        return;
     }
     bool flyer = false, flyAlways = false;
     if (cfg.fly && g_flyOk && g_moveOk && cfg.moveEnabled) {
@@ -2233,6 +2273,21 @@ uint64_t MeleeRosterSig(const uintptr_t* ents, unsigned n) {
 }
 constexpr unsigned kMeleeExtSlots = 2048;
 constexpr float kMeleeStepSpread = 5.f;
+float g_meleeTargetRadiusMax = 4.f;
+constexpr float kMeleeBodyRef = 0.6f;
+constexpr float kMeleeMountSlack = 1.f;
+float MeleeBigSlack() { return (g_meleeTargetRadiusMax > kMeleeBodyRef ? g_meleeTargetRadiusMax - kMeleeBodyRef : 0.f) + kMeleeMountSlack; }
+float MeleeTargetExtra(uintptr_t e) {
+    if (!(g_meleeTargetRadiusMax > kMeleeBodyRef)) return 0.f;
+    float r = 0.f;
+    if (!Rd(e + 0xa0, r) || !(r > kMeleeBodyRef && r < 50.f)) return 0.f;
+    return (r < g_meleeTargetRadiusMax ? r : g_meleeTargetRadiusMax) - kMeleeBodyRef;
+}
+float MeleeWideCos(float halfDeg, float extra, float d) {
+    float a = halfDeg + (extra >= d ? 90.f : std::asin(extra / d) * 180.f / kPi);
+    return a >= 180.f ? -2.f : std::cos(a * kPi / 180.f);
+}
+int g_meleeBigLogs = 0;
 MeleeUnitExt g_mext[kMeleeExtSlots];
 uintptr_t g_mextWorld = 0;
 struct MeleeSoldier {
@@ -2365,7 +2420,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         const int cat = rq.cat >= 0 && rq.cat < vmgame::kMeleeCats ? rq.cat : vmgame::kMeleeCatSword;
         const MeleeKindCfg& arc = g_meleeCat[cat].k[rq.kind];
         org[no][0] = rq.ox, org[no][1] = rq.oz;
-        org[no][2] = arc.reach + (arc.splashR > 0.f && arc.splashMax > 0 ? arc.splashR : 0.f);
+        org[no][2] = arc.reach + (arc.splashR > 0.f && arc.splashMax > 0 ? arc.splashR : 0.f) + MeleeBigSlack();
         ++no;
     }
     unsigned unitsSkipped = 0, unitsAll = 0;
@@ -2395,21 +2450,50 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         static Cand cand[96];
         int nc = 0;
         unsigned scanned = 0;
+        const float bigSlack = MeleeBigSlack();
+        int nMount = 0, nBig = 0;
         for (unsigned g = 0; g < ng; ++g) {
-            const uintptr_t e = g_mgather[g].e;
+            const uintptr_t rider = g_mgather[g].e;
             const float* q = g_mgather[g].q;
             ++scanned;
             float vx = q[0] - rq.ox, vz = q[2] - rq.oz, d = std::sqrt(vx * vx + vz * vz);
-            if (d > scanR || std::fabs(q[1] - (rq.oy - 1.7f)) > 3.f) continue;
-            bool inArc = d <= reach && (d <= 0.6f || (vx * rq.dx + vz * rq.dz) / d >= cosHalf);
+            if (d > scanR + bigSlack || std::fabs(q[1] - (rq.oy - 1.7f)) > 3.f) continue;
+            uintptr_t e = rider;
+            float tx = q[0], tz = q[2];
+            const uintptr_t mount = Ptr(rider + 0x2e0);
+            if (mount) {
+                float mq[3];
+                if (!Plausible(mount) || Ptr(rider + 0x80) == heroSide || !EntPos(mount, mq)) continue;
+                bool dup = false;
+                for (int c = 0; c < nc && !dup; ++c) dup = cand[c].e == mount;
+                if (dup) continue;
+                e = mount, tx = mq[0], tz = mq[2];
+                vx = tx - rq.ox, vz = tz - rq.oz, d = std::sqrt(vx * vx + vz * vz);
+            }
+            const float extra = MeleeTargetExtra(e), de = d - extra;
+            if (de > scanR) continue;
+            bool inArc = de <= reach && (d <= 0.6f || (vx * rq.dx + vz * rq.dz) / d >= (extra > 0.f ? MeleeWideCos(arc.halfDeg, extra, d) : cosHalf));
             if (!inArc && !splash) continue;
             uint32_t hp = 0, l6c = 0;
             uint8_t f108 = 0, f68 = 0;
             if (!Rd(e + 0xb1c, hp) || !hp || !Rd(e + 0x108, f108) || !(f108 & 0x10) || !Rd(e + 0x68, f68) || !(f68 & 1) ||
-                !Rd(e + 0x6c, l6c) || Ptr(e + 0x80) == heroSide || !(l6c & heroL6c & 2))
+                !Rd(e + 0x6c, l6c) || Ptr(e + 0x80) == heroSide || !(l6c & heroL6c & 2) ||
+                !reinterpret_cast<FnCanHit>(g_base + kFnCanBeHit904)(e)) {
+                if ((mount || extra > 0.f) && inArc && Ptr(e + 0x80) != heroSide && g_meleeBigLogs < 24) {
+                    ++g_meleeBigLogs;
+                    Log("melee-engine: %s %p (radius +%.2f m, %.1f m to its edge) skipped: hp %u f108 0x%x f68 0x%x l6c 0x%x (hero 0x%x)",
+                        mount ? "mount" : "big target", (void*)e, extra, de, hp, f108, f68, l6c, heroL6c);
+                }
                 continue;
-            if (!reinterpret_cast<FnCanHit>(g_base + kFnCanBeHit904)(e)) continue;
-            Cand cd = {e, d, q[0], q[2], inArc, false};
+            }
+            if (mount) ++nMount;
+            if (extra > 0.f) ++nBig;
+            if ((mount || extra > 0.f) && inArc && g_meleeBigLogs < 24) {
+                ++g_meleeBigLogs;
+                Log("melee-engine: %s %p in reach (radius +%.2f m, %.1f m from the camera, %.1f m to its edge)", mount ? "mount" : "big target",
+                    (void*)e, extra, d, de);
+            }
+            Cand cd = {e, de, tx, tz, inArc, false};
             if (nc < 96) {
                 cand[nc++] = cd;
             } else {
@@ -2480,9 +2564,9 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         vmgame::MeleeHitFeedback(hits + sHits);
         if (g_mq.logs++ < 200)
             Log("melee-engine: cat %d kind %d %s (reach %.2f m, arc %.0f, splash %.1f m x%d) (%.0f ms after queue) scanned %u (units %u, %u skipped far, %.2f ms), "
-                "in arc %d, hit %d, killed %d, damage [%s] | splash hit %d, killed %d [%s] (forced hits so far %ld, fallback damage so far %ld)",
+                "in arc %d (candidates: %d mounts, %d big), hit %d, killed %d, damage [%s] | splash hit %d, killed %d [%s] (forced hits so far %ld, fallback damage so far %ld)",
                 cat, rq.kind, heavy ? "heavy" : "light", reach, arc.halfDeg * 2.f, splashR, splashMax, (Now() - rq.t) * 1000.0, scanned, unitsAll,
-                unitsSkipped, gatherMs, inArc, hits, kills, dl, sHits, sKills, sl, g_mq.forced, g_mq.fallback);
+                unitsSkipped, gatherMs, inArc, nMount, nBig, hits, kills, dl, sHits, sKills, sl, g_mq.forced, g_mq.fallback);
     }
 }
 #include "hero_fire_fx.inc"
@@ -4688,8 +4772,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4760,7 +4842,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4843,26 +4924,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -5080,6 +5152,16 @@ void Apply(uintptr_t mgr) {
         if (!n) {
             if (g_haltOk && (S.lastMode == 0 || S.lastMode == 2)) IssueOvrHalt();
             Exit(mgr, "hero-not-controllable", false);
+            return;
+        }
+    }
+    static double s_tRoutCheck = -1.0;
+    if (g_routOk && (now - s_tRoutCheck >= 0.25 || now < s_tRoutCheck)) {
+        s_tRoutCheck = now;
+        int st = -1;
+        if (HeroRouting(S.unit, &st)) {
+            Log("hero: routing (morale state %d) - leaving first person, the hero is released to flee", st);
+            Exit(mgr, "hero-routing");
             return;
         }
     }
@@ -6412,6 +6494,11 @@ bool VerifyGame() {
         g_charOk = PrintsMatch(Prints(kCharPrints904), "lord / hero check (IsCharacter)");
         Log("hero: lords / heroes only check %s (heroes_only=%d)", g_charOk ? "ok" : "OFF - nobody can enter while heroes_only=1",
             cfg.heroesOnly);
+        g_routOk = PrintsMatch(Prints(kRoutPrints904), "hero routing check (is_routing)");
+        Log("hero: leave first person when the hero routs %s", g_routOk ? "ok" : "OFF - a routing hero stays controllable");
+        g_arrowOk = PrintsMatch(Prints(kArrowPrints904), "stuck arrows (arrow visual manager)") &&
+                    Ptr(g_base + kVtArrowMgr904) == g_base + kFnArrowUpdate904 && Ptr(g_base + kVtArrowMgr904 + 8) == g_base + kFnArrowDraw904;
+        Log("arrows: hide arrows stuck in the hero %s", g_arrowOk ? "ok" : "OFF - arrows that hit the hero stay visible in first person");
         g_flyOk = PrintsMatch(Prints(kFlyPrints904), "flying heroes (CanFly / desired flying state)");
         Log("fly: flying heroes %s (fly=%d takeoff=%d ahead=%.0f interval=%.2f turn=%.0f eye=%.2f)",
             g_flyOk ? "ok" : "OFF - flying heroes use the normal movement", cfg.fly, cfg.flyTakeoff, cfg.flyAhead, cfg.flyInterval,
@@ -6782,6 +6869,140 @@ void HideSelfStep() {
         }
     }
 }
+constexpr uint32_t kArrowBoneTag = 0xF0000000u, kArrowMaxList = 1u << 16;
+constexpr uint8_t kArrowAttached = 0x80;
+constexpr int kArrowMaxHide = 64;
+using FnArrowDraw = void (*)(uintptr_t mgr);
+struct ArrowHide {
+    uintptr_t mgr = 0, battle = 0, origVt = 0;
+    uintptr_t* vtCopy = nullptr;
+    FnArrowDraw orig = nullptr;
+    volatile uintptr_t sv = 0;
+    uintptr_t svLooked = 0;
+    double tSearch = -1, tTry = -1, tCheck = -1;
+    volatile LONG draws = 0, skipped = 0, most = 0;
+    bool logged = false, warned = false;
+} g_arrow;
+void ArrowDraw(uintptr_t mgr) {
+    uint32_t* bones[kArrowMaxHide];
+    int n = 0;
+    const uintptr_t sv = g_arrow.sv, vt2 = g_base + kVtArrowVisual2_904;
+    if (sv) {
+        const uint32_t cnt = *reinterpret_cast<const uint32_t*>(mgr + oArrowMgrCount);
+        const uintptr_t* list = *reinterpret_cast<const uintptr_t* const*>(mgr + oArrowMgrList);
+        for (uint32_t i = 0; list && cnt < kArrowMaxList && i < cnt && n < kArrowMaxHide; ++i) {
+            const uintptr_t v = list[i];
+            if (!v || *reinterpret_cast<const uintptr_t*>(v + oArrowSoldierVis) != sv || *reinterpret_cast<const uintptr_t*>(v + oArrowVt2) != vt2 ||
+                !(*reinterpret_cast<const uint8_t*>(v + oArrowFlags) & kArrowAttached))
+                continue;
+            uint32_t* b = reinterpret_cast<uint32_t*>(v + oArrowBone);
+            if (*b >= 0x10000u) continue;
+            *b |= kArrowBoneTag;
+            bones[n++] = b;
+        }
+    }
+    g_arrow.orig(mgr);
+    for (int k = 0; k < n; ++k)
+        if ((*bones[k] & 0xFFFF0000u) == kArrowBoneTag) *bones[k] &= 0xFFFFu;
+    InterlockedIncrement(&g_arrow.draws);
+    if (n) {
+        InterlockedExchangeAdd(&g_arrow.skipped, n);
+        if (n > g_arrow.most) g_arrow.most = n;
+    }
+}
+uintptr_t ArrowCurrentBattle() {
+    uintptr_t ui = Ptr(g_base + kGlobalUi);
+    return ui ? Ptr(ui + oUiBattle) : 0;
+}
+void ArrowUnhook(const char* why) {
+    g_arrow.sv = 0;
+    if (!g_arrow.mgr) return;
+    const bool same = g_arrow.battle && ArrowCurrentBattle() == g_arrow.battle &&
+                      Ptr(Ptr(g_arrow.battle + oBattleVisRoot) + oVisRootArrowMgr) == g_arrow.mgr;
+    const bool ours = same && g_arrow.vtCopy && Ptr(g_arrow.mgr) == reinterpret_cast<uintptr_t>(g_arrow.vtCopy + 1);
+    if (ours) Wr(g_arrow.mgr, g_arrow.origVt);
+    Log("arrows: %s arrow visual manager %p (%s): draw calls %ld, stuck arrows skipped %ld (at most %ld at once)", ours ? "unhooked" : "dropped",
+        (void*)g_arrow.mgr, why, g_arrow.draws, g_arrow.skipped, g_arrow.most);
+    g_arrow.mgr = g_arrow.battle = g_arrow.origVt = 0;
+    g_arrow.draws = g_arrow.skipped = g_arrow.most = 0;
+}
+bool ArrowHook(uintptr_t battle, uintptr_t mgr) {
+    const uintptr_t vt = Ptr(mgr);
+    uintptr_t lo = 0, hi = 0;
+    if (vt != g_base + kVtArrowMgr904 || Ptr(vt + 8) != g_base + kFnArrowDraw904 || !CodeRange(&lo, &hi)) {
+        if (!g_arrow.warned) {
+            g_arrow.warned = true;
+            Log("arrows: arrow visual manager %p vtable %p / [+8] %p not the 9.0.4 ones - stuck arrows stay visible", (void*)mgr, (void*)vt,
+                (void*)(vt ? Ptr(vt + 8) : 0));
+        }
+        return false;
+    }
+    size_t slots = 0;
+    while (slots < 1024) {
+        uintptr_t f = Ptr(vt + 8 * slots);
+        if (f < lo || f >= hi) break;
+        ++slots;
+    }
+    if (slots < 2) return false;
+    if (!g_arrow.vtCopy) {
+        const size_t copyN = slots + 16 > 64 ? slots + 16 : 64;
+        auto* c = static_cast<uintptr_t*>(VirtualAlloc(nullptr, (copyN + 1) * sizeof(uintptr_t), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!c) return false;
+        c[0] = Ptr(vt - 8);
+        for (size_t i = 0; i < copyN; ++i) c[1 + i] = i < slots ? Ptr(vt + 8 * i) : 0;
+        g_arrow.orig = reinterpret_cast<FnArrowDraw>(c[1 + 1]);
+        c[1 + 1] = reinterpret_cast<uintptr_t>(&ArrowDraw);
+        DWORD old;
+        VirtualProtect(c, (copyN + 1) * sizeof(uintptr_t), PAGE_READONLY, &old);
+        g_arrow.vtCopy = c;
+    }
+    g_arrow.draws = g_arrow.skipped = g_arrow.most = 0;
+    if (!Wr(mgr, reinterpret_cast<uintptr_t>(g_arrow.vtCopy + 1))) {
+        Log("arrows: vtable write failed on arrow visual manager %p", (void*)mgr);
+        return false;
+    }
+    g_arrow.mgr = mgr;
+    g_arrow.battle = battle;
+    g_arrow.origVt = vt;
+    Log("arrows: hooked arrow visual manager %p (battle %p, vt +%llx, %zu slots) via vtable copy %p: arrows stuck in the hero are skipped while "
+        "drawing (bone index masked during the draw call only)",
+        (void*)mgr, (void*)battle, (unsigned long long)(vt - g_base), slots, (void*)(g_arrow.vtCopy + 1));
+    return true;
+}
+void ArrowHideStep() {
+    if (!(S.active && cfg.hideArrows && g_arrowOk && S.entity && S.battle)) {
+        if (g_arrow.mgr) ArrowUnhook("first person ended");
+        g_arrow.sv = 0;
+        g_arrow.svLooked = 0;
+        g_arrow.tSearch = g_arrow.tTry = g_arrow.tCheck = -1;
+        g_arrow.logged = false;
+        return;
+    }
+    const double now = Now();
+    if (!g_arrow.mgr || g_arrow.tCheck < 0 || now - g_arrow.tCheck >= 0.5) {
+        g_arrow.tCheck = now;
+        const uintptr_t root = Ptr(S.battle + oBattleVisRoot), mgr = root ? Ptr(root + oVisRootArrowMgr) : 0;
+        if (g_arrow.mgr && (mgr != g_arrow.mgr || S.battle != g_arrow.battle || Ptr(mgr) != reinterpret_cast<uintptr_t>(g_arrow.vtCopy + 1)))
+            ArrowUnhook("arrow visual manager changed");
+        if (!g_arrow.mgr && mgr && (g_arrow.tTry < 0 || now - g_arrow.tTry >= 2.0)) {
+            g_arrow.tTry = now;
+            ArrowHook(S.battle, mgr);
+        }
+    }
+    uintptr_t sv = g_hide.sv;
+    if (!sv) {
+        if (g_arrow.tSearch < 0 || now - g_arrow.tSearch >= 0.5) {
+            g_arrow.tSearch = now;
+            g_arrow.svLooked = HeroSoldierVisual(S.battle, S.unit, S.entity);
+        }
+        sv = g_arrow.svLooked;
+    }
+    g_arrow.sv = g_arrow.mgr ? sv : 0;
+    if (g_arrow.skipped && !g_arrow.logged) {
+        g_arrow.logged = true;
+        Log("arrows: first stuck arrow hidden in our view (hero soldier visual %p)", (void*)sv);
+    }
+}
 struct GameVolState {
     float applied = -1.f;
     int fail = -1;
@@ -6849,6 +7070,7 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     EdgeStep();
     ShotStep();
     HideSelfStep();
+    ArrowHideStep();
     vmgame::GameThreadTime((Now() - tGameFrame) * 1000.0);
 }
 #ifdef HFPS_LUA_MODULE
