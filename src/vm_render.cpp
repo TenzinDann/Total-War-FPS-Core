@@ -827,6 +827,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.reloadRefill = IniFloat(ini, L"reload_refill", s.reloadRefill);
     s.reloadEmptyRefill = IniFloat(ini, L"reload_empty_refill", s.reloadEmptyRefill);
     GetPrivateProfileStringW(L"viewmodel", L"weapon_id", s.weaponId, s.weaponId, 64, ini);
+    GetPrivateProfileStringW(L"viewmodel", L"weapon_owner", s.weaponOwner, s.weaponOwner, 160, ini);
     GetPrivateProfileStringW(L"viewmodel", L"anim_sounds", s.animSounds, s.animSounds, 128, ini);
     s.animSoundVolume = IniFloat(ini, L"anim_sound_volume", s.animSoundVolume);
     GetPrivateProfileStringW(L"viewmodel", L"step_foot", s.stepFoot, s.stepFoot, 512, ini);
