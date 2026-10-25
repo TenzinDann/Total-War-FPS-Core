@@ -65,6 +65,9 @@ void DrawLayer(IDXGISwapChain* sc, int part = kPartAll);
 int g_uiLayerMode = -1;
 bool g_uiStateSwap = false;
 bool g_uiMidGpuTimer = false;
+bool g_uiPresentPartial = false;
+bool g_wdOn = true;
+UINT g_wdMs = 2000;
 double g_uiMidT = 0;
 bool g_uiLoggedManual = false, g_uiLoggedAfterMid = false;
 IDXGISwapChain* g_lastSc = nullptr;
@@ -476,6 +479,13 @@ void UiLayerReadIni() {
     g_uiMidGpuTimer = GetPrivateProfileIntW(L"ui_layer", L"mid_gpu_timer", 0, g_ini) != 0;
     g_log("ui-layer: mid-frame state %s, GPU timer on the mid-frame draw %s",
           g_uiStateSwap ? "swap (SwapDeviceContextState, the old way)" : "manual (full save / ClearState / restore)", g_uiMidGpuTimer ? "on" : "off");
+    GetPrivateProfileStringW(L"ui_layer", L"present_state", L"manual", st, 16, g_ini);
+    g_uiPresentPartial = _wcsicmp(st, L"partial") == 0;
+    g_wdOn = GetPrivateProfileIntW(L"ui_layer", L"watchdog", 1, g_ini) != 0;
+    g_wdMs = GetPrivateProfileIntW(L"ui_layer", L"watchdog_ms", 2000, g_ini);
+    if (g_wdMs < 500) g_wdMs = 500;
+    g_log("ui-layer: Present state %s; watchdog %s (%u ms)", g_uiPresentPartial ? "partial (the old way)" : "manual (full save / ClearState / restore in first person)",
+          g_wdOn ? "on" : "off", g_wdMs);
 }
 void UiLayerOnPresent(ID3D11DeviceContext* ctx, ID3D11Texture2D* bb, UINT bbW, UINT bbH) {
     UiLayerReadIni();
@@ -711,6 +721,197 @@ void UiLayerGunDraw() {
     else
         DrawLayer(g_lastSc, kPartGun);
     g_probeMute = false;
+}
+FullState g_presentFs;
+void (*g_uiPresentDrawFn)(IDXGISwapChain*, int) = nullptr;
+bool g_uiPresentLoggedFp = false;
+int g_uiPresentLogs = 0;
+void FullStateDescribe(const FullState& fs, ID3D11Resource* bb, char* out, size_t n) {
+    UINT nRt = 0, omU = 0, csU = 0, so = 0, srv = 0;
+    bool firstIsBb = false;
+    for (UINT k = 0; k < FullState::kRt; ++k)
+        if (fs.rtv[k]) ++nRt;
+    if (fs.rtv[0] && bb) {
+        ID3D11Resource* r = nullptr;
+        fs.rtv[0]->GetResource(&r);
+        firstIsBb = r == bb;
+        if (r) r->Release();
+    }
+    for (UINT k = 0; k < fs.nUav; ++k) omU += fs.omUav[k] != nullptr, csU += fs.csUav[k] != nullptr;
+    for (ID3D11Buffer* b : fs.so) so += b != nullptr;
+    char sh[40] = "";
+    const char* names[FullState::kStages] = {"VS ", "HS ", "DS ", "GS ", "PS ", "CS "};
+    for (int i = 0; i < FullState::kStages; ++i) {
+        for (ID3D11ShaderResourceView* v : fs.st[i].srv) srv += v != nullptr;
+        if (fs.st[i].shader) strcat(sh, names[i]);
+    }
+    D3D11_RASTERIZER_DESC rd = {};
+    if (fs.rs) fs.rs->GetDesc(&rd);
+    snprintf(out, n,
+             "predicate %p (value %d), stream-out targets %u, output-merger UAVs %u, compute UAVs %u, %u render targets (first %s the back buffer) + depth %s, "
+             "shaders bound: %s, rasterizer %s (scissor %d, cull %d, fill %d, depth clip %d), %u viewports, %u scissor rects, %u shader resources, "
+             "constant-buffer ranges %s",
+             (void*)fs.pred, (int)fs.predValue, so, omU, csU, nRt, firstIsBb ? "is" : "is not", fs.dsv ? "yes" : "no", sh[0] ? sh : "none ",
+             fs.rs ? "set" : "default", (int)rd.ScissorEnable, (int)rd.CullMode, (int)rd.FillMode, (int)rd.DepthClipEnable, fs.nVp, fs.nSc, srv,
+             fs.ranges ? "in use" : "default");
+}
+void UiLayerPresentDraw(IDXGISwapChain* sc, int part) {
+    UiLayerReadIni();
+    const bool on = g_fp || g_testLayer;
+    if (!on) g_uiPresentLoggedFp = false;
+    ID3D11DeviceContext* c = nullptr;
+    if (on && !g_uiPresentPartial && !g_failed) {
+        ID3D11Device* dev = nullptr;
+        if (SUCCEEDED(sc->GetDevice(IID_ID3D11Device, reinterpret_cast<void**>(&dev))) && dev) {
+            dev->GetImmediateContext(&c);
+            dev->Release();
+        }
+    }
+    if (!c) {
+        if (g_uiPresentDrawFn)
+            g_uiPresentDrawFn(sc, part);
+        else
+            DrawLayer(sc, part);
+        return;
+    }
+    ID3D11DeviceContext1* c1 = nullptr;
+    if (FAILED(c->QueryInterface(IID_ID3D11DeviceContext1, reinterpret_cast<void**>(&c1)))) c1 = nullptr;
+    g_presentFs.Save(c, c1);
+    if (!g_uiPresentLoggedFp && g_uiPresentLogs < 12) {
+        g_uiPresentLoggedFp = true;
+        ++g_uiPresentLogs;
+        ID3D11Texture2D* bb = nullptr;
+        sc->GetBuffer(0, IID_ID3D11Texture2D, reinterpret_cast<void**>(&bb));
+        char what[900];
+        FullStateDescribe(g_presentFs, bb, what, sizeof what);
+        if (bb) bb->Release();
+        g_log("ui-layer: at Present (part %d) the game left: %s - drawing from a cleared state, then put back", part, what);
+    }
+    c->ClearState();
+    if (g_uiPresentDrawFn)
+        g_uiPresentDrawFn(sc, part);
+    else
+        DrawLayer(sc, part);
+    c->ClearState();
+    g_presentFs.Restore(c, c1);
+    if (c1) c1->Release();
+    c->Release();
+}
+volatile LONG g_wdBeat = 0;
+DWORD g_wdRenderTid = 0, g_wdMainTid = 0;
+HANDLE g_wdThread = nullptr;
+int g_wdReports = 0;
+constexpr size_t kWdStackBytes = 64 * 1024;
+constexpr int kWdMaxReports = 3, kWdMaxFrames = 40;
+unsigned char g_wdStack[kWdStackBytes];
+struct WdShot {
+    bool ok;
+    DWORD64 rip, rsp;
+    size_t got;
+};
+bool WdCapture(DWORD tid, WdShot* s) {
+    s->ok = false, s->got = 0, s->rip = s->rsp = 0;
+    if (!tid || tid == GetCurrentThreadId()) return false;
+    HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
+    if (!h) return false;
+    if (SuspendThread(h) == static_cast<DWORD>(-1)) {
+        CloseHandle(h);
+        return false;
+    }
+    CONTEXT ctx;
+    memset(&ctx, 0, sizeof ctx);
+    ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    if (GetThreadContext(h, &ctx)) {
+        s->ok = true, s->rip = ctx.Rip, s->rsp = ctx.Rsp;
+        size_t want = kWdStackBytes;
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(ctx.Rsp), &mbi, sizeof mbi)) {
+            const uintptr_t end = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+            if (end > ctx.Rsp && end - ctx.Rsp < want) want = end - ctx.Rsp;
+        }
+        SIZE_T got = 0;
+        ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(ctx.Rsp), g_wdStack, want, &got);
+        s->got = got;
+    }
+    ResumeThread(h);
+    CloseHandle(h);
+    return s->ok;
+}
+bool WdIsReturnAddr(uintptr_t a) {
+    if (a < 0x10000) return false;
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery(reinterpret_cast<LPCVOID>(a - 1), &mbi, sizeof mbi)) return false;
+    if (mbi.State != MEM_COMMIT || mbi.Type != MEM_IMAGE || !(mbi.Protect & (PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) ||
+        (mbi.Protect & PAGE_GUARD))
+        return false;
+    const uintptr_t lo = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+    auto at = [&](uintptr_t k) -> int { return a - k >= lo ? *reinterpret_cast<const unsigned char*>(a - k) : -1; };
+    auto callModrm = [](int m) { return m >= 0 && (m & 0x38) == 0x10; };
+    return at(5) == 0xE8 || (at(6) == 0xFF && callModrm(at(5))) || (at(3) == 0xFF && callModrm(at(2))) ||
+           (at(2) == 0xFF && at(1) >= 0xD0 && at(1) <= 0xD7) || (at(7) == 0xFF && callModrm(at(6))) || (at(4) == 0xFF && callModrm(at(3)));
+}
+void WdReport(const char* label, DWORD tid) {
+    WdShot s;
+    if (!WdCapture(tid, &s)) {
+        g_log("watchdog: %s thread %lu - could not capture it", label, tid);
+        return;
+    }
+    char rip[96], frames[4000] = "";
+    ProbeFmtAddr(reinterpret_cast<void*>(s.rip), rip, sizeof rip);
+    size_t used = 0;
+    int n = 0;
+    uintptr_t last = 0;
+    for (size_t off = 0; off + 8 <= s.got && n < kWdMaxFrames; off += 8) {
+        uintptr_t v;
+        memcpy(&v, g_wdStack + off, 8);
+        if (v == last || !WdIsReturnAddr(v)) continue;
+        last = v;
+        char one[96];
+        ProbeFmtAddr(reinterpret_cast<void*>(v), one, sizeof one);
+        int w = snprintf(frames + used, sizeof frames - used, "%s%s", n ? " < " : "", one);
+        if (w < 0 || used + w >= sizeof frames) break;
+        used += w;
+        ++n;
+    }
+    g_log("watchdog: %s thread %lu at %s (rsp %p, %zu stack bytes read); return addresses on the stack: %s", label, tid, rip,
+          reinterpret_cast<void*>(s.rsp), s.got, n ? frames : "none found");
+}
+void WdStep(double now) {
+    static LONG lastBeat = -1;
+    static double lastChange = 0;
+    static bool armed = true;
+    const LONG b = g_wdBeat;
+    if (!(g_fp || g_testLayer) || b != lastBeat) {
+        if (b != lastBeat && !armed) g_log("watchdog: Present is running again after %.1f s", now - lastChange);
+        lastBeat = b, lastChange = now, armed = true;
+        return;
+    }
+    if (!armed || g_wdReports >= kWdMaxReports || now - lastChange < g_wdMs / 1000.0) return;
+    armed = false;
+    ++g_wdReports;
+    g_log("watchdog: no Present for %.1f s in first person (report %d of %d) - render thread %lu, main thread %lu", now - lastChange, g_wdReports,
+          kWdMaxReports, g_wdRenderTid, g_wdMainTid);
+    WdReport("render", g_wdRenderTid);
+    if (g_wdMainTid && g_wdMainTid != g_wdRenderTid) WdReport("main", g_wdMainTid);
+}
+DWORD WINAPI WdThreadProc(LPVOID) {
+    for (;;) {
+        Sleep(200);
+        WdStep(Now());
+    }
+}
+void WdPresentBeat(IDXGISwapChain* sc) {
+    InterlockedIncrement(&g_wdBeat);
+    if (g_wdThread) return;
+    UiLayerReadIni();
+    if (!g_wdOn) return;
+    g_wdRenderTid = GetCurrentThreadId();
+    DXGI_SWAP_CHAIN_DESC d;
+    if (SUCCEEDED(sc->GetDesc(&d)) && d.OutputWindow) g_wdMainTid = GetWindowThreadProcessId(d.OutputWindow, nullptr);
+    g_wdThread = CreateThread(nullptr, 64 * 1024, WdThreadProc, nullptr, 0, nullptr);
+    g_log("watchdog: %s (Present gap > %u ms in first person -> stacks logged; render thread %lu, main thread %lu)",
+          g_wdThread ? "on" : "could not start its thread", g_wdMs, g_wdRenderTid, g_wdMainTid);
+    if (!g_wdThread) g_wdOn = false;
 }
 bool UiLayerMidDraw(ID3D11DeviceContext* c) {
     if (GetCurrentThreadId() != g_presentTid) {
