@@ -7418,26 +7418,6 @@ int SetHudRect(void* L) {
         vmgame::SetHudCover(0, 0, 0, 0);
     return 0;
 }
-int SetUiCoversApi(void* L) {
-    float r[32 * 4];
-    int n = 0;
-    float sw = 0, sh = 0;
-    if (cfg.hudEnabled && cfg.hudCover && f.type(L, 1) == kTNumber && f.type(L, 2) == kTNumber) sw = f.tonumber(L, 1), sh = f.tonumber(L, 2);
-    for (int i = 0; sw > 16.f && sh > 16.f && n < 32; ++i) {
-        float v[4];
-        bool ok = true;
-        for (int k = 0; ok && k < 4; ++k) {
-            if (f.type(L, 3 + i * 4 + k) != kTNumber) ok = false;
-            else v[k] = f.tonumber(L, 3 + i * 4 + k);
-        }
-        if (!ok) break;
-        if (v[2] <= 1.f || v[3] <= 1.f) continue;
-        r[n * 4] = v[0] / sw, r[n * 4 + 1] = v[1] / sh, r[n * 4 + 2] = (v[0] + v[2]) / sw, r[n * 4 + 3] = (v[1] + v[3]) / sh;
-        ++n;
-    }
-    vmgame::SetUiCovers(r, n);
-    return 0;
-}
 int Ammo(void* L) {
     int ammo = 0, size = 0, reserve = -1;
     bool reloading = false;
@@ -7572,7 +7552,7 @@ int PushTable(void* L) {
     }
     f.createtable(L, 0, 11);
     const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_enabled", HudEnabled},
-                                                        {"set_hud_rect", SetHudRect}, {"set_ui_covers", SetUiCoversApi}, {"ammo", Ammo}, {"cast_event", CastEvent},
+                                                        {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"cast_event", CastEvent},
                                                         {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson},
                                                         {"tac_stamina", TacStaminaApi}, {"refill_ammo", RefillAmmoApi}, {"prompt", Prompt}, {"refused", Refused}, {"status", Status},
                                                         {"cast_marker", CastMarkerApi}, {"cast_target", CastTargetApi}, {"cast_point", CastPointApi}};

@@ -68,6 +68,7 @@ bool g_uiMidGpuTimer = false;
 bool g_uiPresentPartial = false;
 bool g_wdOn = true;
 UINT g_wdMs = 2000;
+int g_uiTarget = 0;
 double g_uiMidT = 0;
 bool g_uiLoggedManual = false, g_uiLoggedAfterMid = false;
 IDXGISwapChain* g_lastSc = nullptr;
@@ -486,6 +487,11 @@ void UiLayerReadIni() {
     if (g_wdMs < 500) g_wdMs = 500;
     g_log("ui-layer: Present state %s; watchdog %s (%u ms)", g_uiPresentPartial ? "partial (the old way)" : "manual (full save / ClearState / restore in first person)",
           g_wdOn ? "on" : "off", g_wdMs);
+    GetPrivateProfileStringW(L"ui_layer", L"target", L"auto", st, 16, g_ini);
+    g_uiTarget = _wcsicmp(st, L"swapchain") == 0 ? 1 : _wcsicmp(st, L"game") == 0 ? 2 : 0;
+    g_log("ui-layer: draw target %s", g_uiTarget == 1 ? "swapchain (forced, the old way)"
+                                      : g_uiTarget == 2 ? "game's back buffer (forced)"
+                                                        : "auto (the game's own back buffer when the swapchain hands out a different one)");
 }
 void UiLayerOnPresent(ID3D11DeviceContext* ctx, ID3D11Texture2D* bb, UINT bbW, UINT bbH) {
     UiLayerReadIni();
@@ -722,6 +728,126 @@ void UiLayerGunDraw() {
         DrawLayer(g_lastSc, kPartGun);
     g_probeMute = false;
 }
+bool g_useGameBb = false;
+uintptr_t g_pickGameTex = 1;
+IDXGISwapChain* g_pickSc = nullptr;
+bool g_pickLoggedFp = false;
+int g_pickLogs = 0;
+uintptr_t GameBbTexAddr() {
+    if (!g_bbRouteOk) return 0;
+    uintptr_t r = Ptr(g_base + g_ra.globalRenderer), rvt = r ? Ptr(r) : 0;
+    uintptr_t t = rvt && Ptr(rvt + g_ra.vtGetBbSlot) == g_base + g_ra.fnGetBb ? Ptr(r + g_ra.oBackBufferObj) : 0;
+    uintptr_t tex = t ? Ptr(t + kBbTexOff) : 0;
+    return tex && InModule(Ptr(tex)) ? tex : 0;
+}
+ID3D11Texture2D* GameBbTex() {
+    uintptr_t a = GameBbTexAddr();
+    ID3D11Texture2D* t = nullptr;
+    if (a && FAILED(reinterpret_cast<IUnknown*>(a)->QueryInterface(IID_ID3D11Texture2D, reinterpret_cast<void**>(&t)))) t = nullptr;
+    return t;
+}
+bool LayerDevice(IDXGISwapChain* sc, ID3D11Device** dev) {
+    *dev = nullptr;
+    if (g_useGameBb) {
+        if (ID3D11Texture2D* t = GameBbTex()) {
+            t->GetDevice(dev);
+            t->Release();
+            if (*dev) return true;
+        }
+    }
+    return SUCCEEDED(sc->GetDevice(IID_ID3D11Device, reinterpret_cast<void**>(dev))) && *dev;
+}
+bool LayerBackBuffer(IDXGISwapChain* sc, ID3D11Texture2D** bb) {
+    *bb = nullptr;
+    if (g_useGameBb && (*bb = GameBbTex())) return true;
+    return SUCCEEDED(sc->GetBuffer(0, IID_ID3D11Texture2D, reinterpret_cast<void**>(bb))) && *bb;
+}
+void PickDescribeDevice(ID3D11Device* d, char* out, size_t n) {
+    if (!d) {
+        snprintf(out, n, "none");
+        return;
+    }
+    char vt[96], cvt[96] = "?", name[128] = "?";
+    unsigned long luid = 0;
+    ProbeFmtAddr(reinterpret_cast<void*>(Ptr(reinterpret_cast<uintptr_t>(d))), vt, sizeof vt);
+    ID3D11DeviceContext* c = nullptr;
+    d->GetImmediateContext(&c);
+    if (c) {
+        ProbeFmtAddr(reinterpret_cast<void*>(Ptr(reinterpret_cast<uintptr_t>(c))), cvt, sizeof cvt);
+        c->Release();
+    }
+    IDXGIDevice* xd = nullptr;
+    if (SUCCEEDED(d->QueryInterface(IID_IDXGIDevice, reinterpret_cast<void**>(&xd))) && xd) {
+        IDXGIAdapter* ad = nullptr;
+        DXGI_ADAPTER_DESC desc;
+        if (SUCCEEDED(xd->GetAdapter(&ad)) && ad && SUCCEEDED(ad->GetDesc(&desc))) {
+            WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, name, sizeof name, nullptr, nullptr);
+            luid = desc.AdapterLuid.LowPart;
+        }
+        if (ad) ad->Release();
+        xd->Release();
+    }
+    snprintf(out, n, "%p (vtable %s, context vtable %s, adapter '%s' luid %08lx, flags 0x%x)", (void*)d, vt, cvt, name, luid, d->GetCreationFlags());
+}
+void PickDescribeTex(ID3D11Texture2D* t, char* out, size_t n) {
+    if (!t) {
+        snprintf(out, n, "none");
+        return;
+    }
+    D3D11_TEXTURE2D_DESC d;
+    t->GetDesc(&d);
+    snprintf(out, n, "%p %ux%u fmt %u samples %u bind 0x%x misc 0x%x", (void*)t, d.Width, d.Height, d.Format, d.SampleDesc.Count, d.BindFlags,
+             d.MiscFlags);
+}
+void UiLayerPickTarget(IDXGISwapChain* sc) {
+    UiLayerReadIni();
+    const bool fp = g_fp || g_testLayer;
+    if (!fp) g_pickLoggedFp = false;
+    const uintptr_t ga = g_uiTarget == 1 ? 0 : GameBbTexAddr();
+    const bool enter = fp && !g_pickLoggedFp;
+    if (ga == g_pickGameTex && sc == g_pickSc && !enter) return;
+    g_pickGameTex = ga, g_pickSc = sc;
+    if (fp) g_pickLoggedFp = true;
+    ID3D11Device *sd = nullptr, *gd = nullptr;
+    ID3D11Texture2D *sb = nullptr, *gt = nullptr;
+    if (FAILED(sc->GetDevice(IID_ID3D11Device, reinterpret_cast<void**>(&sd)))) sd = nullptr;
+    if (FAILED(sc->GetBuffer(0, IID_ID3D11Texture2D, reinterpret_cast<void**>(&sb)))) sb = nullptr;
+    if (ga && FAILED(reinterpret_cast<IUnknown*>(ga)->QueryInterface(IID_ID3D11Texture2D, reinterpret_cast<void**>(&gt)))) gt = nullptr;
+    if (gt) gt->GetDevice(&gd);
+    bool usable = false;
+    if (gt && gd) {
+        D3D11_TEXTURE2D_DESC d;
+        gt->GetDesc(&d);
+        bool hw = false;
+        usable = d.SampleDesc.Count == 1 && (d.BindFlags & D3D11_BIND_RENDER_TARGET) && RtvFormat(d.Format, &hw) != DXGI_FORMAT_UNKNOWN;
+    }
+    const bool differs = gt && (gt != sb || gd != sd);
+    const bool use = usable && (differs || g_uiTarget == 2);
+    const char* why = g_uiTarget == 1 ? "the swapchain's ([ui_layer] target=swapchain)"
+                      : use ? (differs ? "the game's own back buffer - the swapchain hands out a different device / texture (a layer wraps it); "
+                                               "drawing there would not reach the screen"
+                                             : "the game's own back buffer ([ui_layer] target=game; same as the swapchain's)")
+                      : !gt ? "the swapchain's (the game's back buffer is not readable)"
+                      : !usable ? "the swapchain's (the game's back buffer cannot take our render target view)"
+                                  : "the swapchain's (same texture and device as the game's)";
+    g_useGameBb = use;
+    if (g_pickLogs < 16) {
+        ++g_pickLogs;
+        char vt[96], pr[96], sdd[400], sbd[160], gdd[400], gtd[160];
+        ProbeFmtAddr(reinterpret_cast<void*>(g_scVtOrig), vt, sizeof vt);
+        ProbeFmtAddr(reinterpret_cast<void*>(g_origPresent), pr, sizeof pr);
+        PickDescribeDevice(sd, sdd, sizeof sdd), PickDescribeTex(sb, sbd, sizeof sbd);
+        PickDescribeDevice(gd, gdd, sizeof gdd), PickDescribeTex(gt, gtd, sizeof gtd);
+        g_log("ui-layer: draw target: %s%s | swapchain %p (vtable %s, Present %s): device %s, buffer %s | game's back buffer (renderer +0x%llx, +0x%llx): %s, "
+              "device %s",
+              why, fp ? " [first person]" : "", (void*)sc, vt, pr, sdd, sbd, static_cast<unsigned long long>(g_ra.oBackBufferObj),
+              static_cast<unsigned long long>(kBbTexOff), gtd, gdd);
+    }
+    if (sd) sd->Release();
+    if (sb) sb->Release();
+    if (gd) gd->Release();
+    if (gt) gt->Release();
+}
 FullState g_presentFs;
 void (*g_uiPresentDrawFn)(IDXGISwapChain*, int) = nullptr;
 bool g_uiPresentLoggedFp = false;
@@ -762,7 +888,7 @@ void UiLayerPresentDraw(IDXGISwapChain* sc, int part) {
     ID3D11DeviceContext* c = nullptr;
     if (on && !g_uiPresentPartial && !g_failed) {
         ID3D11Device* dev = nullptr;
-        if (SUCCEEDED(sc->GetDevice(IID_ID3D11Device, reinterpret_cast<void**>(&dev))) && dev) {
+        if (LayerDevice(sc, &dev)) {
             dev->GetImmediateContext(&c);
             dev->Release();
         }
@@ -781,7 +907,7 @@ void UiLayerPresentDraw(IDXGISwapChain* sc, int part) {
         g_uiPresentLoggedFp = true;
         ++g_uiPresentLogs;
         ID3D11Texture2D* bb = nullptr;
-        sc->GetBuffer(0, IID_ID3D11Texture2D, reinterpret_cast<void**>(&bb));
+        LayerBackBuffer(sc, &bb);
         char what[900];
         FullStateDescribe(g_presentFs, bb, what, sizeof what);
         if (bb) bb->Release();
