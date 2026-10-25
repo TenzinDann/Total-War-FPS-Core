@@ -3,9 +3,8 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <cstdint>
-#include "cast_marker.h"
 namespace vm {
-constexpr int kMeleeSfx = 18;
+constexpr int kMeleeSfx = 17;
 extern const wchar_t* const kMeleeSfxNames[kMeleeSfx];
 struct Settings {
     float fovDeg = 55.0f;
@@ -32,10 +31,6 @@ struct Settings {
     int adsSightBone = -1;
     float adsSightPoint[3] = {0.0f, 0.0f, 0.0f};
     float adsSightFront[3] = {0.0f, 0.0f, 0.0f};
-    float scopeZoom = 0.0f;
-    int scopeBone = -1;
-    float scopeLensRadius = 0.0178f;
-    float scopeReticle = 1.0f;
     bool handIk = true;
     float ikGripRi[3] = {0.0f, 0.0f, 0.0f};
     float ikGripLe[3] = {0.0f, 0.0f, 0.0f};
@@ -65,18 +60,15 @@ struct Settings {
     float shellLandPerSec = 6.f;
     float shellGround = 1.75f;
     bool fireSettle = false;
-    float fireStanceSync[2] = {0.f, 0.f};
     float fireRpm = 0.f;
     int magSize = 0;
     bool magDisposable = false;
     int ammoTotal = 0;
-    int ammoUpgrade = 0;
     float reloadRefill = 0.f;
     float reloadEmptyRefill = 0.f;
     wchar_t weaponId[64] = L"";
     bool weaponDefault = false;
     char projectile[64] = "";
-    float fireRange = 0.f;
     wchar_t animSounds[128] = L"";
     float animSoundVolume = 0.7f;
     wchar_t stepFoot[512] = L"";
@@ -128,7 +120,6 @@ struct Settings {
     float flashGasBarrelSmokeFade = 0.9f;
     float flashGasLinger = 1.0f;
     bool shellEject = true;
-    bool shellEjectAnim = false;
     float shellScale = 1.0f;
     float shellSpeed = 1.0f;
     float shellLife = 1.0f;
@@ -190,31 +181,9 @@ struct Settings {
     wchar_t shieldModel[520] = L"";
     float shieldModelMetal = 1.f;
     float meleeStrikeLead = 0.25f;
-    int wh3Emissive = 0;
-    bool wh3Iridescent = false;
-    wchar_t wh3Part[256] = L"";
-    wchar_t wh3Mask[260] = L"";
-    wchar_t emissiveTexture[260] = L"";
-    wchar_t emissiveDistortion[260] = L"";
-    float emissiveStrength = 1.f;
-    float emissiveTint[3] = {1.f, 1.f, 1.f};
-    float emissiveSpeed[2] = {0.f, 0.f};
-    float emissiveDirection[2] = {1.f, 1.f};
-    float emissiveDistort = 0.f;
-    float emissiveTiling[2] = {1.f, 1.f};
-    float emissiveFresnelStrength = 0.f;
-    float emissivePulseSpeed = 0.f;
-    float emissivePulseStrength = 0.f;
-    float emissiveGradientStop[4] = {0.f, 0.33f, 0.67f, 1.f};
-    float emissiveGradientColour[4][3] = {{0.f, 0.f, 0.f}, {0.33f, 0.33f, 0.33f}, {0.67f, 0.67f, 0.67f}, {1.f, 1.f, 1.f}};
-    float iridescenceAmount = 0.f;
-    float iridescenceColourA[3] = {0.96f, 0.26f, 0.95f};
-    float iridescenceColourB[3] = {0.26f, 0.82f, 0.96f};
-    float emissiveScale = 1.f;
-    bool emissiveSoft = false;
     wchar_t meleeSfx[kMeleeSfx][512] = {};
     float meleeSfxVolume[kMeleeSfx] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f,
-                                       -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
+                                       -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
     float meleeSfxPitch[kMeleeSfx][2] = {};
     float meleeSfxMaster = 1.f;
     bool meleeSfxSwingCut = false;
@@ -294,11 +263,7 @@ public:
     float LightLevel(double now) const;
     bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* depth, UINT w, UINT h,
               bool rtvEncodesSrgb, double now, const MuzzleFrame* f, const WorldCam* cam, const Settings& s);
-    void SetScene(ID3D11ShaderResourceView* srv, bool gamma, ID3D11ShaderResourceView* depth = nullptr) {
-        scene_ = srv;
-        sceneGamma_ = gamma;
-        sceneDepth_ = depth;
-    }
+    void SetScene(ID3D11ShaderResourceView* srv, bool gamma) { scene_ = srv; sceneGamma_ = gamma; }
     bool HasDistortion() const;
     void Release();
     bool Loaded() const { return vs_ != nullptr; }
@@ -364,7 +329,6 @@ private:
     ID3D11ShaderResourceView* tex_[11] = {};
     Sheet sheet_[11];
     ID3D11ShaderResourceView* scene_ = nullptr;
-    ID3D11ShaderResourceView* sceneDepth_ = nullptr;
     bool sceneGamma_ = false;
     int burst_ = 0;
     double tLastShot_ = -1.0;
@@ -507,7 +471,6 @@ public:
     bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool rtvEncodesSrgb,
               const CrosshairSettings& s, float spread = 0.f, float alpha = 1.f);
     void Release();
-    bool Prewarm(ID3D11Device* dev);
 private:
     bool Init(ID3D11Device* dev);
     ID3D11Device* dev_ = nullptr;
@@ -520,71 +483,14 @@ private:
     ID3D11DepthStencilState* dss_ = nullptr;
     bool failed_ = false;
 };
-struct CastMarkerStyle {
-    bool enabled = true;
-    float width = 2.6f;
-    float outline = 1.2f;
-    float glow = 9.f;
-    float glowAlpha = 0.32f;
-    float fillAlpha = 0.13f;
-    float pillarWidth = 4.f;
-    float chevron = 13.f;
-    float tone[cm::kTones][3] = {{0.93f, 0.97f, 1.f}, {0.77f, 0.47f, 1.f}, {1.f, 0.67f, 0.24f}, {1.f, 0.33f, 0.30f}, {0.62f, 0.64f, 0.66f}};
-};
-bool LoadCastMarkerStyle(const wchar_t* ini, CastMarkerStyle& s);
-class CastMarker {
-public:
-    bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool rtvEncodesSrgb, const WorldCam& cam, const cm::Frame& f,
-              const CastMarkerStyle& s);
-    void Release();
-    bool Prewarm(ID3D11Device* dev);
-    int Verts() const { return verts_; }
-private:
-    bool Init(ID3D11Device* dev);
-    ID3D11Device* dev_ = nullptr;
-    ID3D11VertexShader* vs_ = nullptr;
-    ID3D11PixelShader* ps_ = nullptr;
-    ID3D11InputLayout* layout_ = nullptr;
-    ID3D11Buffer* vb_ = nullptr;
-    ID3D11BlendState* bs_ = nullptr;
-    ID3D11RasterizerState* rs_ = nullptr;
-    ID3D11DepthStencilState* dss_ = nullptr;
-    bool failed_ = false, warnedFull_ = false;
-    int verts_ = 0;
-};
-struct ScreenBufs {
-    ID3D11Device* dev = nullptr;
-    ID3D11Texture2D* depthTex = nullptr;
-    ID3D11DepthStencilView* dsv = nullptr;
-    UINT depthW = 0, depthH = 0;
-    ID3D11Texture2D* sceneTex = nullptr;
-    ID3D11ShaderResourceView* sceneSrv = nullptr;
-    UINT sceneW = 0, sceneH = 0, sceneMips = 0;
-    DXGI_FORMAT sceneFmt = DXGI_FORMAT_UNKNOWN;
-    ID3D11Texture2D* distTex = nullptr;
-    ID3D11ShaderResourceView* distSrv = nullptr;
-    UINT distW = 0, distH = 0;
-    DXGI_FORMAT distFmt = DXGI_FORMAT_UNKNOWN;
-    ID3D11Texture2D* distDepthTex = nullptr;
-    ID3D11ShaderResourceView* distDepthSrv = nullptr;
-    UINT distDepthW = 0, distDepthH = 0;
-    void Release();
-};
-void ReleaseSharedScreenBuffers();
-struct DrawProf {
-    double depth = 0, scene = 0, wh3 = 0, total = 0;
-};
-extern DrawProf g_drawProf;
 class Renderer {
 public:
-    void ShareScreenBuffers(bool on) { shareScreen_ = on; }
     bool Init(ID3D11Device* dev, const wchar_t* hvmPath, char* err, size_t errLen);
     bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11Texture2D* sceneTex, UINT w, UINT h,
               bool rtvEncodesSrgb, const Settings& s, const Look& look);
     void Release();
     bool Ready() const { return ready_; }
     ID3D11Device* Device() const { return dev_; }
-    bool PrewarmScreen(const D3D11_TEXTURE2D_DESC& backBuffer);
     unsigned Triangles() const { return indexCount_ / 3; }
     unsigned Bones() const { return boneCount_; }
     int BarrelBone() const { return barrelBone_; }
@@ -626,20 +532,15 @@ public:
     bool ClipLoops(int i) const;
     bool Muzzle(float* ndcX, float* ndcY, float* aspect) const;
     bool MuzzleView(MuzzleFrame* f) const;
-    ID3D11DepthStencilView* Depth(UINT w, UINT h) const {
-        const ScreenBufs& b = Sb();
-        return b.dev == dev_ && b.dsv && b.depthW == w && b.depthH == h ? b.dsv : nullptr;
-    }
-    ID3D11ShaderResourceView* SceneSrv() const { return sceneFresh_ ? Sb().sceneSrv : nullptr; }
+    ID3D11DepthStencilView* Depth(UINT w, UINT h) const { return dsv_ && depthW_ == w && depthH_ == h ? dsv_ : nullptr; }
+    ID3D11ShaderResourceView* SceneSrv() const { return sceneFresh_ ? sceneSrv_ : nullptr; }
     bool SceneGamma() const { return sceneGammaEnc_; }
     ID3D11ShaderResourceView* CopyForDistort(ID3D11DeviceContext* ctx, ID3D11Texture2D* backBuffer, UINT w, UINT h, bool* gamma);
-    ID3D11ShaderResourceView* DistortDepth() const { return distDepthOk_ ? Sb().distDepthSrv : nullptr; }
 private:
     struct Submesh {
         uint32_t firstIndex, indexCount;
         int tex[3];
         uint32_t normalMode, materialMode, flags;
-        bool wh3 = false;
     };
     struct Bone {
         int parent;
@@ -656,8 +557,6 @@ private:
     bool CreatePipeline(char* err, size_t errLen);
     bool EnsureDepth(UINT w, UINT h);
     bool EnsureScene(UINT w, UINT h, DXGI_FORMAT fmt);
-    bool EnsureDistTex(UINT w, UINT h, DXGI_FORMAT f);
-    void EnsureDistDepth(UINT w, UINT h);
     void EvalBones(const Look& look);
     void ArmIk(const Settings& s, const float* k12);
     void ShieldIk(const Look& look, const float* nInv12);
@@ -675,27 +574,26 @@ private:
     ID3D11DepthStencilState* dss_ = nullptr;
     ID3D11BlendState* bs_ = nullptr;
     ID3D11SamplerState* samp_ = nullptr;
-    ScreenBufs own_;
-    bool shareScreen_ = false;
-    ScreenBufs& Sb();
-    const ScreenBufs& Sb() const;
+    ID3D11Texture2D* depthTex_ = nullptr;
+    ID3D11DepthStencilView* dsv_ = nullptr;
+    UINT depthW_ = 0, depthH_ = 0;
+    ID3D11Texture2D* sceneTex_ = nullptr;
+    ID3D11ShaderResourceView* sceneSrv_ = nullptr;
+    UINT sceneW_ = 0, sceneH_ = 0, sceneMips_ = 0;
+    DXGI_FORMAT sceneFmt_ = DXGI_FORMAT_UNKNOWN;
     bool sceneBroken_ = false;
     bool sceneFresh_ = false, sceneGammaEnc_ = false;
+    ID3D11Texture2D* distTex_ = nullptr;
+    ID3D11ShaderResourceView* distSrv_ = nullptr;
+    UINT distW_ = 0, distH_ = 0;
+    DXGI_FORMAT distFmt_ = DXGI_FORMAT_UNKNOWN;
     bool distBroken_ = false;
-    bool distDepthOk_ = false;
     static constexpr unsigned kMaxTextures = 64;
     ID3D11ShaderResourceView* srv_[kMaxTextures] = {};
     ID3D11ShaderResourceView* white_ = nullptr;
     unsigned texCount_ = 0;
     Submesh* subs_ = nullptr;
     unsigned subCount_ = 0;
-    unsigned lensSubs_ = 0;
-    void SetupWh3Material(const Settings& s);
-    wchar_t hvmDir_[MAX_PATH] = L"";
-    wchar_t texName_[kMaxTextures][64] = {};
-    ID3D11ShaderResourceView* wh3Srv_[3] = {};
-    uint64_t wh3Key_ = 0;
-    bool wh3On_ = false;
     Bone* bones_ = nullptr;
     unsigned boneCount_ = 0;
     Clip* clips_ = nullptr;
@@ -727,10 +625,6 @@ void AnimStatePop();
 namespace prefetch {
 bool Model(int tag, const wchar_t* hvmPath, int* files, size_t* bytes, char* err, size_t errLen);
 void Drop(int tag);
-bool SetDevice(ID3D11Device* dev);
-int Upgrade(int tag);
-bool ShieldModel(int tag, const wchar_t* hsmPath, int* files, size_t* bytes);
-void Counters(long* built, long* taken);
 int WarmShaders();
 }
 }

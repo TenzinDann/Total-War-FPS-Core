@@ -3,7 +3,6 @@
 #include <windows.h>
 #include <cstdint>
 #include "kick.h"
-#include "cast_marker.h"
 namespace vmgame {
 using LogFn = void (*)(const char* fmt, ...);
 struct RenderAddrs {
@@ -24,21 +23,6 @@ struct RenderAddrs {
     uintptr_t fnGetBb;
     uintptr_t oBackBufferObj;
     uintptr_t fnBbCopy;
-    uintptr_t globalGfx;
-    uintptr_t oFrameGraph;
-    uintptr_t oPassList;
-    uintptr_t vtComposite;
-    uintptr_t fnCompositeExec;
-    uintptr_t oAaSetting;
-    uintptr_t insFrameGraphLoad;
-    uintptr_t insPassListLea;
-    uintptr_t insPassListRead;
-    uintptr_t vtViewSub;
-    uintptr_t vtView;
-    uintptr_t fnViewDraw;
-    uintptr_t fnViewUi;
-    uintptr_t insViewTailUi;
-    uintptr_t insHelperCallDraw;
 };
 bool VerifyStatic(uintptr_t exeBase, LogFn log, const RenderAddrs& addrs);
 void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log);
@@ -55,8 +39,6 @@ double FireInterval();
 bool CanFire();
 bool Reloading();
 void AmmoInfo(int* ammo, int* size, bool* reloading, int* reserve);
-void RefillAmmo(float frac);
-bool InfTacStamina();
 bool StartMagReload();
 void SelectWeapon(int n);
 void CycleWeapon(int dir);
@@ -64,15 +46,12 @@ bool Busy();
 void SetTrigger(bool held);
 int CurrentWeapon();
 void SetHudCover(float x0, float y0, float x1, float y1);
-void SetUiCovers(const float* r, int n);
 void GetKick(kick::Params* out);
 const char* WeaponProjectile(int idx);
-float WeaponFireRange(int idx);
 void ToggleTestLayer();
 void RequestReload();
 void SetFirstPerson(bool on);
 void PublishView(float yaw, float pitch, float speed);
-void MoveImpulse(float jump, float land);
 void PublishStance(bool ads, bool sprint, bool tac, int adsKind = 0);
 void PublishAdsTime(float normal, float sprint, float tac);
 float CurrentAdsTime(int kind);
@@ -83,8 +62,6 @@ void SpreadDir(const float fwd[3], const float right[3], const float up[3], floa
 void SpreadSeed(unsigned seed);
 void PublishCamera(const float eye[3], const float right[3], const float up[3], const float fwd[3], float fovY);
 void Tracer(const float from[3], const float to[3]);
-void CastMarkerSet(const cm::Frame* f);
-void GameThreadTime(double ms);
 void HitFx(const float pos[3], const float dir[3], bool kill);
 void HitFxStats(int* shown, int* kills);
 bool Muzzle(float* ndcX, float* ndcY, float* aspect);
@@ -98,12 +75,9 @@ bool ShieldWanted();
 void ShieldGame(float* weight, float* moveScale, float* zoomKeep);
 float ShieldCamKick();
 enum MeleeStrikeKind { kStrikeStab, kStrikeSweep, kStrikeHeavySweep, kStrikeHeavy, kStrikeBash, kStrikeKinds };
-enum MeleeCatId { kMeleeCatShieldSpear, kMeleeCatSword, kMeleeCatHammer, kMeleeCatHalberd, kMeleeCats };
-int CurrentMeleeCat();
-const wchar_t* MeleeCatSection(int cat);
 bool MeleeActive();
 void MeleeInput(bool attack, bool block);
-int TakeMeleeStrike(int* cat = nullptr);
+int TakeMeleeStrike();
 void MeleeHitFeedback(int hits);
 enum LauncherKind { kLauncherFrag, kLauncherIce, kLauncherFlame, kLauncherKinds };
 bool LauncherConfigured();

@@ -6,7 +6,6 @@
 #include <set>
 #include <string>
 #include <vector>
-#include "pack_codec.h"
 namespace packx {
 namespace {
 constexpr DWORD kFlagExtendedHeader = 0x100;
@@ -205,69 +204,15 @@ Marker ReadMarker(const std::wstring& root) {
         std::string ln = text.substr(pos, e - pos);
         while (!ln.empty() && (ln.back() == '\r' || ln.back() == ' ')) ln.pop_back();
         pos = e + 1;
-        if (ln.size() > 2 && (ln[0] == 'f' || ln[0] == 'i' || ln[0] == 'r') && ln[1] == ' ') {
+        if (ln.size() > 2 && (ln[0] == 'f' || ln[0] == 'i') && ln[1] == ' ') {
             size_t sp = ln.find(' ', 2);
             if (sp == std::string::npos) continue;
             std::string val = ln.substr(2, sp - 2), rel = ln.substr(sp + 1);
-            if (ln[0] != 'i') m.sizes[rel] = strtoull(val.c_str(), nullptr, 10);
+            if (ln[0] == 'f') m.sizes[rel] = strtoull(val.c_str(), nullptr, 10);
             else m.iniHash[rel] = val;
         }
     }
     return m;
-}
-unsigned long long DiskSize(const Marker& m, const std::string& rel, DWORD stored) {
-    auto it = m.sizes.find(rel);
-    return it == m.sizes.end() ? stored : it->second;
-}
-bool CopyEntryTo(HANDLE src, const Pack& pack, const Entry& e, HANDLE out, std::vector<char>& buf, unsigned long long& raw, LogFn log) {
-    char head[16];
-    DWORD hn = e.size < sizeof head ? e.size : static_cast<DWORD>(sizeof head);
-    if (hn && !ReadAt(src, e.offset, head, hn)) return false;
-    packcodec::Kind k = packcodec::Sniff(head, hn);
-    if (k == packcodec::Kind::Plain) {
-        bool ok = true;
-        unsigned long long off = e.offset;
-        DWORD left = e.size;
-        while (left && ok) {
-            DWORD n = left < buf.size() ? left : static_cast<DWORD>(buf.size());
-            DWORD w = 0;
-            ok = ReadAt(src, off, buf.data(), n) && WriteFile(out, buf.data(), n, &w, nullptr) && w == n;
-            off += n;
-            left -= n;
-        }
-        raw = e.size;
-        return ok;
-    }
-    std::string stored, data, err;
-    if (!ReadEntry(src, e, stored)) return false;
-    if (k == packcodec::Kind::Alias) {
-        std::string rel;
-        unsigned size = 0, crc = 0;
-        if (!packcodec::ParseAlias(stored, rel, size, crc, err)) {
-            log("onepack: tzc1: %s - %s", e.name.c_str(), err.c_str());
-            return false;
-        }
-        std::string name = packcodec::Resolve(e.name, rel);
-        const Entry* from = Find(pack, name.c_str());
-        if (!from || from->compressed || !ReadEntry(src, *from, stored)) {
-            log("onepack: tzc1: %s points to %s, which is missing in the pack", e.name.c_str(), name.c_str());
-            return false;
-        }
-        packcodec::Kind fk = packcodec::Sniff(stored.data(), stored.size());
-        if (fk == packcodec::Kind::Alias) err = "alias of an alias";
-        else if (fk == packcodec::Kind::Compressed) packcodec::Decode(stored, data, err);
-        else data.swap(stored);
-        if (err.empty() && (data.size() != size || packcodec::Crc32(data.data(), data.size()) != crc)) err = "size / CRC32 differs from the alias";
-    } else {
-        packcodec::Decode(stored, data, err);
-    }
-    if (!err.empty()) {
-        log("onepack: tzc1: %s - %s", e.name.c_str(), err.c_str());
-        return false;
-    }
-    DWORD w = 0;
-    raw = data.size();
-    return data.empty() || (WriteFile(out, data.data(), static_cast<DWORD>(data.size()), &w, nullptr) && w == data.size());
 }
 std::string Stamp() {
     SYSTEMTIME t;
@@ -323,7 +268,7 @@ bool ExtractFromPack(const wchar_t* gameRoot, LogFn log) {
         for (const Entry* e : ours) {
             std::string rel = e->name.substr(sizeof kPrefix - 1);
             long long sz = FileSize(Target(root, rel));
-            if (sz < 0 || (!IsIni(rel) && sz != static_cast<long long>(DiskSize(prev, rel, e->size)))) {
+            if (sz < 0 || (!IsIni(rel) && sz != static_cast<long long>(e->size))) {
                 all = false;
                 break;
             }
@@ -344,7 +289,6 @@ bool ExtractFromPack(const wchar_t* gameRoot, LogFn log) {
     size_t written = 0, failed = 0, kept = 0;
     std::set<std::string> now;
     std::map<std::string, std::string> iniHash;
-    std::map<std::string, unsigned long long> rawSize;
     std::string stamp = Stamp();
     for (const Entry* e : ours) {
         std::string rel = e->name.substr(sizeof kPrefix - 1);
@@ -386,9 +330,16 @@ bool ExtractFromPack(const wchar_t* gameRoot, LogFn log) {
             ++failed;
             continue;
         }
-        unsigned long long raw = e->size;
-        bool ok = CopyEntryTo(src, pack, *e, out, buf, raw, log);
-        if (ok && raw != e->size) rawSize[rel] = raw;
+        bool ok = true;
+        unsigned long long off = e->offset;
+        DWORD left = e->size;
+        while (left && ok) {
+            DWORD n = left < buf.size() ? left : static_cast<DWORD>(buf.size());
+            DWORD w = 0;
+            ok = ReadAt(src, off, buf.data(), n) && WriteFile(out, buf.data(), n, &w, nullptr) && w == n;
+            off += n;
+            left -= n;
+        }
         CloseHandle(out);
         if (ok) ++written;
         else {
@@ -412,7 +363,6 @@ bool ExtractFromPack(const wchar_t* gameRoot, LogFn log) {
         fprintf(f, "token=%s\r\npack=%s\r\n", token.c_str(), packA.c_str());
         for (const Entry* e : ours) fprintf(f, "f %lu %s\r\n", static_cast<unsigned long>(e->size), e->name.c_str() + sizeof kPrefix - 1);
         for (const auto& kv : iniHash) fprintf(f, "i %s %s\r\n", kv.second.c_str(), kv.first.c_str());
-        for (const auto& kv : rawSize) fprintf(f, "r %llu %s\r\n", kv.second, kv.first.c_str());
         fclose(f);
     }
     log("onepack: extracted %zu files (%.1f MB) from %s token=%s in %llu ms (previous token %s; %zu stale files removed, %zu edited ini kept)",
