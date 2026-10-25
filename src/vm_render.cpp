@@ -59,11 +59,17 @@ struct PreEntry {
     size_t len;
     ULONGLONG size;
     FILETIME stamp;
+    bool srgb;
+    bool bgTried;
+    ID3D11ShaderResourceView* srv;
+    ID3D11Device* dev;
 };
 constexpr int kMaxPre = 256;
 PreEntry g_pre[kMaxPre];
 int g_preN = 0;
 SRWLOCK g_preLock = SRWLOCK_INIT;
+ID3D11Device* g_preDev = nullptr;
+volatile LONG g_preBuilt = 0, g_preTaken = 0;
 bool FileStamp(const wchar_t* path, ULONGLONG* size, FILETIME* stamp) {
     WIN32_FILE_ATTRIBUTE_DATA fa;
     if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fa)) return false;
@@ -71,23 +77,50 @@ bool FileStamp(const wchar_t* path, ULONGLONG* size, FILETIME* stamp) {
     *stamp = fa.ftLastWriteTime;
     return true;
 }
-void PutPrefetched(int tag, bool hvm, const wchar_t* path, unsigned char* data, size_t len, ULONGLONG size, FILETIME stamp) {
+void PutPrefetched(int tag, bool hvm, const wchar_t* path, unsigned char* data, size_t len, ULONGLONG size, FILETIME stamp, bool srgb = false,
+                   ID3D11ShaderResourceView* srv = nullptr, ID3D11Device* dev = nullptr, bool bgTried = false) {
     AcquireSRWLockExclusive(&g_preLock);
     if (g_preN < kMaxPre && wcslen(path) < MAX_PATH * 2) {
         PreEntry& e = g_pre[g_preN++];
         e.tag = tag, e.hvm = hvm, e.data = data, e.len = len, e.size = size, e.stamp = stamp;
+        e.srgb = srgb, e.srv = srv, e.dev = dev, e.bgTried = bgTried || srv;
         wcscpy(e.path, path);
         data = nullptr;
+        srv = nullptr;
     }
     ReleaseSRWLockExclusive(&g_preLock);
     delete[] data;
+    if (srv) srv->Release();
+}
+bool TakePrefetchedSrv(const wchar_t* path, bool srgb, ID3D11Device* dev, ID3D11ShaderResourceView** out) {
+    PreEntry got = {};
+    bool found = false;
+    AcquireSRWLockExclusive(&g_preLock);
+    for (int i = 0; i < g_preN; ++i) {
+        if (g_pre[i].hvm || !g_pre[i].srv || g_pre[i].srgb != srgb || g_pre[i].dev != dev || _wcsicmp(g_pre[i].path, path)) continue;
+        got = g_pre[i];
+        g_pre[i] = g_pre[--g_preN];
+        found = true;
+        break;
+    }
+    ReleaseSRWLockExclusive(&g_preLock);
+    if (!found) return false;
+    ULONGLONG size = 0;
+    FILETIME stamp = {};
+    if (!FileStamp(path, &size, &stamp) || size != got.size || CompareFileTime(&stamp, &got.stamp)) {
+        got.srv->Release();
+        return false;
+    }
+    *out = got.srv;
+    InterlockedIncrement(&g_preTaken);
+    return true;
 }
 bool TakePrefetched(const wchar_t* path, bool hvm, unsigned char** out, size_t* outLen) {
     PreEntry got = {};
     bool found = false;
     AcquireSRWLockExclusive(&g_preLock);
     for (int i = 0; i < g_preN; ++i) {
-        if (g_pre[i].hvm != hvm || _wcsicmp(g_pre[i].path, path)) continue;
+        if (g_pre[i].hvm != hvm || !g_pre[i].data || _wcsicmp(g_pre[i].path, path)) continue;
         got = g_pre[i];
         g_pre[i] = g_pre[--g_preN];
         found = true;
@@ -143,14 +176,8 @@ UINT BlockBytes(DXGI_FORMAT f) {
     default: return 0;
     }
 }
-bool LoadDds(ID3D11Device* dev, const wchar_t* path, bool srgb, ID3D11ShaderResourceView** srvOut, char* err,
-             size_t errLen) {
-    unsigned char* data = nullptr;
-    size_t len = 0;
-    if (!TakePrefetched(path, false, &data, &len) && !ReadFileAll(path, &data, &len)) {
-        SetErr(err, errLen, "texture missing: %ls", path);
-        return false;
-    }
+bool DdsCreate(ID3D11Device* dev, const unsigned char* data, size_t len, bool srgb, const wchar_t* path, ID3D11ShaderResourceView** srvOut,
+               char* err, size_t errLen) {
     bool ok = false;
     do {
         if (len < 4 + sizeof(DdsHeader) || memcmp(data, "DDS ", 4) != 0) {
@@ -245,6 +272,18 @@ bool LoadDds(ID3D11Device* dev, const wchar_t* path, bool srgb, ID3D11ShaderReso
         }
         ok = true;
     } while (false);
+    return ok;
+}
+bool LoadDds(ID3D11Device* dev, const wchar_t* path, bool srgb, ID3D11ShaderResourceView** srvOut, char* err,
+             size_t errLen) {
+    if (TakePrefetchedSrv(path, srgb, dev, srvOut)) return true;
+    unsigned char* data = nullptr;
+    size_t len = 0;
+    if (!TakePrefetched(path, false, &data, &len) && !ReadFileAll(path, &data, &len)) {
+        SetErr(err, errLen, "texture missing: %ls", path);
+        return false;
+    }
+    bool ok = DdsCreate(dev, data, len, srgb, path, srvOut, err, errLen);
     delete[] data;
     return ok;
 }
@@ -391,16 +430,30 @@ const char kShader[] = R"HLSL(cbuffer CFrame : register(b0) {
     float4 uScene;
     float4 uFlashPos;
     float4 uFlashCol;
+    float4 uLens0;
+    float4 uLens1;
+    float4 uLens2;
 };
 cbuffer CBones : register(b1) { float4 uBones[768]; };
 cbuffer CMat : register(b2) {
     float4 uMat;
     float4 uMat2;
+    float4 uMat3;
+    float4 uEm0;
+    float4 uEm1;
+    float4 uEm2;
+    float4 uEm3;
+    float4 uEmStop;
+    float4 uEmC1, uEmC2, uEmC3, uEmC4;
+    float4 uIrA, uIrB;
 };
 Texture2D tAlbedo : register(t0);
 Texture2D tNormal : register(t1);
 Texture2D tMaterial : register(t2);
 Texture2D tScene : register(t3);
+Texture2D tEmMask : register(t4);
+Texture2D tEmTex : register(t5);
+Texture2D tEmDist : register(t6);
 SamplerState sLinear : register(s0);
 struct VSIn {
     float3 pos : POSITION; float3 nrm : NORMAL; float4 tan : TANGENT; float2 uv : TEXCOORD0;
@@ -435,8 +488,44 @@ float3 SrgbDecode(float3 c) {
     float3 hi = pow((c + 0.055) / 1.055, 2.4);
     return float3(c.x <= 0.04045 ? lo.x : hi.x, c.y <= 0.04045 ? lo.y : hi.y, c.z <= 0.04045 ? lo.z : hi.z);
 }
+float3 RgbToHsl(float3 c) {
+    float mn = min(min(c.r, c.g), c.b), mx = max(max(c.r, c.g), c.b), d = mx - mn, l2 = mx + mn;
+    if (d <= 0) return float3(0, 0, l2 * 0.5);
+    float s = d / (l2 < 1 ? max(l2, 1e-6) : max(2 - l2, 1e-6));
+    float3 dl = ((mx - c) / 6 + d * 0.5) / d;
+    float hh = c.r == mx ? dl.b - dl.g : (c.g == mx ? 1.0 / 3 + dl.r - dl.b : 2.0 / 3 + dl.g - dl.r);
+    hh = hh < 0 ? hh + 1 : (hh > 1 ? hh - 1 : hh);
+    return float3(hh, s, l2 * 0.5);
+}
+float HueToRgb(float v1, float v2, float vh) {
+    vh = vh < 0 ? vh + 1 : (vh > 1 ? vh - 1 : vh);
+    if (vh < 1.0 / 6) return v1 + (v2 - v1) * 6 * vh;
+    if (vh < 0.5) return v2;
+    if (vh < 2.0 / 3) return v1 + (v2 - v1) * (2.0 / 3 - vh) * 6;
+    return v1;
+}
+float3 HslToRgb(float3 hsl) {
+    if (hsl.y == 0) return hsl.zzz;
+    float v2 = hsl.z < 0.5 ? hsl.z * (1 + hsl.y) : hsl.z + hsl.y - hsl.y * hsl.z, v1 = 2 * hsl.z - v2;
+    return float3(HueToRgb(v1, v2, hsl.x + 1.0 / 3), HueToRgb(v1, v2, hsl.x), HueToRgb(v1, v2, hsl.x - 1.0 / 3));
+}
+float Bar(float2 d, float a, float b, float hw) {
+    float ax = abs(d.x);
+    return saturate(min(ax - a, b - ax) + 0.5) * saturate(hw - abs(d.y) + 0.5);
+}
+float Reticle(float2 d, float R) {
+    float t = max(0.6, R * 0.003), T = max(1.5, R * 0.016), g = R * 0.035, dot_r = max(1.0, R * 0.01);
+    float c = max(max(Bar(d, g, 0.6 * R, t), Bar(d.yx, g, 0.6 * R, t)), max(Bar(d, 0.6 * R, R, T), Bar(d.yx, 0.6 * R, R, T)));
+    float2 ad = abs(d);
+    [unroll] for (int k = 1; k <= 4; ++k) {
+        float p = k * 0.12 * R;
+        c = max(c, max(saturate(dot_r - length(ad - float2(p, 0)) + 0.5), saturate(dot_r - length(ad - float2(0, p)) + 0.5)));
+    }
+    return c;
+}
 float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
     float4 alb = tAlbedo.Sample(sLinear, i.uv);
+    if (uMat3.y > 0.5 && alb.a < 0.5) discard;
     float3 N = normalize(i.n);
     float3 V = normalize(-i.vpos);
     if (dot(N, V) < 0) N = -N;
@@ -462,6 +551,49 @@ float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
             rough = pow(2.0 / (e + 2.0), 0.25);
             if (uMat2.z > 0.5) metal = m.g;
         } else if (uMat.w > 0.5) { rough = m.r; metal = m.g; } else { metal = m.r; rough = m.g; }
+    }
+    if (uEm3.z > 0.5) {
+        float4 mk = tEmMask.Sample(sLinear, i.uv);
+        float3 base = alb.rgb;
+        float3 ic = lerp(uIrA.rgb, uIrB.rgb, abs(dot(N, V)));
+        float3 cg = pow(abs(ic), 1 / 2.2), bg = pow(abs(base), 1 / 2.2);
+        float3 ov = dot(base, float3(0.3, 0.59, 0.11)) > 0.269 ? 1 - 2 * (1 - cg) * (1 - bg) : 2 * cg * bg;
+        ov = pow(saturate(ov), 2.2);
+        float am = max(uEm3.w, 0);
+        float3 r5 = lerp(base, ov, min(am, 1));
+        float3 hc = RgbToHsl(cg);
+        float3 cb = pow(abs(HslToRgb(float3(hc.xy, RgbToHsl(pow(abs(r5), 1 / 2.2)).z))), 2.2);
+        float3 ir = lerp(r5, cb, saturate(min(am, 2) - 1));
+        alb.rgb = lerp(lerp(base, ir, mk.b), base, saturate(rough));
+    }
+    float3 emis = float3(0, 0, 0);
+    if (uEm0.x > 0.5) {
+        float maskA = tEmMask.Sample(sLinear, i.uv).a;
+        float2 dn = tEmDist.Sample(sLinear, i.uv).rb;
+        float2 euv = (i.uv + dn * uEm0.w + uEm2.xy) * uEm2.zw;
+        float et = tEmTex.Sample(sLinear, euv).r;
+        float fr = 1 - saturate(dot(N, V));
+        fr *= fr;
+        float3 e;
+        if (uEm0.x > 1.5) {
+            e = uEm1.rgb * ((uEm0.y * et + uEm1.w + uEm0.z * fr) * maskA);
+        } else {
+            float v = (et + uEm1.w + uEm0.z * fr) * maskA;
+            float3 g;
+            if (v <= uEmStop.x) g = uEmC1.rgb;
+            else if (v <= uEmStop.y) g = lerp(uEmC1.rgb, uEmC2.rgb, (v - uEmStop.x) / (uEmStop.y - uEmStop.x + 0.001));
+            else if (v <= uEmStop.z) g = lerp(uEmC2.rgb, uEmC3.rgb, (v - uEmStop.y) / (uEmStop.z - uEmStop.y + 0.001));
+            else if (v <= uEmStop.w) g = lerp(uEmC3.rgb, uEmC4.rgb, (v - uEmStop.z) / (uEmStop.w - uEmStop.z + 0.001));
+            else g = uEmC4.rgb;
+            e = g * uEm0.y * uEm1.rgb;
+        }
+        float d = max(max(max(e.r, e.g), e.b), 1);
+        float el = dot(e, float3(0.2126, 0.7152, 0.0722));
+        alb.rgb = 1 - (1 - alb.rgb) * (1 - e / d);
+        float ls = saturate(el);
+        metal *= 1 - ls;
+        rough = lerp(rough, 1, ls);
+        emis = alb.rgb * (1 - metal) * (min(d * el * 0.02, 1) * 255 * uEm3.x);
     }
     rough = clamp(rough, 0.04, 1);
     float3 ambSky = uAmbSky.rgb, ambGround = uAmbGround.rgb, lightCol = uLightColor.rgb;
@@ -509,8 +641,23 @@ float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
     float3 amb = lerp(ambGround, ambSky, hemi);
     float3 Fa = F0 + (max(float3(1 - rough, 1 - rough, 1 - rough), F0) - F0) * pow(1 - NdV, 5);
     float3 ambient = amb * (alb.rgb * (1 - metal) * (1 - Fa)) + lerp(ambGround, ambSky, saturate(reflect(-V, N).y * 0.5 + 0.5)) * Fa * (1 - rough * 0.7);
-    float3 c = (direct + ambient) * uParams.x;
+    float3 c = (direct + ambient + emis) * uParams.x;
+    if (uEm3.y > 0.5 && max(max(emis.r, emis.g), emis.b) > 1e-3) {
+        float m = max(max(c.r, c.g), c.b);
+        if (m > 0.8) c *= (0.8 + 0.2 * (1 - exp(-(m - 0.8) / 0.2))) / m;
+    }
     if (uParams.y > 0.5) c = SrgbEncode(c);
+    if (uMat3.x > 0.5 && uLens1.z > 0.001 && uScene.w > 0.5) {
+        float2 px = i.pos.xy, ax = uLens0.xy;
+        float R = max(uLens0.z, 1.0);
+        float3 sc = tScene.SampleLevel(sLinear, (ax + (px - ax) / max(uLens0.w, 1.0)) * uLens2.xy, 0).rgb;
+        if (uScene.z > 0.5) sc = SrgbDecode(saturate(sc));
+        float ra = length(px - ax) / R, rl = length(px - uLens1.xy) / R;
+        sc *= (1 - smoothstep(0.80, 1.02, ra)) * (1 - 0.35 * smoothstep(0.65, 1.0, rl));
+        sc = lerp(sc, float3(0.004, 0.004, 0.004), Reticle(px - ax, R) * saturate(uLens1.w));
+        if (uParams.y > 0.5) sc = SrgbEncode(sc);
+        c = lerp(c, sc, saturate(uLens1.z));
+    }
     return float4(c, 1);
 }
 )HLSL";
@@ -578,7 +725,7 @@ struct StateBackup {
     UINT sampleMask = 0;
     UINT stencilRef = 0;
     ID3D11DepthStencilState* dss = nullptr;
-    ID3D11ShaderResourceView* psSrv[4] = {};
+    ID3D11ShaderResourceView* psSrv[7] = {};
     ID3D11SamplerState* psSampler = nullptr;
     ID3D11PixelShader* ps = nullptr;
     ID3D11VertexShader* vs = nullptr;
@@ -603,7 +750,7 @@ struct StateBackup {
         c->OMGetBlendState(&bs, blendFactor, &sampleMask);
         c->OMGetDepthStencilState(&dss, &stencilRef);
         c->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, &dsv);
-        c->PSGetShaderResources(0, 4, psSrv);
+        c->PSGetShaderResources(0, 7, psSrv);
         c->PSGetSamplers(0, 1, &psSampler);
         psInstCount = vsInstCount = gsInstCount = hsInstCount = dsInstCount = 256;
         c->PSGetShader(&ps, psInst, &psInstCount);
@@ -630,7 +777,7 @@ struct StateBackup {
         c->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, dsv);
         for (auto*& r : rtv) SafeRelease(r);
         SafeRelease(dsv);
-        c->PSSetShaderResources(0, 4, psSrv);
+        c->PSSetShaderResources(0, 7, psSrv);
         for (auto*& s : psSrv) SafeRelease(s);
         c->PSSetSamplers(0, 1, &psSampler);
         SafeRelease(psSampler);
@@ -673,8 +820,11 @@ struct CFrame {
     float scene[4];
     float flashPos[4];
     float flashColor[4];
+    float lens0[4];
+    float lens1[4];
+    float lens2[4];
 };
-static_assert(sizeof(CFrame) == 256, "cframe");
+static_assert(sizeof(CFrame) == 304, "cframe");
 float IniFloat(const wchar_t* ini, const wchar_t* key, float def) {
     wchar_t buf[64];
     GetPrivateProfileStringW(L"viewmodel", key, L"", buf, 64, ini);
@@ -736,7 +886,7 @@ void IniVec3(const wchar_t* ini, const wchar_t* key, float* v) {
 const wchar_t* const kMeleeSfxNames[kMeleeSfx] = {L"swing", L"swing_layer", L"push", L"hit_stab", L"hit_stab_heavy",
                                                   L"hit_slash", L"hit_slash_heavy", L"hit_bash", L"hit_body", L"hit_gore",
                                                   L"hit_tail_stab", L"hit_tail_slash", L"block", L"block_tail",
-                                                  L"hit_slash_light", L"hit_l4", L"hit_heavy"};
+                                                  L"hit_slash_light", L"hit_l4", L"hit_heavy", L"swing_heavy"};
 bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (GetFileAttributesW(ini) == INVALID_FILE_ATTRIBUTES) return false;
     s.fovDeg = IniFloat(ini, L"fov", s.fovDeg);
@@ -767,7 +917,14 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.adsSightBone = (sb >= 0 && sb < static_cast<float>(kMaxBones)) ? static_cast<int>(sb) : -1;
     IniVec3(ini, L"ads_sight_point", s.adsSightPoint);
     IniVec3(ini, L"ads_sight_front", s.adsSightFront);
-    s.handIk = IniFloat(ini, L"hand_ik", s.handIk ? 1.f : 0.f) != 0.f;
+    s.scopeZoom = IniFloat(ini, L"scope_zoom", s.scopeZoom);
+    if (!(s.scopeZoom >= 0.f && s.scopeZoom <= 40.f)) s.scopeZoom = 0.f;
+    float scb = IniFloat(ini, L"scope_bone", static_cast<float>(s.scopeBone));
+    s.scopeBone = (scb >= 0 && scb < static_cast<float>(kMaxBones)) ? static_cast<int>(scb) : -1;
+    s.scopeLensRadius = IniFloat(ini, L"scope_lens_radius", s.scopeLensRadius);
+    if (!(s.scopeLensRadius > 0.001f && s.scopeLensRadius < 0.2f)) s.scopeLensRadius = 0.0178f;
+    s.scopeReticle = IniFloat(ini, L"scope_reticle", s.scopeReticle);
+    s.handIk =IniFloat(ini, L"hand_ik", s.handIk ? 1.f : 0.f) != 0.f;
     IniVec3(ini, L"ik_grip_ri", s.ikGripRi);
     IniVec3(ini, L"ik_grip_le", s.ikGripLe);
     GetPrivateProfileStringW(L"viewmodel", L"fire_sound",s.fireSound, s.fireSound, 512, ini);
@@ -794,6 +951,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.shellLandPerSec = IniFloat(ini, L"shell_land_per_sec", s.shellLandPerSec);
     s.shellGround = IniFloat(ini, L"shell_ground", s.shellGround);
     s.fireSettle = IniFloat(ini, L"fire_settle", s.fireSettle ? 1.f : 0.f) != 0.f;
+    IniVec2(ini, L"fire_stance_sync", s.fireStanceSync);
     if (!(s.fireLastVolume <= 2.f)) s.fireLastVolume = -1.f;
     if (!(s.fireCasingVolume >= 0.f && s.fireCasingVolume <= 2.f)) s.fireCasingVolume = 0.08f;
     if (!(s.shellLandVolume >= 0.f && s.shellLandVolume <= 2.f)) s.shellLandVolume = 0.04f;
@@ -803,6 +961,58 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.fireTailGap = IniFloat(ini, L"fire_tail_gap", s.fireTailGap);
     s.meleeStrikeLead = IniFloat(ini, L"melee_strike_lead", s.meleeStrikeLead);
     if (!(s.meleeStrikeLead >= 0.f && s.meleeStrikeLead <= 0.6f)) s.meleeStrikeLead = 0.25f;
+    {
+        wchar_t buf[128];
+        GetPrivateProfileStringW(L"viewmodel", L"wh3_shader", L"\x01", buf, 128, ini);
+        if (buf[0] != 1) {
+            static const struct {
+                const wchar_t* name;
+                int emissive;
+                bool iridescent;
+            } kWh3Shaders[] = {{L"rigid_character_emissive", 1, false},
+                               {L"rigid_character_prop_emissive", 2, false},
+                               {L"rigid_character_iridescent", 0, true},
+                               {L"rigid_character_iridescent_emissive", 1, true},
+                               {L"rigid_character_iridescent_emissive_alpha", 1, true}};
+            s.wh3Emissive = 0;
+            s.wh3Iridescent = false;
+            for (const auto& k : kWh3Shaders)
+                if (!_wcsicmp(buf, k.name)) s.wh3Emissive = k.emissive, s.wh3Iridescent = k.iridescent;
+        }
+        GetPrivateProfileStringW(L"viewmodel", L"wh3_part", s.wh3Part, s.wh3Part, 256, ini);
+        GetPrivateProfileStringW(L"viewmodel", L"wh3_mask", s.wh3Mask, s.wh3Mask, 260, ini);
+        GetPrivateProfileStringW(L"viewmodel", L"emissive_texture", s.emissiveTexture, s.emissiveTexture, 260, ini);
+        GetPrivateProfileStringW(L"viewmodel", L"emissive_distortion", s.emissiveDistortion, s.emissiveDistortion, 260, ini);
+        s.emissiveStrength = IniFloat(ini, L"emissive_strength", s.emissiveStrength);
+        IniVec3(ini, L"emissive_tint", s.emissiveTint);
+        float t[2];
+        GetPrivateProfileStringW(L"viewmodel", L"emissive_speed", L"", buf, 128, ini);
+        int n = buf[0] ? swscanf(buf, L"%f , %f", &t[0], &t[1]) : 0;
+        if (n == 1) t[1] = t[0];
+        if (n >= 1 && std::isfinite(t[0]) && std::isfinite(t[1])) s.emissiveSpeed[0] = t[0], s.emissiveSpeed[1] = t[1];
+        IniVec2(ini, L"emissive_direction", s.emissiveDirection);
+        s.emissiveDistort = IniFloat(ini, L"emissive_distort_strength", s.emissiveDistort);
+        s.emissiveDistort = IniFloat(ini, L"emissive_distortion_scale", s.emissiveDistort);
+        IniVec2(ini, L"emissive_tiling", s.emissiveTiling);
+        float tt = IniFloat(ini, L"emissive_texture_tiling", -1e30f);
+        if (tt > -1e29f) s.emissiveTiling[0] = s.emissiveTiling[1] = tt;
+        s.emissiveFresnelStrength = IniFloat(ini, L"emissive_fresnel_strength", s.emissiveFresnelStrength);
+        s.emissivePulseSpeed = IniFloat(ini, L"emissive_pulse_speed", s.emissivePulseSpeed);
+        s.emissivePulseStrength = IniFloat(ini, L"emissive_pulse_strength", s.emissivePulseStrength);
+        for (int k = 0; k < 4; ++k) {
+            wchar_t key[64];
+            swprintf(key, 64, L"emissive_gradient_stop_%d", k + 1);
+            s.emissiveGradientStop[k] = IniFloat(ini, key, s.emissiveGradientStop[k]);
+            swprintf(key, 64, L"emissive_gradient_colour_stop_%d", k + 1);
+            IniVec3(ini, key, s.emissiveGradientColour[k]);
+        }
+        s.iridescenceAmount = IniFloat(ini, L"iridescence_amount", s.iridescenceAmount);
+        IniVec3(ini, L"iridescence_colour_a", s.iridescenceColourA);
+        IniVec3(ini, L"iridescence_colour_b", s.iridescenceColourB);
+        s.emissiveScale = IniFloat(ini, L"emissive_scale", s.emissiveScale);
+        if (!(s.emissiveScale >= 0.f && s.emissiveScale <= 100.f)) s.emissiveScale = 1.f;
+        s.emissiveSoft = IniFloat(ini, L"emissive_soft", s.emissiveSoft ? 1.f : 0.f) != 0.f;
+    }
     for (int i = 0; i < kMeleeSfx; ++i) {
         wchar_t key[64];
         swprintf(key, 64, L"melee_sfx_%ls", kMeleeSfxNames[i]);
@@ -824,10 +1034,11 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.magSize = static_cast<int>(IniFloat(ini, L"mag_size", static_cast<float>(s.magSize)));
     s.magDisposable = IniFloat(ini, L"mag_disposable", s.magDisposable ? 1.f : 0.f) != 0.f;
     s.ammoTotal = static_cast<int>(IniFloat(ini, L"ammo_total", static_cast<float>(s.ammoTotal)));
+    s.ammoUpgrade = static_cast<int>(IniFloat(ini, L"ammo_upgrade", static_cast<float>(s.ammoUpgrade)));
+    if (s.ammoUpgrade < 0 || s.ammoUpgrade > 10000) s.ammoUpgrade = 0;
     s.reloadRefill = IniFloat(ini, L"reload_refill", s.reloadRefill);
     s.reloadEmptyRefill = IniFloat(ini, L"reload_empty_refill", s.reloadEmptyRefill);
     GetPrivateProfileStringW(L"viewmodel", L"weapon_id", s.weaponId, s.weaponId, 64, ini);
-    GetPrivateProfileStringW(L"viewmodel", L"weapon_owner", s.weaponOwner, s.weaponOwner, 160, ini);
     GetPrivateProfileStringW(L"viewmodel", L"anim_sounds", s.animSounds, s.animSounds, 128, ini);
     s.animSoundVolume = IniFloat(ini, L"anim_sound_volume", s.animSoundVolume);
     GetPrivateProfileStringW(L"viewmodel", L"step_foot", s.stepFoot, s.stepFoot, 512, ini);
@@ -912,6 +1123,8 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
         GetPrivateProfileStringW(L"viewmodel", L"projectile", L"", pw, 64, ini);
         if (pw[0] && WideCharToMultiByte(CP_UTF8, 0, pw, -1, s.projectile, sizeof s.projectile, nullptr, nullptr) <= 0) s.projectile[0] = 0;
     }
+    s.fireRange = IniFloat(ini, L"fire_range", s.fireRange);
+    if (!(s.fireRange == 0.f || (s.fireRange >= 5.f && s.fireRange <= 2000.f))) s.fireRange = 0.f;
     if (!(s.fireLfeVolume >= 0.f && s.fireLfeVolume <= 2.f)) s.fireLfeVolume = 0.7f;
     if (!(s.fireAtmoVolume >= 0.f && s.fireAtmoVolume <= 2.f)) s.fireAtmoVolume = 0.7f;
     if (!(s.fireTailVolume >= 0.f && s.fireTailVolume <= 2.f)) s.fireTailVolume = 0.7f;
@@ -952,6 +1165,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.flashGasAds = IniFloat(ini, L"flash_gas_ads", s.flashGasAds);
     if (!(s.flashGasAds >= 0.f && s.flashGasAds <= 1.f)) s.flashGasAds = 1.f;
     s.shellEject = IniFloat(ini, L"shell_eject", s.shellEject ? 1.f : 0.f) != 0.f;
+    s.shellEjectAnim = IniFloat(ini, L"shell_eject_anim", s.shellEjectAnim ? 1.f : 0.f) != 0.f;
     s.shellScale = IniFloat(ini, L"shell_scale", s.shellScale);
     s.shellSpeed = IniFloat(ini, L"shell_speed", s.shellSpeed);
     s.shellLife = IniFloat(ini, L"shell_life", s.shellLife);
@@ -1148,6 +1362,7 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
         wchar_t* slash = wcsrchr(dir, L'\\');
         if (!slash) slash = wcsrchr(dir, L'/');
         if (slash) slash[1] = 0;
+        wcsncpy(hvmDir_, dir, MAX_PATH - 1);
         bool texOk = true;
         for (uint32_t t = 0; t < h.textureCount; ++t) {
             HvmTexture tx;
@@ -1156,6 +1371,14 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
             tx.file[75] = 0;
             wchar_t rel[128];
             MultiByteToWideChar(CP_UTF8, 0, tx.file, -1, rel, 128);
+            if (t < kMaxTextures) {
+                const wchar_t* b = rel;
+                for (const wchar_t* q = rel; *q; ++q)
+                    if (*q == L'/' || *q == L'\\') b = q + 1;
+                wcsncpy(texName_[t], b, 63);
+                texName_[t][63] = 0;
+                _wcslwr(texName_[t]);
+            }
             wchar_t full[MAX_PATH * 2];
             swprintf(full, MAX_PATH * 2, L"%ls%ls", dir, rel);
             if (!LoadDds(dev_, full, tx.srgb != 0, &srv_[t], err, errLen)) {
@@ -1167,6 +1390,7 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
         texCount_ = h.textureCount;
         subs_ = new Submesh[h.submeshCount];
         subCount_ = h.submeshCount;
+        lensSubs_ = 0;
         bool subOk = true;
         for (uint32_t s = 0; s < h.submeshCount; ++s) {
             HvmSubmesh hs;
@@ -1183,6 +1407,7 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
             subs_[s].normalMode = hs.normalMode;
             subs_[s].materialMode = hs.materialMode;
             subs_[s].flags = hs.flags;
+            if ((hs.flags >> 19) & 1) ++lensSubs_;
         }
         if (!subOk) {
             SetErr(err, errLen, "submesh index range out of bounds");
@@ -1369,7 +1594,7 @@ bool Renderer::CreatePipeline(char* err, size_t errLen) {
     ok = SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbFrame_));
     bd.ByteWidth = kMaxBones * 3 * 16;
     ok = ok && SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbBones_));
-    bd.ByteWidth = 32;
+    bd.ByteWidth = 48 + 11 * 16;
     ok = ok && SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbMat_));
     D3D11_RASTERIZER_DESC rd = {};
     rd.FillMode = D3D11_FILL_SOLID;
@@ -1420,7 +1645,49 @@ bool Renderer::Init(ID3D11Device* dev, const wchar_t* hvmPath, char* err, size_t
     ready_ = true;
     return true;
 }
+DrawProf g_drawProf;
+namespace {
+ScreenBufs g_sharedScreen;
+double ProfNow() {
+    static LARGE_INTEGER f = {};
+    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    LARGE_INTEGER c;
+    QueryPerformanceCounter(&c);
+    return static_cast<double>(c.QuadPart) / static_cast<double>(f.QuadPart);
+}
+}
+void ScreenBufs::Release() {
+    SafeRelease(dsv);
+    SafeRelease(depthTex);
+    depthW = depthH = 0;
+    SafeRelease(sceneSrv);
+    SafeRelease(sceneTex);
+    sceneW = sceneH = sceneMips = 0;
+    sceneFmt = DXGI_FORMAT_UNKNOWN;
+    SafeRelease(distSrv);
+    SafeRelease(distTex);
+    distW = distH = 0;
+    distFmt = DXGI_FORMAT_UNKNOWN;
+    SafeRelease(distDepthSrv);
+    SafeRelease(distDepthTex);
+    distDepthW = distDepthH = 0;
+    dev = nullptr;
+}
+void ReleaseSharedScreenBuffers() { g_sharedScreen.Release(); }
+ScreenBufs& Renderer::Sb() {
+    ScreenBufs& b = shareScreen_ ? g_sharedScreen : own_;
+    if (b.dev != dev_) {
+        b.Release();
+        b.dev = dev_;
+    }
+    return b;
+}
+const ScreenBufs& Renderer::Sb() const { return shareScreen_ ? g_sharedScreen : own_; }
 bool Renderer::EnsureDepth(UINT w, UINT h) {
+    ScreenBufs& b = Sb();
+    ID3D11DepthStencilView*& dsv_ = b.dsv;
+    ID3D11Texture2D*& depthTex_ = b.depthTex;
+    UINT &depthW_ = b.depthW, &depthH_ = b.depthH;
     if (dsv_ && w == depthW_ && h == depthH_) return true;
     SafeRelease(dsv_);
     SafeRelease(depthTex_);
@@ -1428,12 +1695,15 @@ bool Renderer::EnsureDepth(UINT w, UINT h) {
     td.Width = w;
     td.Height = h;
     td.MipLevels = td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_D32_FLOAT;
+    td.Format = DXGI_FORMAT_R32_TYPELESS;
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    D3D11_DEPTH_STENCIL_VIEW_DESC dvd = {};
+    dvd.Format = DXGI_FORMAT_D32_FLOAT;
+    dvd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
     if (FAILED(dev_->CreateTexture2D(&td, nullptr, &depthTex_)) ||
-        FAILED(dev_->CreateDepthStencilView(depthTex_, nullptr, &dsv_))) {
+        FAILED(dev_->CreateDepthStencilView(depthTex_, &dvd, &dsv_))) {
         SafeRelease(dsv_);
         SafeRelease(depthTex_);
         return false;
@@ -1445,6 +1715,10 @@ bool Renderer::EnsureDepth(UINT w, UINT h) {
 ID3D11ShaderResourceView* Renderer::CopyForDistort(ID3D11DeviceContext* ctx, ID3D11Texture2D* backBuffer, UINT w, UINT h, bool* gamma) {
     if (gamma) *gamma = false;
     if (!ctx || !backBuffer || !dev_ || distBroken_) return nullptr;
+    ScreenBufs& b = Sb();
+    ID3D11Texture2D *&distTex_ = b.distTex, *&depthTex_ = b.depthTex, *&distDepthTex_ = b.distDepthTex;
+    ID3D11ShaderResourceView *&distSrv_ = b.distSrv, *&distDepthSrv_ = b.distDepthSrv;
+    UINT &depthW_ = b.depthW, &depthH_ = b.depthH;
     D3D11_TEXTURE2D_DESC sd;
     backBuffer->GetDesc(&sd);
     if (sd.SampleDesc.Count != 1 || sd.Width != w || sd.Height != h) return nullptr;
@@ -1456,35 +1730,100 @@ ID3D11ShaderResourceView* Renderer::CopyForDistort(ID3D11DeviceContext* ctx, ID3
     case DXGI_FORMAT_R16G16B16A16_TYPELESS: f = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
     default: break;
     }
-    if (!distSrv_ || w != distW_ || h != distH_ || f != distFmt_) {
-        SafeRelease(distSrv_);
-        SafeRelease(distTex_);
-        D3D11_TEXTURE2D_DESC td = {};
-        td.Width = w;
-        td.Height = h;
-        td.MipLevels = 1;
-        td.ArraySize = 1;
-        td.Format = f;
-        td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_DEFAULT;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        if (FAILED(dev_->CreateTexture2D(&td, nullptr, &distTex_)) || FAILED(dev_->CreateShaderResourceView(distTex_, nullptr, &distSrv_))) {
-            SafeRelease(distSrv_);
-            SafeRelease(distTex_);
-            distBroken_ = true;
-            return nullptr;
-        }
-        distW_ = w;
-        distH_ = h;
-        distFmt_ = f;
-    }
+    if (!EnsureDistTex(w, h, f)) return nullptr;
     ctx->CopySubresourceRegion(distTex_, 0, 0, 0, 0, backBuffer, 0, nullptr);
+    distDepthOk_ = false;
+    if (depthTex_ && depthW_ == w && depthH_ == h) {
+        EnsureDistDepth(w, h);
+        if (distDepthSrv_) {
+            ctx->CopyResource(distDepthTex_, depthTex_);
+            distDepthOk_ = true;
+        }
+    }
     if (gamma)
         *gamma = !(f == DXGI_FORMAT_R16G16B16A16_FLOAT || f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
     return distSrv_;
 }
+bool Renderer::EnsureDistTex(UINT w, UINT h, DXGI_FORMAT f) {
+    if (distBroken_ || !dev_) return false;
+    ScreenBufs& b = Sb();
+    ID3D11Texture2D*& distTex_ = b.distTex;
+    ID3D11ShaderResourceView*& distSrv_ = b.distSrv;
+    UINT &distW_ = b.distW, &distH_ = b.distH;
+    DXGI_FORMAT& distFmt_ = b.distFmt;
+    if (distSrv_ && w == distW_ && h == distH_ && f == distFmt_) return true;
+    SafeRelease(distSrv_);
+    SafeRelease(distTex_);
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = w;
+    td.Height = h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = f;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(dev_->CreateTexture2D(&td, nullptr, &distTex_)) || FAILED(dev_->CreateShaderResourceView(distTex_, nullptr, &distSrv_))) {
+        SafeRelease(distSrv_);
+        SafeRelease(distTex_);
+        distBroken_ = true;
+        return false;
+    }
+    distW_ = w;
+    distH_ = h;
+    distFmt_ = f;
+    return true;
+}
+void Renderer::EnsureDistDepth(UINT w, UINT h) {
+    ScreenBufs& b = Sb();
+    ID3D11Texture2D*& distDepthTex_ = b.distDepthTex;
+    ID3D11ShaderResourceView*& distDepthSrv_ = b.distDepthSrv;
+    UINT &distDepthW_ = b.distDepthW, &distDepthH_ = b.distDepthH;
+    if (distDepthSrv_ && distDepthW_ == w && distDepthH_ == h) return;
+    SafeRelease(distDepthSrv_);
+    SafeRelease(distDepthTex_);
+    D3D11_TEXTURE2D_DESC dd = {};
+    dd.Width = w;
+    dd.Height = h;
+    dd.MipLevels = dd.ArraySize = 1;
+    dd.Format = DXGI_FORMAT_R32_TYPELESS;
+    dd.SampleDesc.Count = 1;
+    dd.Usage = D3D11_USAGE_DEFAULT;
+    dd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SHADER_RESOURCE_VIEW_DESC vd = {};
+    vd.Format = DXGI_FORMAT_R32_FLOAT;
+    vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    vd.Texture2D.MipLevels = 1;
+    if (FAILED(dev_->CreateTexture2D(&dd, nullptr, &distDepthTex_)) || FAILED(dev_->CreateShaderResourceView(distDepthTex_, &vd, &distDepthSrv_))) {
+        SafeRelease(distDepthSrv_);
+        SafeRelease(distDepthTex_);
+    }
+    distDepthW_ = w;
+    distDepthH_ = h;
+}
+bool Renderer::PrewarmScreen(const D3D11_TEXTURE2D_DESC& bb) {
+    if (!ready_ || !dev_ || bb.SampleDesc.Count != 1 || bb.Width < 16 || bb.Height < 16) return false;
+    const UINT w = bb.Width, h = bb.Height;
+    DXGI_FORMAT f = bb.Format;
+    switch (f) {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS: f = DXGI_FORMAT_R8G8B8A8_UNORM; break;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS: f = DXGI_FORMAT_B8G8R8A8_UNORM; break;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS: f = DXGI_FORMAT_R10G10B10A2_UNORM; break;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS: f = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
+    default: break;
+    }
+    const bool depth = EnsureDepth(w, h);
+    if (!sceneBroken_) EnsureScene(w, h, f);
+    if (EnsureDistTex(w, h, f) && depth) EnsureDistDepth(w, h);
+    return depth;
+}
 bool Renderer::EnsureScene(UINT w, UINT h, DXGI_FORMAT fmt) {
     if (sceneBroken_) return false;
+    ScreenBufs& b = Sb();
+    ID3D11Texture2D*& sceneTex_ = b.sceneTex;
+    ID3D11ShaderResourceView*& sceneSrv_ = b.sceneSrv;
+    UINT &sceneW_ = b.sceneW, &sceneH_ = b.sceneH, &sceneMips_ = b.sceneMips;
+    DXGI_FORMAT& sceneFmt_ = b.sceneFmt;
     if (sceneSrv_ && w == sceneW_ && h == sceneH_ && fmt == sceneFmt_) return true;
     SafeRelease(sceneSrv_);
     SafeRelease(sceneTex_);
@@ -1964,8 +2303,11 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
                     bool rtvEncodesSrgb, const Settings& s, const Look& look) {
     sceneFresh_ = false;
     shieldViewValid_ = false;
+    const double tProf0 = ProfNow();
+    g_drawProf = DrawProf();
     if (!ready_ || !ctx || !rtv || !w || !h) return false;
     if (!EnsureDepth(w, h)) return false;
+    g_drawProf.depth = (ProfNow() - tProf0) * 1000.0;
     static float palette[kMaxBones * 12 + 12];
     float muzzleModel[3] = {s.muzzleLocal[0], s.muzzleLocal[1], s.muzzleLocal[2]};
     float axisModel[3] = {s.muzzleAxis[0], s.muzzleAxis[1], s.muzzleAxis[2]};
@@ -2243,10 +2585,32 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
         for (int k = 0; k < 3; ++k) cf.flashColor[k] = c[k] * 2.5f * s.flashLight * look.flashLight;
         cf.flashColor[3] = 1.f;
     }
+    bool lensOn = false;
+    const int lensBone = s.scopeBone >= 0 ? s.scopeBone : s.adsSightBone;
+    if (s.scopeZoom > 1.f && aw > 0.f && lensSubs_ && lensBone >= 0 && lensBone < static_cast<int>(boneCount_)) {
+        Aff lv = AffMul(model, g_world[lensBone]);
+        float p[3] = {lv.m[3], lv.m[7], lv.m[11]}, d[3] = {lv.m[2], lv.m[6], lv.m[10]};
+        float dl = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        if (dl > 1e-6f && d[2] > 0.05f * dl && p[2] > zn) {
+            float hw = 0.5f * static_cast<float>(w), hh = 0.5f * static_cast<float>(h);
+            cf.lens0[0] = hw + hw * xs * d[0] / d[2];
+            cf.lens0[1] = hh - hh * ys * d[1] / d[2];
+            cf.lens0[2] = hh * ys * s.scopeLensRadius * dl / p[2];
+            cf.lens0[3] = s.scopeZoom;
+            cf.lens1[0] = hw + hw * xs * p[0] / p[2];
+            cf.lens1[1] = hh - hh * ys * p[1] / p[2];
+            cf.lens1[2] = aw;
+            cf.lens1[3] = s.scopeReticle;
+            cf.lens2[0] = 1.f / static_cast<float>(w);
+            cf.lens2[1] = 1.f / static_cast<float>(h);
+            lensOn = true;
+        }
+    }
     StateBackup bk;
     bk.Save(ctx);
     bool haveScene = false;
-    if (sceneTex && s.sceneLight > 0.001f) {
+    const double tProfScene = ProfNow();
+    if (sceneTex && (s.sceneLight > 0.001f || lensOn)) {
         D3D11_TEXTURE2D_DESC sd;
         sceneTex->GetDesc(&sd);
         DXGI_FORMAT f = sd.Format;
@@ -2258,11 +2622,12 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
         default: break;
         }
         if (sd.SampleDesc.Count == 1 && sd.Width == w && sd.Height == h && EnsureScene(w, h, f)) {
-            ctx->CopySubresourceRegion(sceneTex_, 0, 0, 0, 0, sceneTex, 0, nullptr);
-            ctx->GenerateMips(sceneSrv_);
+            const ScreenBufs& b = Sb();
+            ctx->CopySubresourceRegion(b.sceneTex, 0, 0, 0, 0, sceneTex, 0, nullptr);
+            ctx->GenerateMips(b.sceneSrv);
             haveScene = true;
             cf.scene[0] = s.sceneLight;
-            cf.scene[1] = static_cast<float>(sceneMips_ >= 2 ? sceneMips_ - 2 : 0);
+            cf.scene[1] = static_cast<float>(b.sceneMips >= 2 ? b.sceneMips - 2 : 0);
             cf.scene[2] = (f == DXGI_FORMAT_R16G16B16A16_FLOAT || f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
                            f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
                               ? 0.f
@@ -2272,6 +2637,9 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
     }
     sceneFresh_ = haveScene;
     sceneGammaEnc_ = haveScene && cf.scene[2] > 0.5f;
+    g_drawProf.scene = (ProfNow() - tProfScene) * 1000.0;
+    ID3D11DepthStencilView* dsv_ = Sb().dsv;
+    ID3D11ShaderResourceView* sceneSrv_ = Sb().sceneSrv;
     D3D11_MAPPED_SUBRESOURCE mp;
     if (SUCCEEDED(ctx->Map(cbFrame_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mp))) {
         memcpy(mp.pData, &cf, sizeof cf);
@@ -2306,15 +2674,52 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
     ctx->PSSetSamplers(0, 1, &samp_);
     ID3D11ShaderResourceView* sceneView = haveScene ? sceneSrv_ : white_;
     ctx->PSSetShaderResources(3, 1, &sceneView);
+    const double tProfWh3 = ProfNow();
+    SetupWh3Material(s);
+    g_drawProf.wh3 = (ProfNow() - tProfWh3) * 1000.0;
+    float em[44] = {};
+    if (wh3On_) {
+        if (s.wh3Emissive) {
+            double t = look.time;
+            bool prop = s.wh3Emissive == 2;
+            for (int k = 0; k < 2; ++k) {
+                double v = prop ? 0.05 * s.emissiveSpeed[k] : static_cast<double>(s.emissiveSpeed[0]) * s.emissiveDirection[k];
+                double per = std::fabs(s.emissiveTiling[k]) > 1e-4 ? 1.0 / std::fabs(s.emissiveTiling[k]) : 1.0;
+                em[8 + k] = static_cast<float>(std::fmod(t * v, per));
+                em[10 + k] = s.emissiveTiling[k];
+            }
+            double ph = prop ? s.emissivePulseSpeed * (t + 0.5) : s.emissivePulseSpeed * t;
+            em[0] = static_cast<float>(s.wh3Emissive);
+            em[1] = s.emissiveStrength;
+            em[2] = s.emissiveFresnelStrength;
+            em[3] = s.emissiveDistort;
+            em[4] = s.emissiveTint[0], em[5] = s.emissiveTint[1], em[6] = s.emissiveTint[2];
+            em[7] = static_cast<float>(0.1 * s.emissivePulseStrength * (std::sin(std::fmod(ph, 6.283185307179586)) + 0.99));
+            for (int k = 0; k < 4; ++k) {
+                em[16 + k] = s.emissiveGradientStop[k];
+                for (int j = 0; j < 3; ++j) em[20 + k * 4 + j] = s.emissiveGradientColour[k][j];
+            }
+        }
+        em[12] = s.emissiveScale;
+        em[13] = s.emissiveSoft ? 1.f : 0.f;
+        em[14] = s.wh3Iridescent ? 1.f : 0.f;
+        em[15] = s.iridescenceAmount;
+        for (int j = 0; j < 3; ++j) em[36 + j] = s.iridescenceColourA[j], em[40 + j] = s.iridescenceColourB[j];
+        ID3D11ShaderResourceView* t3[3] = {wh3Srv_[0], wh3Srv_[1] ? wh3Srv_[1] : white_, wh3Srv_[2] ? wh3Srv_[2] : white_};
+        ctx->PSSetShaderResources(4, 3, t3);
+    }
     for (unsigned i = 0; i < subCount_; ++i) {
         const Submesh& sm = subs_[i];
         bool hasDef = (sm.flags >> 17) & 1;
-        float mat[8] = {static_cast<float>(sm.normalMode), sm.tex[1] >= 0 ? 1.f : 0.f, sm.tex[2] >= 0 ? 1.f : 0.f,
-                        static_cast<float>(sm.materialMode),
-                        hasDef ? (sm.flags & 0xff) / 255.f : 0.55f, hasDef ? ((sm.flags >> 8) & 0xff) / 255.f : 0.f,
-                        ((sm.flags >> 18) & 1) ? 1.f : 0.f, ((sm.flags >> 16) & 1) ? 1.f : 0.f};
+        float mat[12] = {static_cast<float>(sm.normalMode), sm.tex[1] >= 0 ? 1.f : 0.f, sm.tex[2] >= 0 ? 1.f : 0.f,
+                         static_cast<float>(sm.materialMode),
+                         hasDef ? (sm.flags & 0xff) / 255.f : 0.55f, hasDef ? ((sm.flags >> 8) & 0xff) / 255.f : 0.f,
+                         ((sm.flags >> 18) & 1) ? 1.f : 0.f, ((sm.flags >> 16) & 1) ? 1.f : 0.f,
+                         ((sm.flags >> 19) & 1) ? 1.f : 0.f, ((sm.flags >> 20) & 1) ? 1.f : 0.f, 0.f, 0.f};
         if (SUCCEEDED(ctx->Map(cbMat_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mp))) {
             memcpy(mp.pData, mat, sizeof mat);
+            if (wh3On_ && sm.wh3) memcpy(static_cast<char*>(mp.pData) + sizeof mat, em, sizeof em);
+            else memset(static_cast<char*>(mp.pData) + sizeof mat, 0, sizeof em);
             ctx->Unmap(cbMat_, 0);
         }
         ID3D11ShaderResourceView* srv[3];
@@ -2323,10 +2728,60 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
         ctx->DrawIndexed(sm.indexCount, sm.firstIndex, 0);
     }
     bk.Restore(ctx);
+    g_drawProf.total = (ProfNow() - tProf0) * 1000.0;
     return true;
+}
+void Renderer::SetupWh3Material(const Settings& s) {
+    bool any = s.wh3Emissive || s.wh3Iridescent;
+    uint64_t key = any ? Fnv64(s.wh3Part, sizeof s.wh3Part) ^ Fnv64(s.wh3Mask, sizeof s.wh3Mask) * 3 ^
+                             Fnv64(s.emissiveTexture, sizeof s.emissiveTexture) * 5 ^ Fnv64(s.emissiveDistortion, sizeof s.emissiveDistortion) * 7 ^
+                             (static_cast<uint64_t>(s.wh3Emissive) << 1 | (s.wh3Iridescent ? 1u : 0u))
+                       : 0;
+    if (key == wh3Key_) return;
+    wh3Key_ = key;
+    wh3On_ = false;
+    for (auto*& v : wh3Srv_) SafeRelease(v);
+    for (unsigned i = 0; i < subCount_; ++i) subs_[i].wh3 = false;
+    if (!any || !dev_) return;
+    wchar_t parts[256];
+    wcsncpy(parts, s.wh3Part, 255);
+    parts[255] = 0;
+    _wcslwr(parts);
+    unsigned hit = 0;
+    for (unsigned i = 0; i < subCount_; ++i) {
+        int a = subs_[i].tex[0];
+        if (a < 0 || a >= static_cast<int>(kMaxTextures) || !texName_[a][0]) continue;
+        size_t n = wcslen(texName_[a]);
+        for (const wchar_t* p = parts; *p;) {
+            const wchar_t* e = wcschr(p, L';');
+            size_t len = e ? static_cast<size_t>(e - p) : wcslen(p);
+            if (len == n && !wcsncmp(p, texName_[a], n)) {
+                subs_[i].wh3 = true;
+                ++hit;
+                break;
+            }
+            if (!e) break;
+            p = e + 1;
+        }
+    }
+    if (!hit) return;
+    const wchar_t* rel[3] = {s.wh3Mask, s.emissiveTexture, s.emissiveDistortion};
+    for (int k = 0; k < (s.wh3Emissive ? 3 : 1); ++k) {
+        wchar_t full[MAX_PATH * 2];
+        swprintf(full, MAX_PATH * 2, L"%ls%ls", hvmDir_, rel[k]);
+        char err[256];
+        if (!rel[k][0] || !LoadDds(dev_, full, false, &wh3Srv_[k], err, sizeof err)) {
+            for (auto*& v : wh3Srv_) SafeRelease(v);
+            return;
+        }
+    }
+    wh3On_ = true;
 }
 void Renderer::Release() {
     ready_ = false;
+    for (auto*& v : wh3Srv_) SafeRelease(v);
+    wh3Key_ = 0;
+    wh3On_ = false;
     SafeRelease(vb_);
     SafeRelease(ib_);
     SafeRelease(cbFrame_);
@@ -2339,24 +2794,17 @@ void Renderer::Release() {
     SafeRelease(dss_);
     SafeRelease(bs_);
     SafeRelease(samp_);
-    SafeRelease(dsv_);
-    SafeRelease(depthTex_);
+    own_.Release();
     SafeRelease(white_);
-    SafeRelease(sceneSrv_);
-    SafeRelease(sceneTex_);
-    sceneW_ = sceneH_ = sceneMips_ = 0;
-    sceneFmt_ = DXGI_FORMAT_UNKNOWN;
     sceneBroken_ = false;
-    SafeRelease(distSrv_);
-    SafeRelease(distTex_);
-    distW_ = distH_ = 0;
-    distFmt_ = DXGI_FORMAT_UNKNOWN;
     distBroken_ = false;
+    distDepthOk_ = false;
     for (auto*& s : srv_) SafeRelease(s);
     texCount_ = 0;
     delete[] subs_;
     subs_ = nullptr;
     subCount_ = 0;
+    lensSubs_ = 0;
     delete[] bones_;
     bones_ = nullptr;
     boneCount_ = 0;
@@ -2378,7 +2826,6 @@ void Renderer::Release() {
     muzzleValid_ = false;
     muzzleFrameValid_ = false;
     indexCount_ = 0;
-    depthW_ = depthH_ = 0;
     SafeRelease(dev_);
 }
 namespace {
@@ -2466,7 +2913,7 @@ bool LoadCrosshair(const wchar_t* ini, CrosshairSettings& s) {
     return true;
 }
 namespace {
-const char kFlashShader[] = R"(cbuffer C : register(b0) { float4 opt; };
+const char kFlashShader[] = R"(cbuffer C : register(b0) { float4 opt; float4 opt2; };
 Texture2D T : register(t0);
 SamplerState S : register(s0);
 struct V { float2 p : POSITION; float2 uv : TEXCOORD0; float4 c : COLOR0; float3 m : TEXCOORD1; };
@@ -2480,6 +2927,7 @@ float4 PS(P i) : SV_TARGET {
     return i.m.x > 0.5 ? float4(c * a, 0) : float4(c * a, a);
 }
 Texture2D Sc : register(t1);
+Texture2D<float> Dp : register(t2);
 float4 PSD(P i) : SV_TARGET {
     float2 q = i.uv * 2 - 1;
     float r = length(q);
@@ -2490,7 +2938,12 @@ float4 PSD(P i) : SV_TARGET {
     float2 d = r > 1e-3 ? q / r : float2(0, 0);
     float2 off = (n * t.a * i.c.r - d * front * i.c.g) * i.c.b * edge * i.c.a;
     off.x *= opt.z / opt.w;
-    float3 c = Sc.SampleLevel(S, i.p.xy * opt.zw + off, 0).rgb;
+    float2 uv0 = i.p.xy * opt.zw, uv = uv0 + off;
+    if (opt2.x > 0.5) {
+        float4 g = Dp.Gather(S, uv);
+        if (min(min(g.x, g.y), min(g.z, g.w)) < i.p.z) uv = uv0;
+    }
+    float3 c = Sc.SampleLevel(S, uv, 0).rgb;
     if (opt.y > 0.5) c = pow(max(c, 0), 2.2);
     float a = saturate(edge * 4);
     return float4(c * a, a);
@@ -2503,6 +2956,7 @@ struct FlashVertex {
 };
 struct FlashCb {
     float opt[4];
+    float opt2[4];
 };
 constexpr int kFlashTexVent = 0, kFlashTexFire = 1, kFlashTexGlow = 2, kFlashTexSmoke = 3, kFlashTexSpark = 4;
 constexpr int kFlashTexGasJet = 5, kFlashTexGasPuff = 6;
@@ -2776,7 +3230,7 @@ void MuzzleFlash::Spawn(const Settings& s) {
     n_ = 0;
     if (s.flashFlame) SpawnFlame(s);
     if (s.flashGas) SpawnGas(s);
-    if (s.shellEject) SpawnShellFx(s);
+    if (s.shellEject && !s.shellEjectAnim) SpawnShellFx(s);
 }
 void MuzzleFlash::SpawnGas(const Settings& s) {
     if (!GasLoaded()) return;
@@ -3481,7 +3935,8 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
     if (FAILED(ctx->Map(vb_, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
     memcpy(m.pData, verts, sizeof(FlashVertex) * nv);
     ctx->Unmap(vb_, 0);
-    FlashCb cb = {{rtvEncodesSrgb ? 1.f : 0.f, rtvEncodesSrgb && sceneGamma_ ? 1.f : 0.f, 1.f / static_cast<float>(w), 1.f / static_cast<float>(h)}};
+    FlashCb cb = {{rtvEncodesSrgb ? 1.f : 0.f, rtvEncodesSrgb && sceneGamma_ ? 1.f : 0.f, 1.f / static_cast<float>(w), 1.f / static_cast<float>(h)},
+                  {depth && sceneDepth_ ? 1.f : 0.f, static_cast<float>(w), static_cast<float>(h), 0.f}};
     if (FAILED(ctx->Map(cb_, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
     memcpy(m.pData, &cb, sizeof cb);
     ctx->Unmap(cb_, 0);
@@ -3509,12 +3964,12 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
         ctx->PSSetShader(psDist_, nullptr, 0);
         for (int tx : {kFlashTexDistHaze, kFlashTexDistRing}) {
             if (!counts[tx] || !tex_[tx]) continue;
-            ID3D11ShaderResourceView* sv[2] = {tex_[tx], scene_};
-            ctx->PSSetShaderResources(0, 2, sv);
+            ID3D11ShaderResourceView* sv[3] = {tex_[tx], scene_, sceneDepth_};
+            ctx->PSSetShaderResources(0, 3, sv);
             ctx->Draw(static_cast<UINT>(counts[tx]), static_cast<UINT>(starts[tx]));
         }
-        ID3D11ShaderResourceView* none[2] = {};
-        ctx->PSSetShaderResources(0, 2, none);
+        ID3D11ShaderResourceView* none[3] = {};
+        ctx->PSSetShaderResources(0, 3, none);
         ctx->PSSetShader(ps_, nullptr, 0);
     }
     if (trCount) {
@@ -3560,6 +4015,7 @@ void MuzzleFlash::Release() {
     SafeRelease(samp_);
     for (int i = 0; i < kFlashTexCount; ++i) SafeRelease(tex_[i]);
     scene_ = nullptr;
+    sceneDepth_ = nullptr;
     burst_ = 0;
     tLastShot_ = -1.0;
     n_ = 0;
@@ -3629,6 +4085,15 @@ void Crosshair::Release() {
     SafeRelease(rs_);
     SafeRelease(dss_);
     dev_ = nullptr;
+}
+bool Crosshair::Prewarm(ID3D11Device* dev) {
+    if (failed_ || !dev) return false;
+    if (dev == dev_ && vs_) return true;
+    if (!Init(dev)) {
+        failed_ = true;
+        return false;
+    }
+    return true;
 }
 bool Crosshair::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool rtvEncodesSrgb,
                      const CrosshairSettings& s, float spread, float alpha) {
@@ -5081,6 +5546,122 @@ void Shield::Release() {
     for (UINT& c : kindCount_) c = 0;
 }
 namespace prefetch {
+ID3D11Device* DeviceRef() {
+    AcquireSRWLockShared(&g_preLock);
+    ID3D11Device* d = g_preDev;
+    if (d) d->AddRef();
+    ReleaseSRWLockShared(&g_preLock);
+    return d;
+}
+void PutTexture(int tag, const wchar_t* path, unsigned char* data, size_t len, ULONGLONG size, FILETIME stamp, bool srgb) {
+    ID3D11Device* d = DeviceRef();
+    ID3D11ShaderResourceView* srv = nullptr;
+    char err[8];
+    if (d && DdsCreate(d, data, len, srgb, path, &srv, err, sizeof err)) {
+        delete[] data;
+        InterlockedIncrement(&g_preBuilt);
+        PutPrefetched(tag, false, path, nullptr, 0, size, stamp, srgb, srv, d, true);
+    } else {
+        PutPrefetched(tag, false, path, data, len, size, stamp, srgb, nullptr, nullptr, d != nullptr);
+    }
+    if (d) d->Release();
+}
+bool SetDevice(ID3D11Device* dev) {
+    const bool mt = dev && !(dev->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED);
+    ID3D11ShaderResourceView* old[kMaxPre];
+    int n = 0;
+    AcquireSRWLockExclusive(&g_preLock);
+    ID3D11Device* prev = g_preDev;
+    g_preDev = mt ? dev : nullptr;
+    if (g_preDev) g_preDev->AddRef();
+    for (int i = 0; i < g_preN;) {
+        if (g_pre[i].srv && g_pre[i].dev != g_preDev) {
+            old[n++] = g_pre[i].srv;
+            g_pre[i] = g_pre[--g_preN];
+        } else {
+            ++i;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_preLock);
+    for (int k = 0; k < n; ++k) old[k]->Release();
+    if (prev) prev->Release();
+    return mt;
+}
+int Upgrade(int tag) {
+    ID3D11Device* d = DeviceRef();
+    if (!d) return 0;
+    int n = 0;
+    for (;;) {
+        PreEntry e = {};
+        bool got = false;
+        AcquireSRWLockExclusive(&g_preLock);
+        for (int i = 0; i < g_preN; ++i) {
+            if (g_pre[i].tag != tag || g_pre[i].hvm || !g_pre[i].data || g_pre[i].bgTried) continue;
+            e = g_pre[i];
+            g_pre[i] = g_pre[--g_preN];
+            got = true;
+            break;
+        }
+        ReleaseSRWLockExclusive(&g_preLock);
+        if (!got) break;
+        ID3D11ShaderResourceView* srv = nullptr;
+        char err[8];
+        if (DdsCreate(d, e.data, e.len, e.srgb, e.path, &srv, err, sizeof err)) {
+            delete[] e.data;
+            InterlockedIncrement(&g_preBuilt);
+            PutPrefetched(e.tag, false, e.path, nullptr, 0, e.size, e.stamp, e.srgb, srv, d, true);
+            ++n;
+        } else {
+            PutPrefetched(e.tag, false, e.path, e.data, e.len, e.size, e.stamp, e.srgb, nullptr, nullptr, true);
+        }
+    }
+    d->Release();
+    return n;
+}
+bool ShieldModel(int tag, const wchar_t* hsmPath, int* files, size_t* bytes) {
+    *files = 0;
+    *bytes = 0;
+    unsigned char* data = nullptr;
+    size_t len = 0;
+    if (!ReadFileAll(hsmPath, &data, &len)) return false;
+    uint32_t h[7];
+    bool ok = len >= sizeof h && !memcmp(data, "HSM1", 4);
+    if (ok) memcpy(h, data, sizeof h);
+    ok = ok && h[1] == 1 && h[6] >= 1 && h[6] <= 12;
+    wchar_t dir[520];
+    wcsncpy(dir, hsmPath, 519);
+    dir[519] = 0;
+    if (wchar_t* sl = wcsrchr(dir, L'\\')) *sl = 0;
+    size_t p = sizeof h;
+    for (uint32_t t = 0; ok && t < h[6]; ++t) {
+        if (p + 2 > len) break;
+        uint16_t n = static_cast<uint16_t>(data[p] | (data[p + 1] << 8));
+        p += 2;
+        if (!n || n > 400 || p + n + 1 > len) break;
+        wchar_t rel[512], full[1040];
+        int wn = MultiByteToWideChar(CP_UTF8, 0, reinterpret_cast<const char*>(data + p), n, rel, 511);
+        rel[wn > 0 ? wn : 0] = 0;
+        for (wchar_t* c = rel; *c; ++c)
+            if (*c == L'/') *c = L'\\';
+        bool srgb = data[p + n] != 0;
+        p += n + 1;
+        swprintf(full, 1040, L"%ls\\%ls", dir, rel);
+        ULONGLONG size = 0;
+        FILETIME stamp = {};
+        unsigned char* d = nullptr;
+        size_t l = 0;
+        if (!FileStamp(full, &size, &stamp) || !ReadFileAll(full, &d, &l)) continue;
+        ++*files;
+        *bytes += l;
+        PutTexture(tag, full, d, l, size, stamp, srgb);
+    }
+    delete[] data;
+    return ok;
+}
+void Counters(long* built, long* taken) {
+    *built = g_preBuilt;
+    *taken = g_preTaken;
+}
 bool Model(int tag, const wchar_t* hvmPath, int* files, size_t* bytes, char* err, size_t errLen) {
     *files = 0;
     *bytes = 0;
@@ -5124,12 +5705,13 @@ bool Model(int tag, const wchar_t* hvmPath, int* files, size_t* bytes, char* err
         if (!FileStamp(full, &size, &stamp) || !ReadFileAll(full, &d, &l)) continue;
         ++*files;
         *bytes += l;
-        PutPrefetched(tag, false, full, d, l, size, stamp);
+        PutTexture(tag, full, d, l, size, stamp, tex[t].srgb != 0);
     }
     return true;
 }
 void Drop(int tag) {
     unsigned char* del[kMaxPre];
+    ID3D11ShaderResourceView* srv[kMaxPre];
     int n = 0;
     AcquireSRWLockExclusive(&g_preLock);
     for (int i = 0; i < g_preN;) {
@@ -5137,11 +5719,15 @@ void Drop(int tag) {
             ++i;
             continue;
         }
-        del[n++] = g_pre[i].data;
+        del[n] = g_pre[i].data;
+        srv[n++] = g_pre[i].srv;
         g_pre[i] = g_pre[--g_preN];
     }
     ReleaseSRWLockExclusive(&g_preLock);
-    for (int k = 0; k < n; ++k) delete[] del[k];
+    for (int k = 0; k < n; ++k) {
+        delete[] del[k];
+        if (srv[k]) srv[k]->Release();
+    }
 }
 int WarmShaders() {
     FnD3DCompile compile = GetCompiler();
@@ -5172,3 +5758,4 @@ int WarmShaders() {
 }
 }
 }
+#include "cast_marker_draw.inc"
