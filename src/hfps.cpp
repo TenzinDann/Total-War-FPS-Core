@@ -60,12 +60,6 @@ template <size_t N>
 constexpr PrintSet Prints(const CodePrint (&a)[N]) {
     return {a, N};
 }
-const CodePrint kNetPrints904[] = {
-    {0x2f8fbd8, 0x2bc, 0xdb3588364c85fa39ull},
-    {0x2f795c0, 0x13f, 0x3bf77016869b3696ull},
-    {0x310d064, 0x71d, 0xe696c21e9c1292a5ull},
-    {0x3110ff0, 0x46, 0x3860f3f85297a94dull},
-    {0x3132178, 0x4e, 0x9306c6b89a050292ull}};
 const CodePrint kArrowPrints904[] = {
     {0x2fd07d0, 0x20e, 0x6ec8c833b7e346d3ull},
     {0x2fd09e0, 0x3d62, 0x54ddff0da7591a60ull},
@@ -261,7 +255,6 @@ const CodePrint kBuildPrints904[] = {
 constexpr uintptr_t kFnSegQuery904 = 0x2db3470, oWorldCollide = 0x150;
 constexpr uint32_t kBuildMask = 0x4800;
 bool g_buildOk = false;
-bool g_netOk = false;
 const CodePrint kGameVolPrints904[] = {
     {0x5af310, 0x161, 0x0caa95b7b9f64779ull},
     {0x5aecd4, 0x16, 0x3a3f3a78d580c508ull},
@@ -535,7 +528,6 @@ struct Config {
     float wallUpReach = 3.f, wallUpMin = 3.f, wallUpMaxH = 30.f, wallUpGateR = 8.f, wallUpBase = 3.f;
     bool wallBody = true;
     float wallBodyMargin = 1.f;
-    bool wallBodyNet = true;
     bool ghost = false;
     bool revealEnemies = true;
     bool noMelee = true;
@@ -669,10 +661,16 @@ float IniF(const wchar_t* sec, const wchar_t* key, float def, const wchar_t* ini
 void LoadMeleeCats(const wchar_t* ini);
 extern float g_meleeTargetRadiusMax;
 LONG g_cfgGen = 0;
+const wchar_t* MainIniName() {
+#ifdef HFPS_PACK_ASSETS
+    return packx::MainIniName();
+#else
+    return L"tenzin_fps.ini";
+#endif
+}
 void LoadConfig() {
     wchar_t ini[MAX_PATH];
-    wcscpy(ini, g_dir);
-    wcscat(ini, L"\\tenzin_fps.ini");
+    swprintf(ini, MAX_PATH, L"%ls\\%ls", g_dir, MainIniName());
     InterlockedIncrement(&g_cfgGen);
     cfg.enabled = GetPrivateProfileIntW(L"general", L"enabled", 1, ini) != 0;
     UINT key = GetPrivateProfileIntW(L"general", L"toggle_key", VK_F6, ini);
@@ -831,8 +829,7 @@ void LoadConfig() {
     cfg.wallBody = GetPrivateProfileIntW(L"move", L"wall_body", 1, ini) != 0;
     cfg.wallBodyMargin = IniF(L"move", L"wall_body_margin", 1.f, ini);
     if (!(cfg.wallBodyMargin >= 0.f && cfg.wallBodyMargin <= 3.f)) cfg.wallBodyMargin = 1.f;
-    cfg.wallBodyNet = GetPrivateProfileIntW(L"move", L"wall_body_net", 1, ini) != 0;
-    Log("wall: wall_body=%d wall_body_margin=%.2f wall_body_net=%d", cfg.wallBody, cfg.wallBodyMargin, cfg.wallBodyNet);
+    Log("wall: wall_body=%d wall_body_margin=%.2f", cfg.wallBody, cfg.wallBodyMargin);
     Log("wall: drop_clearance=%.2f drop_push_speed=%.1f drop_max_push=%.1f", cfg.dropClearance, cfg.dropPushSpeed, cfg.dropMaxPush);
     Log("wall: wall=%d step_up=%.2f step_down=%.2f gravity=%.1f jump_height=%.2f air_control=%.2f air_teleport_max=%.2f land_dip=%.3f",
         cfg.wall, cfg.stepUp, cfg.stepDown, cfg.gravity, cfg.jumpHeight, cfg.airControl, cfg.airTpMax, cfg.landDip);
@@ -1138,12 +1135,10 @@ struct State {
     double tWallWhy = -10;
     bool bodyInside = false;
     int bodyLogs = 0, censusLogs = 0;
-    unsigned netPass = 0;
-    double tNetLog = -10;
-    int netLogs = 0;
     double tLastTp = 0;
     unsigned tpSent = 0, tpFailed = 0, tpLogs = 0, leashHits = 0;
     int lastMode = -1;
+    float eyeHeight = 1.75f;
     bool flyer = false;
     TpRec tpHist[8] = {};
     unsigned tpHead = 0;
@@ -1208,10 +1203,6 @@ struct State {
     long sumDx = 0, sumDy = 0;
 } S;
 volatile LONG g_reqToggle = 0, g_reqExit = 0;
-volatile LONG g_staleFp = 0;
-volatile LONG g_camBeat = 0;
-bool g_fpDetached = false;
-uintptr_t g_detachMgr = 0;
 struct TacStamina {
     float st = 1.f;
     double lastTac = -1e9;
@@ -1430,6 +1421,36 @@ void Exit(uintptr_t mgr, const char* why, bool release = true) {
     Log("FPS exit reason=%s restoredPrev=%d active=%p prev=%p", why, restored, (void*)active,
         (void*)S.prevActive);
 }
+struct UnitKeyRec {
+    uintptr_t unit;
+    char key[48];
+};
+UnitKeyRec g_unitKeyTab[64];
+int g_unitKeyNext = 0;
+SRWLOCK g_unitKeyLock = SRWLOCK_INIT;
+void RememberUnitKey(uintptr_t unit, const char* key) {
+    AcquireSRWLockExclusive(&g_unitKeyLock);
+    int slot = -1;
+    for (int i = 0; i < 64 && slot < 0; ++i)
+        if (g_unitKeyTab[i].unit == unit) slot = i;
+    if (slot < 0) slot = g_unitKeyNext, g_unitKeyNext = (g_unitKeyNext + 1) % 64;
+    g_unitKeyTab[slot].unit = unit;
+    snprintf(g_unitKeyTab[slot].key, sizeof g_unitKeyTab[slot].key, "%s", key);
+    ReleaseSRWLockExclusive(&g_unitKeyLock);
+}
+void ForgetUnitKeys() {
+    AcquireSRWLockExclusive(&g_unitKeyLock);
+    memset(g_unitKeyTab, 0, sizeof g_unitKeyTab);
+    g_unitKeyNext = 0;
+    ReleaseSRWLockExclusive(&g_unitKeyLock);
+}
+void UnitKeyOf(uintptr_t unit, char* out, size_t n) {
+    out[0] = 0;
+    AcquireSRWLockShared(&g_unitKeyLock);
+    for (int i = 0; i < 64; ++i)
+        if (unit && g_unitKeyTab[i].unit == unit) snprintf(out, n, "%s", g_unitKeyTab[i].key);
+    ReleaseSRWLockShared(&g_unitKeyLock);
+}
 bool HeroRouting(uintptr_t unit, int* state = nullptr) {
     int32_t st = -1;
     if (state) *state = -1;
@@ -1487,6 +1508,14 @@ void Enter(uintptr_t mgr) {
             return;
         }
         Log("enter: lord / hero check passed (IsCharacter key len %d, IsGeneral %d)", keyLen, general ? 1 : 0);
+    }
+    char heroKey[48];
+    UnitKeyOf(unit, heroKey, sizeof heroKey);
+    if (!vmgame::UnitAllowed(heroKey)) {
+        Refuse(kRefuseNotOwner);
+        Log("enter refused: unit %p (unit key '%s') is not a weapon pack's hero - without hero_fps.pack only those heroes may enter (allowed: %s)",
+            (void*)unit, heroKey, vmgame::UnitKeys());
+        return;
     }
     int moraleState = -1;
     if (HeroRouting(unit, &moraleState)) {
@@ -1606,6 +1635,9 @@ void Enter(uintptr_t mgr) {
     SetupMouse();
     CastReset();
     S.active = true;
+    vmgame::SetHeroKey(heroKey);
+    S.eyeHeight = vmgame::EyeHeightFor(heroKey, cfg.eyeHeight);
+    if (S.eyeHeight != cfg.eyeHeight) Log("enter: eye height %.3f m for '%s' (weapon pack [character]; config %.2f)", S.eyeHeight, heroKey, cfg.eyeHeight);
     vmgame::SetFirstPerson(true);
     if (S.exitStage == 2) {
         Log("ghost: pending release cancelled - first person entered again");
@@ -3093,125 +3125,6 @@ bool InsideStructure(float x, float z, float foot, float up = -1.f) {
     Surf s[kMaxSurf];
     int n = SurfacesAt(x, z, s);
     return StructureOver(s, n, foot, up > 0.f ? up : cfg.stepUp, cfg.stepDown);
-}
-constexpr uintptr_t oWorldRegionNet = 0x168, oNetCells = 0x0, oNetShift = 0x10, oNetDim = 0x14, oNetOff = 0x18, oNetMax = 0x1c, oNetScale = 0x2c,
-                    oNetRegions = 0x50, oRegCount = 0x44, oRegArray = 0x48, oRegPoly = 0x10, oRegSub = 0x18, oRegIdx = 0x3c, oRegBlk = 0x48,
-                    oRegOff = 0xb4, oEdgeNext = 0x10, oEdgeXZ = 0x18, oEdgeFlags = 0x50, kVtRegionSub904 = 0x3ad5ec0, kFnRegionOn904 = 0x3110ff0;
-constexpr uint8_t kEdgePortal = 0x2;
-bool NetContains(uintptr_t poly, float x, float z);
-struct RegionNet {
-    uintptr_t cells = 0, regs = 0;
-    uint32_t count = 0, dim = 0, shift = 0, maxIdx = 0;
-    int32_t off = 0;
-    float scale = 0;
-};
-bool RegionNetRead(uintptr_t world, RegionNet* n) {
-    *n = RegionNet();
-    uintptr_t g = world ? Ptr(world + oWorldRegionNet) : 0, c = g ? Ptr(g + oNetRegions) : 0;
-    if (!g || !c || !Rd(g + oNetCells, n->cells) || !Rd(g + oNetShift, n->shift) || !Rd(g + oNetDim, n->dim) || !Rd(g + oNetOff, n->off) ||
-        !Rd(g + oNetMax, n->maxIdx) || !Rd(g + oNetScale, n->scale) || !Rd(c + oRegCount, n->count) || !Rd(c + oRegArray, n->regs))
-        return false;
-    n->shift &= 31;
-    return n->cells && n->regs && n->count > 0 && n->count < 0xfffe && n->scale > 0.f && n->scale < 100.f && n->dim > 0 && n->dim <= 0x10000 &&
-           n->maxIdx < 0x10000;
-}
-uint32_t NetCell(const RegionNet& n, float v) {
-    uint32_t i = static_cast<uint32_t>(static_cast<int32_t>(std::floor(n.scale * v)) + n.off);
-    return i > n.maxIdx ? n.maxIdx : i;
-}
-uintptr_t GroundRegionAt(const RegionNet& n, float x, float z, uintptr_t* any) {
-    *any = 0;
-    const uint32_t xi = NetCell(n, x), zi = NetCell(n, z);
-    uintptr_t cand[32];
-    int nc = 0;
-    auto add = [&](uintptr_t r) {
-        for (int i = 0; i < nc; ++i)
-            if (cand[i] == r) return;
-        if (r && nc < 32) cand[nc++] = r;
-    };
-    for (uint32_t cz = zi; cz < zi + 2; ++cz)
-        for (uint32_t cx = xi; cx < xi + 2; ++cx) {
-            if (cx >= n.dim || cz >= n.dim) continue;
-            const uintptr_t cell = n.cells + ((static_cast<uintptr_t>(cz) << n.shift) + cx) * 0x10;
-            uint16_t v = 0xffff;
-            if (!Rd(cell + 8, v)) continue;
-            if (v < 0xfffe) {
-                if (v < n.count) add(Ptr(n.regs + static_cast<uintptr_t>(v) * 8));
-            } else if (v == 0xfffe) {
-                uintptr_t node = Ptr(cell);
-                for (int guard = 0; node && guard < 64; ++guard, node = Ptr(node + 8)) add(Ptr(node));
-            }
-        }
-    for (int i = 0; i < nc; ++i) {
-        const uintptr_t r = cand[i], poly = Ptr(r + oRegPoly);
-        uint32_t offCount = 1;
-        if (Ptr(r + oRegSub) != g_base + kVtRegionSub904 || Ptr(r + oRegBlk) || !poly || !NetContains(poly, x, z)) continue;
-        if (!*any) *any = r;
-        if (Rd(r + oRegOff, offCount) && offCount == 0) return r;
-    }
-    return 0;
-}
-bool RegionWallCrossed(uintptr_t r, float ax, float az, float bx, float bz) {
-    const uintptr_t poly = Ptr(r + oRegPoly);
-    auto side = [](float px, float pz, float qx, float qz, float x, float z) { return (qx - px) * (z - pz) - (qz - pz) * (x - px); };
-    uintptr_t p = poly;
-    for (int guard = 0; p && guard < 256; ++guard) {
-        const uintptr_t q = Ptr(p + oEdgeNext);
-        float e0[2], e1[2];
-        uint8_t fl = 0;
-        if (!q || !Rd(p + oEdgeXZ, e0) || !Rd(q + oEdgeXZ, e1) || !Rd(p + oEdgeFlags, fl)) return false;
-        if (!(fl & kEdgePortal)) {
-            const float d1 = side(ax, az, bx, bz, e0[0], e0[1]), d2 = side(ax, az, bx, bz, e1[0], e1[1]);
-            const float d3 = side(e0[0], e0[1], e1[0], e1[1], ax, az), d4 = side(e0[0], e0[1], e1[0], e1[1], bx, bz);
-            if ((d1 > 0.f) != (d2 > 0.f) && (d3 > 0.f) != (d4 > 0.f)) return true;
-        }
-        p = q;
-        if (p == poly) break;
-    }
-    return false;
-}
-int NetStep(const RegionNet& n, float ax, float az, float bx, float bz, uintptr_t* hit) {
-    uintptr_t anyB = 0, anyA = 0;
-    const uintptr_t B = GroundRegionAt(n, bx, bz, &anyB);
-    *hit = B ? B : anyB;
-    if (!B) return anyB ? 2 : 1;
-    const uintptr_t A = GroundRegionAt(n, ax, az, &anyA);
-    if (!A) {
-        *hit = anyA;
-        return 4;
-    }
-    if (A == B) return 0;
-    if (RegionWallCrossed(A, ax, az, bx, bz)) {
-        *hit = A;
-        return 3;
-    }
-    if (RegionWallCrossed(B, ax, az, bx, bz)) return 3;
-    return 0;
-}
-bool NetContains(uintptr_t poly, float x, float z) {
-    using FnContains = char (*)(uintptr_t, const float*, float);
-    const float xz[2] = {x, z};
-    return reinterpret_cast<FnContains>(g_base + kFnBlockContains904)(poly, xz, 0.f) == 1;
-}
-bool RegionNetNow(RegionNet* n) {
-    uintptr_t battle = 0;
-    return CmdQueue(&battle) && battle && RegionNetRead(Ptr(battle + oBattlePath), n);
-}
-bool InsideWallBody(float x, float z, float foot) {
-    if (!InsideStructure(x, z, foot)) return false;
-    RegionNet net;
-    uintptr_t hit = 0;
-    return !(cfg.wallBodyNet && g_netOk && RegionNetNow(&net)) || NetStep(net, x, z, x, z, &hit) != 0;
-}
-const char* NetWhyText(bool netOk, int why) {
-    if (!netOk) return "net off (old rule)";
-    switch (why) {
-        case 1: return "no ground region here";
-        case 2: return "ground region disabled";
-        case 3: return "crosses a closed edge of region";
-        case 4: return "start not on the net (old rule)";
-    }
-    return "?";
 }
 struct SegQuery {
     int32_t kind;
@@ -5472,7 +5385,7 @@ void Apply(uintptr_t mgr) {
                 S.bldInside = cfg.building && g_buildOk && InsideBuilding(raw[0], raw[2], S.footY);
                 S.tBldCheck = now;
                 if (S.bldInside && S.bldLogs++ < 30) Log("wall: entered inside a building - its walls let through until out");
-                S.bodyInside = cfg.wallBody && cfg.wall && g_wallOk && InsideWallBody(raw[0], raw[2], S.footY);
+                S.bodyInside = cfg.wallBody && cfg.wall && g_wallOk && InsideStructure(raw[0], raw[2], S.footY);
                 if (S.bodyInside && S.bodyLogs++ < 20) Log("wall: entered inside a wall body / tower footprint - let through until out");
                 if (S.censusLogs++ < 6) CollisionCensus("enter", raw[0], raw[2], S.footY);
             }
@@ -5703,33 +5616,9 @@ void Apply(uintptr_t mgr) {
                         if (S.bodyLogs++ < 20) Log("wall: out of the wall body / tower footprint at %.2f,%.2f - solid again", S.kinPos[0], S.kinPos[1]);
                     }
                 } else if (bl > 1e-4f) {
-                    RegionNet net;
-                    const bool netOk = cfg.wallBodyNet && g_netOk && RegionNetNow(&net);
-                    int netWhy = 0;
-                    uintptr_t netHit = 0;
-                    auto wallAt = [&](float px, float pz, float up) {
-                        if (!InsideStructure(px, pz, S.footY, up)) return false;
-                        if (!netOk) return true;
-                        uintptr_t hit = 0;
-                        const int v = NetStep(net, prevKin[0], prevKin[1], px, pz, &hit);
-                        if (v != 0) {
-                            netWhy = v, netHit = hit;
-                            return true;
-                        }
-                        ++S.netPass;
-                        if (now - S.tNetLog >= 1.0 && S.netLogs < 60) {
-                            uint32_t idx = 0;
-                            Rd(hit + oRegIdx, idx);
-                            ++S.netLogs;
-                            Log("wall: walkway overhead but the game's ground net lets it through at %.2f,%.2f (region #%u, %u step(s) since last line) - arch / open passage",
-                                px, pz, idx, S.netPass);
-                            S.tNetLog = now, S.netPass = 0;
-                        }
-                        return false;
-                    };
                     auto bodyAt = [&](float px, float pz, float ux, float uz) {
-                        return wallAt(px, pz, -1.f) ||
-                               (cfg.wallBodyMargin > 0.f && wallAt(px + ux * cfg.wallBodyMargin, pz + uz * cfg.wallBodyMargin, 2.f));
+                        return InsideStructure(px, pz, S.footY) ||
+                               (cfg.wallBodyMargin > 0.f && InsideStructure(px + ux * cfg.wallBodyMargin, pz + uz * cfg.wallBodyMargin, S.footY, 2.f));
                     };
                     if (bodyAt(S.kinPos[0], S.kinPos[1], bx / bl, bz / bl)) {
                         const float tryPos[2][2] = {{S.kinPos[0], prevKin[1]}, {prevKin[0], S.kinPos[1]}};
@@ -5758,13 +5647,9 @@ void Apply(uintptr_t mgr) {
                             ns = SurfacesAt(S.kinPos[0], S.kinPos[1], sf);
                             si = ns ? WalkPick(sf, ns, S.footBlk, S.footY, cfg.stepUp, cfg.stepDown, &edge) : -1;
                         }
-                        if (S.bodyLogs++ < 20) {
-                            uint32_t idx = 0;
-                            if (netHit) Rd(netHit + oRegIdx, idx);
-                            Log("wall: wall body / tower footprint (nav block overhead, ground under it; ground net: %s #%u) at %.2f,%.2f going from %.2f,%.2f "
-                                "(foot %.2f) - %s",
-                                NetWhyText(netOk, netWhy), idx, S.kinPos[0], S.kinPos[1], prevKin[0], prevKin[1], S.footY, slid ? "slid along one axis" : "held");
-                        }
+                        if (S.bodyLogs++ < 20)
+                            Log("wall: wall body / tower footprint (nav block overhead, ground under it) at %.2f,%.2f going from %.2f,%.2f (foot %.2f) - %s",
+                                S.kinPos[0], S.kinPos[1], prevKin[0], prevKin[1], S.footY, slid ? "slid along one axis" : "held");
                         if (S.bodyLogs == 1 && S.censusLogs++ < 6) CollisionCensus("first wall body block", prevKin[0], prevKin[1], S.footY);
                     }
                 }
@@ -5882,7 +5767,7 @@ void Apply(uintptr_t mgr) {
                 S.tLastTp = 0;
                 S.tLand = now;
                 S.bldRecheck = true;
-                S.bodyInside = cfg.wallBody && cfg.wall && g_wallOk && InsideWallBody(S.kinPos[0], S.kinPos[1], S.footY);
+                S.bodyInside = cfg.wallBody && cfg.wall && g_wallOk && InsideStructure(S.kinPos[0], S.kinPos[1], S.footY);
                 ++S.lands;
                 S.landV += kick::Impulse(-cfg.landDip * (0.25f + 0.75f * s), 5.f, 0.55f);
                 S.landPunch -= 0.4f + 2.0f * s;
@@ -6073,7 +5958,7 @@ void Apply(uintptr_t mgr) {
     const float* vRight = kv.right;
     const float* vUp = kv.up;
     vmgame::PublishView(S.yaw, S.pitch, (S.flyer || (mode == 0 && S.air)) ? 0.f : S.camSpeed);
-    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : cfg.eyeHeight),
+    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : S.eyeHeight),
                     camPos[2] + cy * cfg.eyeForward};
     float target[3] = {eye[0] + vFwd[0] * 10.f, eye[1] + vFwd[1] * 10.f, eye[2] + vFwd[2] * 10.f};
     float up[3] = {0.f, 1.f, 0.f};
@@ -6317,29 +6202,9 @@ bool InstallHook() {
     }
     g_installedMgr = mgr;
     Log("hooked battle camera manager %p (battle %p) via vtable copy %p", (void*)mgr, (void*)battle, (void*)ours);
-    if (S.active || g_fpDetached) {
-        InterlockedExchange(&g_staleFp, 1);
-        Log("FPS: first-person state left over from camera manager %p (%s) - dropped on the next frame", (void*)S.mgr,
-            S.active ? "battle ended while in first person?" : "already released on the window side");
-    }
     return true;
 }
-constexpr double kStaleHookSecs = 3.0, kStaleHookGap = 1.0;
-struct BeatWatch {
-    LONG beat = 0;
-    double since = -1, last = -1;
-    bool Step(LONG b, double now, double limit, double gap) {
-        if (since < 0 || b != beat || now - last > gap) {
-            beat = b;
-            since = last = now;
-            return false;
-        }
-        last = now;
-        return now - since >= limit;
-    }
-    void Reset() { since = last = -1; }
-} g_beatWatch;
-void WindowSideRestore() {
+LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (!S.active && S.cursorHidden) {
         reinterpret_cast<void (*)(bool)>(g_base + kFnSetCursorVisible)(S.cursorVisOrig != 0);
         S.cursorHidden = false;
@@ -6349,27 +6214,6 @@ void WindowSideRestore() {
         reinterpret_cast<void (*)(bool)>(g_base + kFnSetCursorEnabled)(S.cursorOrig != 0);
         S.cursorOff = false;
     }
-}
-void StaleHookCheck() {
-    if (!S.active) {
-        g_beatWatch.Reset();
-        return;
-    }
-    if (!g_beatWatch.Step(g_camBeat, Now(), kStaleHookSecs, kStaleHookGap)) return;
-    g_beatWatch.Reset();
-    S.active = false;
-    ReleaseMouse();
-    vmgame::SetFirstPerson(false);
-    const LONG oldExit = InterlockedExchange(&g_reqExit, 0), oldLauncher = InterlockedExchange(&g_reqLauncher, 0);
-    g_fpDetached = true;
-    g_detachMgr = S.mgr;
-    Log("FPS state dropped on the window side: no camera update for %.0f s (battle ended while in first person?) - cursor, mouse and keys "
-        "released (camera manager %p, exit request %ld, launcher request %ld cleared)",
-        kStaleHookSecs, (void*)S.mgr, oldExit, oldLauncher);
-}
-LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    StaleHookCheck();
-    WindowSideRestore();
     switch (m) {
     case WM_INPUT:
         if (S.active && S.useRaw) {
@@ -6386,7 +6230,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
         if (w == cfg.toggleKey) {
-            if (!(l & (1L << 30)) && InstallHook()) InterlockedExchange(&g_reqToggle, 1);
+            if (!(l & (1L << 30)) && (S.active || InstallHook())) InterlockedExchange(&g_reqToggle, 1);
             return 0;
         }
         if (vmgame::Enabled() && w == vmgame::TestKey()) {
@@ -6501,8 +6345,6 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return CallWindowProcW(g_prevProc, h, m, w, l);
 }
 LRESULT CALLBACK HfpsChildWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    StaleHookCheck();
-    WindowSideRestore();
     switch (m) {
     case WM_LBUTTONDOWN:
     case WM_LBUTTONUP:
@@ -6711,10 +6553,6 @@ bool VerifyGame() {
             cfg.flyTurnDeg, cfg.flyEyeHeight);
         g_wallOk = PrintsMatch(Prints(kWallPrints904), "wall nav blocks (teleport hint)");
         g_buildOk = PrintsMatch(Prints(kBuildPrints904), "building collision (segment query)");
-        g_netOk = PrintsMatch(Prints(kNetPrints904), "ground region net (arches / passages)") &&
-                  Ptr(g_base + kVtRegionSub904 + 0x10) == g_base + kFnRegionOn904;
-        Log("wall: wall body asks the game's ground region net %s (wall_body_net=%d)",
-            g_netOk ? "ok - arches / open passages under walkways are walkable" : "OFF - every walkway shadow on the ground counts as a wall body", cfg.wallBodyNet);
         g_gameVolOk = PrintsMatch(Prints(kGameVolPrints904), "game volume (audio manager)") &&
                       Ptr(g_base + kVtAudioMgr904 + 0x478) == g_base + kFnAudioSetOn904 &&
                       Ptr(g_base + kVtAudioMgr904 + 0x488) == g_base + kFnAudioSetVol904 &&
@@ -6787,7 +6625,17 @@ DWORD WINAPI InitThread(LPVOID) {
             return 0;
         }
         Log("loader: version.dll = %ls (%s), module dir %ls", vp[0] ? vp : L"(none)",
-            inDir ? "in the game folder, another tool's (no hero_fps / tenzin_fps proxy signature) - carrying on" : "not ours", g_dir);
+            inDir ? "in the game folder, another tool's (no tenzin_fps / tenzin_fps proxy signature) - carrying on" : "not ours", g_dir);
+    }
+    {
+        wchar_t name[64];
+        swprintf(name, 64, L"Local\\tenzin_fps_native_%lu", GetCurrentProcessId());
+        HANDLE mx = CreateMutexW(nullptr, FALSE, name);
+        if (mx && GetLastError() == ERROR_ALREADY_EXISTS) {
+            Log("loader: another tenzin_fps_native is already running in this process - this copy stays idle");
+            g_status = kStatusOtherCopy;
+            return 0;
+        }
     }
 #ifdef HFPS_PACK_ASSETS
     if (!packx::ExtractFromPack(g_dir, &Log)) {
@@ -6795,6 +6643,7 @@ DWORD WINAPI InitThread(LPVOID) {
         g_status = kStatusAssets;
         return 0;
     }
+    vmgame::SetPayloads(packx::MainIniName(), packx::FullMod(), packx::AddonIds());
 #endif
 #else
     Log("==== tenzin_fps native M1 + viewmodel test loaded (version.dll proxy) pid=%lu", GetCurrentProcessId());
@@ -6803,7 +6652,7 @@ DWORD WINAPI InitThread(LPVOID) {
     if (!VerifyGame()) return 0;
     LoadConfig();
     if (!cfg.enabled) {
-        Log("disabled by tenzin_fps.ini");
+        Log("disabled by %ls", MainIniName());
         g_status = kStatusDisabled;
         return 0;
     }
@@ -7256,27 +7105,11 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
         g_loggedUpdateThread = true;
         Log("camera update runs on thread %lu (window thread %lu)", GetCurrentThreadId(), g_windowThread);
     }
-    const bool staleFp = InterlockedExchange(&g_staleFp, 0) != 0;
-    InterlockedIncrement(&g_camBeat);
-    if (g_fpDetached) {
-        g_fpDetached = false;
-        if (mgr == g_detachMgr && !staleFp) {
-            S.active = true;
-            Exit(mgr, "camera update resumed after the window-side drop");
-        } else {
-            S.exitStage = 0;
-            Log("FPS: window-side drop confirmed - camera manager %p hooked anew (old %p); old battle left untouched", (void*)mgr,
-                (void*)g_detachMgr);
-        }
-    }
-    if (S.active && (S.mgr != mgr || staleFp)) {
+    if (S.active && S.mgr != mgr) {
         S.active = false;
         ReleaseMouse();
         vmgame::SetFirstPerson(false);
-        const LONG oldExit = InterlockedExchange(&g_reqExit, 0), oldLauncher = InterlockedExchange(&g_reqLauncher, 0);
-        S.exitStage = 0;
-        Log("FPS state dropped: %s %p -> %p (stale exit request %ld, launcher request %ld cleared)",
-            S.mgr != mgr ? "camera manager changed" : "camera manager re-created at the same address", (void*)S.mgr, (void*)mgr, oldExit, oldLauncher);
+        Log("FPS state dropped: camera manager changed %p -> %p", (void*)S.mgr, (void*)mgr);
     }
     if (S.exitStage && (!S.active || S.exitStage == 1)) ExitSequenceStep(mgr);
     if (InterlockedExchange(&g_reqToggle, 0)) {
@@ -7316,6 +7149,7 @@ struct Fns {
     float (*tonumber)(void*, int);
     int (*type)(void*, int);
     size_t (*objlen)(void*, int);
+    const char* (*tolstring)(void*, int, size_t*);
 } f;
 int g_state = -1;
 char g_missing[48] = "";
@@ -7337,12 +7171,44 @@ bool Resolve() {
         }
         memcpy(e.slot, &p, sizeof p);
     }
+    if (FARPROC p = exe ? GetProcAddress(exe, "lua_tolstring") : nullptr) memcpy(&f.tolstring, &p, sizeof p);
     g_state = 1;
     return true;
 }
 int Api(void* L) {
     f.pushnumber(L, 5.f);
     return 1;
+}
+int UnitKeysFn(void* L) {
+    f.pushstring(L, vmgame::UnitKeys());
+    return 1;
+}
+int AccessAll(void* L) {
+    f.pushboolean(L, vmgame::UnitAllowed("") ? 1 : 0);
+    return 1;
+}
+int SetUnit(void* L) {
+    bool ok = false;
+    if (f.tolstring && f.type(L, 1) == kTUserdata && f.objlen(L, 1) >= sizeof(uintptr_t)) {
+        const void* blk = f.touserdata(L, 1);
+        uintptr_t wrap = 0;
+        if (blk) memcpy(&wrap, blk, sizeof wrap);
+        const uintptr_t p = wrap ? Ptr(wrap + 8) : 0;
+        size_t n = 0;
+        const char* key = f.tolstring(L, 2, &n);
+        if (p && key && n > 0 && n < 48) {
+            RememberUnitKey(p, key);
+            ok = true;
+        }
+    }
+    f.pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
+int BattleStarted(void*) {
+    ForgetUnitKeys();
+    vmgame::NoteNewBattle();
+    Log("lua-api: battle started (unit keys cleared)");
+    return 0;
 }
 int Active(void* L) {
     f.pushboolean(L, S.active && S.unit ? 1 : 0);
@@ -7520,17 +7386,18 @@ int PushTable(void* L) {
         Log("lua-api: %s not exported by the game - no interface table (luaopen #%ld)", g_missing, n);
         return 0;
     }
-    f.createtable(L, 0, 11);
+    f.createtable(L, 0, 22);
     const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_enabled", HudEnabled},
-                                                        {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"cast_event", CastEvent},
-                                                        {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson},
-                                                        {"tac_stamina", TacStaminaApi}, {"refill_ammo", RefillAmmoApi}, {"prompt", Prompt}, {"refused", Refused}, {"status", Status},
-                                                        {"cast_marker", CastMarkerApi}, {"cast_target", CastTargetApi}, {"cast_point", CastPointApi}};
+                                                        {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"unit_keys", UnitKeysFn}, {"access_all", AccessAll},
+                                                        {"set_unit", SetUnit}, {"battle_started", BattleStarted}, {"cast_event", CastEvent}, {"set_armed", SetArmed},
+                                                        {"view", View}, {"exit_first_person", ExitFirstPerson}, {"tac_stamina", TacStaminaApi}, {"refill_ammo", RefillAmmoApi},
+                                                        {"prompt", Prompt}, {"refused", Refused}, {"status", Status}, {"cast_marker", CastMarkerApi},
+                                                        {"cast_target", CastTargetApi}, {"cast_point", CastPointApi}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);
     }
-    Log("lua-api: interface table v4 returned (luaopen #%ld, lua state %p)", n, L);
+    Log("lua-api: interface table v4 returned (luaopen #%ld, lua state %p%s)", n, L, f.tolstring ? "" : ", lua_tolstring missing - set_unit off");
     return 1;
 }
 }
