@@ -63,6 +63,10 @@ int g_probeEnabled = -1;
 constexpr int kPartAll = 0, kPartGun = 1, kPartCross = 2;
 void DrawLayer(IDXGISwapChain* sc, int part = kPartAll);
 int g_uiLayerMode = -1;
+bool g_uiStateSwap = false;
+bool g_uiMidGpuTimer = false;
+double g_uiMidT = 0;
+bool g_uiLoggedManual = false, g_uiLoggedAfterMid = false;
 IDXGISwapChain* g_lastSc = nullptr;
 DWORD g_presentTid = 0;
 bool g_midDone = false;
@@ -466,6 +470,12 @@ void UiLayerReadIni() {
           g_uiLayerMode == 1 ? "gun drawn right after the game copies the scene into the back buffer (its back-buffer object), UI on top"
                              : "old: everything at Present",
           g_probeEnabled);
+    wchar_t st[16] = L"";
+    GetPrivateProfileStringW(L"ui_layer", L"state", L"manual", st, 16, g_ini);
+    g_uiStateSwap = _wcsicmp(st, L"swap") == 0;
+    g_uiMidGpuTimer = GetPrivateProfileIntW(L"ui_layer", L"mid_gpu_timer", 0, g_ini) != 0;
+    g_log("ui-layer: mid-frame state %s, GPU timer on the mid-frame draw %s",
+          g_uiStateSwap ? "swap (SwapDeviceContextState, the old way)" : "manual (full save / ClearState / restore)", g_uiMidGpuTimer ? "on" : "off");
 }
 void UiLayerOnPresent(ID3D11DeviceContext* ctx, ID3D11Texture2D* bb, UINT bbW, UINT bbH) {
     UiLayerReadIni();
@@ -505,6 +515,11 @@ void UiLayerOnPresent(ID3D11DeviceContext* ctx, ID3D11Texture2D* bb, UINT bbW, U
 }
 int UiLayerPresentPart() {
     int part = g_midDone ? kPartCross : kPartAll;
+    if (g_midDone && !g_uiLoggedAfterMid) {
+        g_uiLoggedAfterMid = true;
+        g_log("ui-layer: first Present after a mid-frame gun draw reached (%.1f ms later, state %s)", (Now() - g_uiMidT) * 1000.0,
+              g_uiStateSwap ? "swap" : "manual");
+    }
     if (!g_midDone && g_uiLayerMode == 1 && (g_bbObj || g_compObj || g_viewN) && g_fp) {
         ++g_uls.fallback;
         if (!g_uls.loggedFallback) {
@@ -542,6 +557,161 @@ bool UiLayerStateReady(ID3D11DeviceContext* c) {
     dev->Release();
     return ok;
 }
+struct FullState {
+    static constexpr UINT kCb = D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, kSrv = D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT,
+                          kSamp = D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT, kVb = D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT, kUav = D3D11_1_UAV_SLOT_COUNT,
+                          kRt = D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, kVp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE,
+                          kSo = D3D11_SO_BUFFER_SLOT_COUNT, kInst = 256, kDefNum = 4096;
+    enum { VS, HS, DS, GS, PS, CS, kStages };
+    struct Stage {
+        IUnknown* shader;
+        ID3D11ClassInstance* inst[kInst];
+        UINT nInst;
+        ID3D11Buffer* cb[kCb];
+        UINT cbFirst[kCb], cbNum[kCb];
+        ID3D11ShaderResourceView* srv[kSrv];
+        ID3D11SamplerState* samp[kSamp];
+    } st[kStages];
+    ID3D11InputLayout* layout;
+    ID3D11Buffer *vb[kVb], *ib;
+    UINT vbStride[kVb], vbOffset[kVb], ibOffset;
+    DXGI_FORMAT ibFormat;
+    D3D11_PRIMITIVE_TOPOLOGY topo;
+    ID3D11RasterizerState* rs;
+    UINT nVp, nSc;
+    D3D11_VIEWPORT vp[kVp];
+    D3D11_RECT sc[kVp];
+    ID3D11RenderTargetView* rtv[kRt];
+    ID3D11DepthStencilView* dsv;
+    ID3D11UnorderedAccessView *omUav[kUav], *csUav[kUav];
+    UINT nUav;
+    ID3D11BlendState* bs;
+    FLOAT blendFactor[4];
+    UINT sampleMask;
+    ID3D11DepthStencilState* dss;
+    UINT stencilRef;
+    ID3D11Buffer* so[kSo];
+    ID3D11Predicate* pred;
+    BOOL predValue;
+    bool ranges;
+#define TZ_FS_SAVE(I,P,T) \
+    { \
+        Stage& s = st[I]; \
+        T* sh = nullptr; \
+        s.nInst = kInst; \
+        c->P##GetShader(&sh, s.inst, &s.nInst); \
+        s.shader = sh; \
+        if (c1) \
+            c1->P##GetConstantBuffers1(0, kCb, s.cb, s.cbFirst, s.cbNum); \
+        else \
+            c->P##GetConstantBuffers(0, kCb, s.cb); \
+        c->P##GetShaderResources(0, kSrv, s.srv); \
+        c->P##GetSamplers(0, kSamp, s.samp); \
+    }
+#define TZ_FS_RESTORE(I,P,T) \
+    { \
+        Stage& s = st[I]; \
+        c->P##SetShader(static_cast<T*>(s.shader), s.nInst ? s.inst : nullptr, s.nInst); \
+        if (c1 && ranges) \
+            c1->P##SetConstantBuffers1(0, kCb, s.cb, s.cbFirst, s.cbNum); \
+        else \
+            c->P##SetConstantBuffers(0, kCb, s.cb); \
+        c->P##SetShaderResources(0, kSrv, s.srv); \
+        c->P##SetSamplers(0, kSamp, s.samp); \
+    }
+    void Save(ID3D11DeviceContext* c, ID3D11DeviceContext1* c1) {
+        ID3D11Device* d = nullptr;
+        c->GetDevice(&d);
+        nUav = d && d->GetFeatureLevel() >= D3D_FEATURE_LEVEL_11_1 ? kUav : D3D11_PS_CS_UAV_REGISTER_COUNT;
+        if (d) d->Release();
+        for (Stage& s : st)
+            for (UINT k = 0; k < kCb; ++k) s.cbFirst[k] = 0, s.cbNum[k] = kDefNum;
+        TZ_FS_SAVE(VS, VS, ID3D11VertexShader)
+        TZ_FS_SAVE(HS, HS, ID3D11HullShader)
+        TZ_FS_SAVE(DS, DS, ID3D11DomainShader)
+        TZ_FS_SAVE(GS, GS, ID3D11GeometryShader)
+        TZ_FS_SAVE(PS, PS, ID3D11PixelShader)
+        TZ_FS_SAVE(CS, CS, ID3D11ComputeShader)
+        ranges = false;
+        for (const Stage& s : st)
+            for (UINT k = 0; k < kCb; ++k) ranges |= s.cb[k] && (s.cbFirst[k] != 0 || s.cbNum[k] != kDefNum);
+        c->IAGetInputLayout(&layout);
+        c->IAGetVertexBuffers(0, kVb, vb, vbStride, vbOffset);
+        c->IAGetIndexBuffer(&ib, &ibFormat, &ibOffset);
+        c->IAGetPrimitiveTopology(&topo);
+        c->RSGetState(&rs);
+        nVp = nSc = kVp;
+        c->RSGetViewports(&nVp, vp);
+        c->RSGetScissorRects(&nSc, sc);
+        c->OMGetRenderTargetsAndUnorderedAccessViews(kRt, rtv, &dsv, 0, nUav, omUav);
+        c->OMGetBlendState(&bs, blendFactor, &sampleMask);
+        c->OMGetDepthStencilState(&dss, &stencilRef);
+        c->CSGetUnorderedAccessViews(0, nUav, csUav);
+        c->SOGetTargets(kSo, so);
+        c->GetPredication(&pred, &predValue);
+    }
+    void Restore(ID3D11DeviceContext* c, ID3D11DeviceContext1* c1) {
+        UINT keep[kUav], soKeep[kSo];
+        for (UINT& k : keep) k = UINT(-1);
+        for (UINT& k : soKeep) k = UINT(-1);
+        TZ_FS_RESTORE(VS, VS, ID3D11VertexShader)
+        TZ_FS_RESTORE(HS, HS, ID3D11HullShader)
+        TZ_FS_RESTORE(DS, DS, ID3D11DomainShader)
+        TZ_FS_RESTORE(GS, GS, ID3D11GeometryShader)
+        TZ_FS_RESTORE(PS, PS, ID3D11PixelShader)
+        TZ_FS_RESTORE(CS, CS, ID3D11ComputeShader)
+        c->IASetInputLayout(layout);
+        c->IASetVertexBuffers(0, kVb, vb, vbStride, vbOffset);
+        c->IASetIndexBuffer(ib, ibFormat, ibOffset);
+        c->IASetPrimitiveTopology(topo);
+        c->RSSetState(rs);
+        c->RSSetViewports(nVp, vp);
+        c->RSSetScissorRects(nSc, sc);
+        UINT nr = 0, u0 = nUav, u1 = 0;
+        for (UINT k = 0; k < kRt; ++k)
+            if (rtv[k]) nr = k + 1;
+        for (UINT k = 0; k < nUav; ++k)
+            if (omUav[k]) u0 = k < u0 ? k : u0, u1 = k + 1;
+        if (u1 > u0 && u0 >= nr)
+            c->OMSetRenderTargetsAndUnorderedAccessViews(nr, rtv, dsv, u0, u1 - u0, omUav + u0, keep);
+        else
+            c->OMSetRenderTargets(kRt, rtv, dsv);
+        c->OMSetBlendState(bs, blendFactor, sampleMask);
+        c->OMSetDepthStencilState(dss, stencilRef);
+        c->CSSetUnorderedAccessViews(0, nUav, csUav, keep);
+        c->SOSetTargets(kSo, so, soKeep);
+        c->SetPredication(pred, predValue);
+        Release();
+    }
+#undef TZ_FS_SAVE
+#undef TZ_FS_RESTORE
+    void Release() {
+        auto rel = [](IUnknown* u) {
+            if (u) u->Release();
+        };
+        for (Stage& s : st) {
+            rel(s.shader);
+            for (UINT k = 0; k < s.nInst; ++k) rel(s.inst[k]);
+            for (ID3D11Buffer* b : s.cb) rel(b);
+            for (ID3D11ShaderResourceView* v : s.srv) rel(v);
+            for (ID3D11SamplerState* p : s.samp) rel(p);
+        }
+        rel(layout);
+        for (ID3D11Buffer* b : vb) rel(b);
+        rel(ib), rel(rs), rel(dsv), rel(bs), rel(dss), rel(pred);
+        for (ID3D11RenderTargetView* v : rtv) rel(v);
+        for (UINT k = 0; k < nUav; ++k) rel(omUav[k]), rel(csUav[k]);
+        for (ID3D11Buffer* b : so) rel(b);
+    }
+};
+void UiLayerGunDraw() {
+    g_probeMute = true;
+    if (g_uiLayerGunFn)
+        g_uiLayerGunFn(g_lastSc);
+    else
+        DrawLayer(g_lastSc, kPartGun);
+    g_probeMute = false;
+}
 bool UiLayerMidDraw(ID3D11DeviceContext* c) {
     if (GetCurrentThreadId() != g_presentTid) {
         ++g_uls.skipThread;
@@ -551,24 +721,37 @@ bool UiLayerMidDraw(ID3D11DeviceContext* c) {
         }
         return false;
     }
-    if (!UiLayerStateReady(c)) {
-        ++g_uls.skipState;
-        if (!g_uls.loggedState) {
-            g_uls.loggedState = true;
-            g_log("ui-layer: no ID3D11DeviceContext1 state object; gun stays at Present");
+    if (g_uiStateSwap) {
+        if (!UiLayerStateReady(c)) {
+            ++g_uls.skipState;
+            if (!g_uls.loggedState) {
+                g_uls.loggedState = true;
+                g_log("ui-layer: no ID3D11DeviceContext1 state object; gun stays at Present");
+            }
+            return false;
         }
-        return false;
+        ID3DDeviceContextState* prev = nullptr;
+        g_ctx1->SwapDeviceContextState(g_ourState, &prev);
+        UiLayerGunDraw();
+        g_ctx1->SwapDeviceContextState(prev, nullptr);
+        if (prev) prev->Release();
+    } else {
+        static FullState fs;
+        ID3D11DeviceContext1* c1 = nullptr;
+        if (FAILED(c->QueryInterface(IID_ID3D11DeviceContext1, reinterpret_cast<void**>(&c1)))) c1 = nullptr;
+        fs.Save(c, c1);
+        c->ClearState();
+        UiLayerGunDraw();
+        c->ClearState();
+        fs.Restore(c, c1);
+        if (!g_uiLoggedManual) {
+            g_uiLoggedManual = true;
+            g_log("ui-layer: mid-frame gun drawn with a manual full pipeline save / restore (%u UAV slots, constant-buffer ranges %s) - no SwapDeviceContextState",
+                  fs.nUav, !c1 ? "not readable (no ID3D11DeviceContext1)" : fs.ranges ? "in use, restored with *ConstantBuffers1" : "default");
+        }
+        if (c1) c1->Release();
     }
-    ID3DDeviceContextState* prev = nullptr;
-    g_ctx1->SwapDeviceContextState(g_ourState, &prev);
-    g_probeMute = true;
-    if (g_uiLayerGunFn)
-        g_uiLayerGunFn(g_lastSc);
-    else
-        DrawLayer(g_lastSc, kPartGun);
-    g_probeMute = false;
-    g_ctx1->SwapDeviceContextState(prev, nullptr);
-    if (prev) prev->Release();
+    g_uiMidT = Now();
     g_midDone = true;
     ++g_uls.mid;
     return true;

@@ -41,13 +41,7 @@ struct RenderAddrs {
     uintptr_t insHelperCallDraw;
 };
 bool VerifyStatic(uintptr_t exeBase, LogFn log, const RenderAddrs& addrs);
-void SetPayloads(const wchar_t* mainIni, bool fullMod, const wchar_t* addonIds);
 void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log);
-const char* UnitKeys();
-bool UnitAllowed(const char* unitKey);
-void SetHeroKey(const char* unitKey);
-float EyeHeightFor(const char* unitKey, float def);
-void NoteNewBattle();
 bool Enabled();
 bool LayerActive();
 UINT TestKey();
