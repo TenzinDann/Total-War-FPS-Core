@@ -60,15 +60,6 @@ template <size_t N>
 constexpr PrintSet Prints(const CodePrint (&a)[N]) {
     return {a, N};
 }
-const CodePrint kArrowPrints904[] = {
-    {0x2fd07d0, 0x20e, 0x6ec8c833b7e346d3ull},
-    {0x2fd09e0, 0x3d62, 0x54ddff0da7591a60ull},
-    {0x2fa3f64, 0xdee, 0x10284c53e5b108d0ull},
-    {0x2fa3d54, 0x20e, 0xcdc36317d158b862ull},
-    {0x2f98cc2, 0x34, 0x5f1881ec384120feull}};
-constexpr uintptr_t oVisRootArrowMgr = 0x1f0, kVtArrowMgr904 = 0x3ad0490, kFnArrowUpdate904 = 0x2fea7d8, kFnArrowDraw904 = 0x2fd07d0,
-                    kVtArrowVisual2_904 = 0x3ad04b8, oArrowMgrCount = 0x5c, oArrowMgrList = 0x60, oArrowVt2 = 0x10, oArrowSoldierVis = 0xe0,
-                    oArrowBone = 0x144, oArrowFlags = 0x151;
 const CodePrint kCamPrints904[] = {{0x2f1dc80, 0x40, 0x5b87161bbe161bceull},
                                    {0x181c8ac, 0x3b, 0xf51ecd15ecf21432ull},
                                    {0x181c91c, 0x3b, 0x4089e72f9a4161e2ull},
@@ -456,7 +447,6 @@ bool g_noKnockOk = false;
 bool g_shieldGameOk = false;
 bool g_abilityOk = false;
 bool g_charOk = false;
-bool g_arrowOk = false;
 bool g_routOk = false;
 constexpr uintptr_t oUiHudRoot = 0x358, oUicChildCount = 0x1cc, oUicChildren = 0x1d0, oUicId = 0x2a0, oUicVisible = 0x353;
 constexpr int kMaxHideUi = 12;
@@ -516,7 +506,6 @@ struct Config {
     float tpLead = 0.2f;
     bool leadAuto = true, eyeFromHeight = true;
     bool hideSelf = true;
-    bool hideArrows = true;
     float leadAutoTau = 1.5f;
     bool wall = true;
     float stepUp = 0.6f, stepDown = 0.8f, gravity = 20.3f, jumpHeight = 0.f, airControl = 0.35f, airTpMax = 1.5f, landDip = 0.12f;
@@ -772,7 +761,6 @@ void LoadConfig() {
     if (!(cfg.leadAutoTau >= 0.2f && cfg.leadAutoTau <= 10.f)) cfg.leadAutoTau = 1.5f;
     cfg.eyeFromHeight = GetPrivateProfileIntW(L"camera", L"eye_from_height", 1, ini) != 0;
     cfg.hideSelf = GetPrivateProfileIntW(L"camera", L"hide_self", 1, ini) != 0;
-    cfg.hideArrows = GetPrivateProfileIntW(L"camera", L"hide_arrows", 1, ini) != 0;
     Log("ghost: teleport_lead=%.3f teleport_lead_auto=%d tau=%.2f eye_from_height=%d", cfg.tpLead, cfg.leadAuto, cfg.leadAutoTau,
         cfg.eyeFromHeight);
     cfg.wall = GetPrivateProfileIntW(L"move", L"wall", 1, ini) != 0;
@@ -6496,9 +6484,6 @@ bool VerifyGame() {
             cfg.heroesOnly);
         g_routOk = PrintsMatch(Prints(kRoutPrints904), "hero routing check (is_routing)");
         Log("hero: leave first person when the hero routs %s", g_routOk ? "ok" : "OFF - a routing hero stays controllable");
-        g_arrowOk = PrintsMatch(Prints(kArrowPrints904), "stuck arrows (arrow visual manager)") &&
-                    Ptr(g_base + kVtArrowMgr904) == g_base + kFnArrowUpdate904 && Ptr(g_base + kVtArrowMgr904 + 8) == g_base + kFnArrowDraw904;
-        Log("arrows: hide arrows stuck in the hero %s", g_arrowOk ? "ok" : "OFF - arrows that hit the hero stay visible in first person");
         g_flyOk = PrintsMatch(Prints(kFlyPrints904), "flying heroes (CanFly / desired flying state)");
         Log("fly: flying heroes %s (fly=%d takeoff=%d ahead=%.0f interval=%.2f turn=%.0f eye=%.2f)",
             g_flyOk ? "ok" : "OFF - flying heroes use the normal movement", cfg.fly, cfg.flyTakeoff, cfg.flyAhead, cfg.flyInterval,
@@ -6869,140 +6854,6 @@ void HideSelfStep() {
         }
     }
 }
-constexpr uint32_t kArrowBoneTag = 0xF0000000u, kArrowMaxList = 1u << 16;
-constexpr uint8_t kArrowAttached = 0x80;
-constexpr int kArrowMaxHide = 64;
-using FnArrowDraw = void (*)(uintptr_t mgr);
-struct ArrowHide {
-    uintptr_t mgr = 0, battle = 0, origVt = 0;
-    uintptr_t* vtCopy = nullptr;
-    FnArrowDraw orig = nullptr;
-    volatile uintptr_t sv = 0;
-    uintptr_t svLooked = 0;
-    double tSearch = -1, tTry = -1, tCheck = -1;
-    volatile LONG draws = 0, skipped = 0, most = 0;
-    bool logged = false, warned = false;
-} g_arrow;
-void ArrowDraw(uintptr_t mgr) {
-    uint32_t* bones[kArrowMaxHide];
-    int n = 0;
-    const uintptr_t sv = g_arrow.sv, vt2 = g_base + kVtArrowVisual2_904;
-    if (sv) {
-        const uint32_t cnt = *reinterpret_cast<const uint32_t*>(mgr + oArrowMgrCount);
-        const uintptr_t* list = *reinterpret_cast<const uintptr_t* const*>(mgr + oArrowMgrList);
-        for (uint32_t i = 0; list && cnt < kArrowMaxList && i < cnt && n < kArrowMaxHide; ++i) {
-            const uintptr_t v = list[i];
-            if (!v || *reinterpret_cast<const uintptr_t*>(v + oArrowSoldierVis) != sv || *reinterpret_cast<const uintptr_t*>(v + oArrowVt2) != vt2 ||
-                !(*reinterpret_cast<const uint8_t*>(v + oArrowFlags) & kArrowAttached))
-                continue;
-            uint32_t* b = reinterpret_cast<uint32_t*>(v + oArrowBone);
-            if (*b >= 0x10000u) continue;
-            *b |= kArrowBoneTag;
-            bones[n++] = b;
-        }
-    }
-    g_arrow.orig(mgr);
-    for (int k = 0; k < n; ++k)
-        if ((*bones[k] & 0xFFFF0000u) == kArrowBoneTag) *bones[k] &= 0xFFFFu;
-    InterlockedIncrement(&g_arrow.draws);
-    if (n) {
-        InterlockedExchangeAdd(&g_arrow.skipped, n);
-        if (n > g_arrow.most) g_arrow.most = n;
-    }
-}
-uintptr_t ArrowCurrentBattle() {
-    uintptr_t ui = Ptr(g_base + kGlobalUi);
-    return ui ? Ptr(ui + oUiBattle) : 0;
-}
-void ArrowUnhook(const char* why) {
-    g_arrow.sv = 0;
-    if (!g_arrow.mgr) return;
-    const bool same = g_arrow.battle && ArrowCurrentBattle() == g_arrow.battle &&
-                      Ptr(Ptr(g_arrow.battle + oBattleVisRoot) + oVisRootArrowMgr) == g_arrow.mgr;
-    const bool ours = same && g_arrow.vtCopy && Ptr(g_arrow.mgr) == reinterpret_cast<uintptr_t>(g_arrow.vtCopy + 1);
-    if (ours) Wr(g_arrow.mgr, g_arrow.origVt);
-    Log("arrows: %s arrow visual manager %p (%s): draw calls %ld, stuck arrows skipped %ld (at most %ld at once)", ours ? "unhooked" : "dropped",
-        (void*)g_arrow.mgr, why, g_arrow.draws, g_arrow.skipped, g_arrow.most);
-    g_arrow.mgr = g_arrow.battle = g_arrow.origVt = 0;
-    g_arrow.draws = g_arrow.skipped = g_arrow.most = 0;
-}
-bool ArrowHook(uintptr_t battle, uintptr_t mgr) {
-    const uintptr_t vt = Ptr(mgr);
-    uintptr_t lo = 0, hi = 0;
-    if (vt != g_base + kVtArrowMgr904 || Ptr(vt + 8) != g_base + kFnArrowDraw904 || !CodeRange(&lo, &hi)) {
-        if (!g_arrow.warned) {
-            g_arrow.warned = true;
-            Log("arrows: arrow visual manager %p vtable %p / [+8] %p not the 9.0.4 ones - stuck arrows stay visible", (void*)mgr, (void*)vt,
-                (void*)(vt ? Ptr(vt + 8) : 0));
-        }
-        return false;
-    }
-    size_t slots = 0;
-    while (slots < 1024) {
-        uintptr_t f = Ptr(vt + 8 * slots);
-        if (f < lo || f >= hi) break;
-        ++slots;
-    }
-    if (slots < 2) return false;
-    if (!g_arrow.vtCopy) {
-        const size_t copyN = slots + 16 > 64 ? slots + 16 : 64;
-        auto* c = static_cast<uintptr_t*>(VirtualAlloc(nullptr, (copyN + 1) * sizeof(uintptr_t), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-        if (!c) return false;
-        c[0] = Ptr(vt - 8);
-        for (size_t i = 0; i < copyN; ++i) c[1 + i] = i < slots ? Ptr(vt + 8 * i) : 0;
-        g_arrow.orig = reinterpret_cast<FnArrowDraw>(c[1 + 1]);
-        c[1 + 1] = reinterpret_cast<uintptr_t>(&ArrowDraw);
-        DWORD old;
-        VirtualProtect(c, (copyN + 1) * sizeof(uintptr_t), PAGE_READONLY, &old);
-        g_arrow.vtCopy = c;
-    }
-    g_arrow.draws = g_arrow.skipped = g_arrow.most = 0;
-    if (!Wr(mgr, reinterpret_cast<uintptr_t>(g_arrow.vtCopy + 1))) {
-        Log("arrows: vtable write failed on arrow visual manager %p", (void*)mgr);
-        return false;
-    }
-    g_arrow.mgr = mgr;
-    g_arrow.battle = battle;
-    g_arrow.origVt = vt;
-    Log("arrows: hooked arrow visual manager %p (battle %p, vt +%llx, %zu slots) via vtable copy %p: arrows stuck in the hero are skipped while "
-        "drawing (bone index masked during the draw call only)",
-        (void*)mgr, (void*)battle, (unsigned long long)(vt - g_base), slots, (void*)(g_arrow.vtCopy + 1));
-    return true;
-}
-void ArrowHideStep() {
-    if (!(S.active && cfg.hideArrows && g_arrowOk && S.entity && S.battle)) {
-        if (g_arrow.mgr) ArrowUnhook("first person ended");
-        g_arrow.sv = 0;
-        g_arrow.svLooked = 0;
-        g_arrow.tSearch = g_arrow.tTry = g_arrow.tCheck = -1;
-        g_arrow.logged = false;
-        return;
-    }
-    const double now = Now();
-    if (!g_arrow.mgr || g_arrow.tCheck < 0 || now - g_arrow.tCheck >= 0.5) {
-        g_arrow.tCheck = now;
-        const uintptr_t root = Ptr(S.battle + oBattleVisRoot), mgr = root ? Ptr(root + oVisRootArrowMgr) : 0;
-        if (g_arrow.mgr && (mgr != g_arrow.mgr || S.battle != g_arrow.battle || Ptr(mgr) != reinterpret_cast<uintptr_t>(g_arrow.vtCopy + 1)))
-            ArrowUnhook("arrow visual manager changed");
-        if (!g_arrow.mgr && mgr && (g_arrow.tTry < 0 || now - g_arrow.tTry >= 2.0)) {
-            g_arrow.tTry = now;
-            ArrowHook(S.battle, mgr);
-        }
-    }
-    uintptr_t sv = g_hide.sv;
-    if (!sv) {
-        if (g_arrow.tSearch < 0 || now - g_arrow.tSearch >= 0.5) {
-            g_arrow.tSearch = now;
-            g_arrow.svLooked = HeroSoldierVisual(S.battle, S.unit, S.entity);
-        }
-        sv = g_arrow.svLooked;
-    }
-    g_arrow.sv = g_arrow.mgr ? sv : 0;
-    if (g_arrow.skipped && !g_arrow.logged) {
-        g_arrow.logged = true;
-        Log("arrows: first stuck arrow hidden in our view (hero soldier visual %p)", (void*)sv);
-    }
-}
 struct GameVolState {
     float applied = -1.f;
     int fail = -1;
@@ -7070,7 +6921,6 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     EdgeStep();
     ShotStep();
     HideSelfStep();
-    ArrowHideStep();
     vmgame::GameThreadTime((Now() - tGameFrame) * 1000.0);
 }
 #ifdef HFPS_LUA_MODULE
