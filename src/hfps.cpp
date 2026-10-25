@@ -675,16 +675,10 @@ float IniF(const wchar_t* sec, const wchar_t* key, float def, const wchar_t* ini
 void LoadMeleeCats(const wchar_t* ini);
 extern float g_meleeTargetRadiusMax;
 LONG g_cfgGen = 0;
-const wchar_t* MainIniName() {
-#ifdef HFPS_PACK_ASSETS
-    return packx::MainIniName();
-#else
-    return L"tenzin_fps.ini";
-#endif
-}
 void LoadConfig() {
     wchar_t ini[MAX_PATH];
-    swprintf(ini, MAX_PATH, L"%ls\\%ls", g_dir, MainIniName());
+    wcscpy(ini, g_dir);
+    wcscat(ini, L"\\tenzin_fps.ini");
     InterlockedIncrement(&g_cfgGen);
     cfg.enabled = GetPrivateProfileIntW(L"general", L"enabled", 1, ini) != 0;
     UINT key = GetPrivateProfileIntW(L"general", L"toggle_key", VK_F6, ini);
@@ -893,7 +887,8 @@ void LoadConfig() {
     LoadMeleeCats(ini);
     g_meleeTargetRadiusMax = IniF(L"melee", L"target_radius_max", 4.f, ini);
     if (!(g_meleeTargetRadiusMax >= 0.f && g_meleeTargetRadiusMax <= 12.f)) g_meleeTargetRadiusMax = 4.f;
-    Log("melee: riders are hit through their mounts; big targets measured to their edge (radius counted up to %.1f m, 0 = off)",
+    Log("melee: riders are hit through their mounts (crew manning a gun are hit themselves); big targets measured to their edge (radius counted up to "
+        "%.1f m, 0 = off)",
         g_meleeTargetRadiusMax);
     cfg.hideHud = GetPrivateProfileIntW(L"ui", L"hide_hud", 1, ini) != 0;
     cfg.hideCursor = GetPrivateProfileIntW(L"ui", L"hide_cursor", 1, ini) != 0;
@@ -1157,7 +1152,6 @@ struct State {
     double tLastTp = 0;
     unsigned tpSent = 0, tpFailed = 0, tpLogs = 0, leashHits = 0;
     int lastMode = -1;
-    float eyeHeight = 1.75f;
     bool flyer = false;
     TpRec tpHist[8] = {};
     unsigned tpHead = 0;
@@ -1444,36 +1438,6 @@ void Exit(uintptr_t mgr, const char* why, bool release = true) {
     Log("FPS exit reason=%s restoredPrev=%d active=%p prev=%p", why, restored, (void*)active,
         (void*)S.prevActive);
 }
-struct UnitKeyRec {
-    uintptr_t unit;
-    char key[48];
-};
-UnitKeyRec g_unitKeyTab[64];
-int g_unitKeyNext = 0;
-SRWLOCK g_unitKeyLock = SRWLOCK_INIT;
-void RememberUnitKey(uintptr_t unit, const char* key) {
-    AcquireSRWLockExclusive(&g_unitKeyLock);
-    int slot = -1;
-    for (int i = 0; i < 64 && slot < 0; ++i)
-        if (g_unitKeyTab[i].unit == unit) slot = i;
-    if (slot < 0) slot = g_unitKeyNext, g_unitKeyNext = (g_unitKeyNext + 1) % 64;
-    g_unitKeyTab[slot].unit = unit;
-    snprintf(g_unitKeyTab[slot].key, sizeof g_unitKeyTab[slot].key, "%s", key);
-    ReleaseSRWLockExclusive(&g_unitKeyLock);
-}
-void ForgetUnitKeys() {
-    AcquireSRWLockExclusive(&g_unitKeyLock);
-    memset(g_unitKeyTab, 0, sizeof g_unitKeyTab);
-    g_unitKeyNext = 0;
-    ReleaseSRWLockExclusive(&g_unitKeyLock);
-}
-void UnitKeyOf(uintptr_t unit, char* out, size_t n) {
-    out[0] = 0;
-    AcquireSRWLockShared(&g_unitKeyLock);
-    for (int i = 0; i < 64; ++i)
-        if (unit && g_unitKeyTab[i].unit == unit) snprintf(out, n, "%s", g_unitKeyTab[i].key);
-    ReleaseSRWLockShared(&g_unitKeyLock);
-}
 bool HeroRouting(uintptr_t unit, int* state = nullptr) {
     int32_t st = -1;
     if (state) *state = -1;
@@ -1531,14 +1495,6 @@ void Enter(uintptr_t mgr) {
             return;
         }
         Log("enter: lord / hero check passed (IsCharacter key len %d, IsGeneral %d)", keyLen, general ? 1 : 0);
-    }
-    char heroKey[48];
-    UnitKeyOf(unit, heroKey, sizeof heroKey);
-    if (!vmgame::UnitAllowed(heroKey)) {
-        Refuse(kRefuseNotOwner);
-        Log("enter refused: unit %p (unit key '%s') is not a weapon pack's hero - without hero_fps.pack only those heroes may enter (allowed: %s)",
-            (void*)unit, heroKey, vmgame::UnitKeys());
-        return;
     }
     int moraleState = -1;
     if (HeroRouting(unit, &moraleState)) {
@@ -1658,9 +1614,6 @@ void Enter(uintptr_t mgr) {
     SetupMouse();
     CastReset();
     S.active = true;
-    vmgame::SetHeroKey(heroKey);
-    S.eyeHeight = vmgame::EyeHeightFor(heroKey, cfg.eyeHeight);
-    if (S.eyeHeight != cfg.eyeHeight) Log("enter: eye height %.3f m for '%s' (weapon pack [character]; config %.2f)", S.eyeHeight, heroKey, cfg.eyeHeight);
     vmgame::SetFirstPerson(true);
     if (S.exitStage == 2) {
         Log("ghost: pending release cancelled - first person entered again");
@@ -2359,6 +2312,7 @@ float MeleeWideCos(float halfDeg, float extra, float d) {
     return a >= 180.f ? -2.f : std::cos(a * kPi / 180.f);
 }
 int g_meleeBigLogs = 0;
+int g_meleeCrewLogs = 0;
 MeleeUnitExt g_mext[kMeleeExtSlots];
 uintptr_t g_mextWorld = 0;
 struct MeleeSoldier {
@@ -2531,7 +2485,9 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
             if (d > scanR + bigSlack || std::fabs(q[1] - (rq.oy - 1.7f)) > 3.f) continue;
             uintptr_t e = rider;
             float tx = q[0], tz = q[2];
-            const uintptr_t mount = Ptr(rider + 0x2e0);
+            const uintptr_t carrier = Ptr(rider + 0x2e0);
+            const bool crew = carrier && reinterpret_cast<FnCanHit>(g_base + kFnCanBeHit904)(rider);
+            const uintptr_t mount = crew ? 0 : carrier;
             if (mount) {
                 float mq[3];
                 if (!Plausible(mount) || Ptr(rider + 0x80) == heroSide || !EntPos(mount, mq)) continue;
@@ -2559,6 +2515,13 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
             }
             if (mount) ++nMount;
             if (extra > 0.f) ++nBig;
+            if (crew && inArc && g_meleeCrewLogs < 8) {
+                ++g_meleeCrewLogs;
+                uint8_t b10 = 0;
+                Rd(rider + 0xb10, b10);
+                Log("melee-engine: crew %p in reach (%.1f m from the camera) on carrier %p (vt %p, +0xb10 0x%x) - hit the man, not the carrier", (void*)e,
+                    d, (void*)carrier, (void*)Ptr(carrier), b10);
+            }
             if ((mount || extra > 0.f) && inArc && g_meleeBigLogs < 24) {
                 ++g_meleeBigLogs;
                 Log("melee-engine: %s %p in reach (radius +%.2f m, %.1f m from the camera, %.1f m to its edge)", mount ? "mount" : "big target",
@@ -6149,7 +6112,7 @@ void Apply(uintptr_t mgr) {
     const float* vRight = kv.right;
     const float* vUp = kv.up;
     vmgame::PublishView(S.yaw, S.pitch, (S.flyer || (mode == 0 && S.air)) ? 0.f : S.camSpeed);
-    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : S.eyeHeight),
+    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : cfg.eyeHeight),
                     camPos[2] + cy * cfg.eyeForward};
     float target[3] = {eye[0] + vFwd[0] * 10.f, eye[1] + vFwd[1] * 10.f, eye[2] + vFwd[2] * 10.f};
     float up[3] = {0.f, 1.f, 0.f};
@@ -6865,17 +6828,7 @@ DWORD WINAPI InitThread(LPVOID) {
             return 0;
         }
         Log("loader: version.dll = %ls (%s), module dir %ls", vp[0] ? vp : L"(none)",
-            inDir ? "in the game folder, another tool's (no tenzin_fps / tenzin_fps proxy signature) - carrying on" : "not ours", g_dir);
-    }
-    {
-        wchar_t name[64];
-        swprintf(name, 64, L"Local\\tenzin_fps_native_%lu", GetCurrentProcessId());
-        HANDLE mx = CreateMutexW(nullptr, FALSE, name);
-        if (mx && GetLastError() == ERROR_ALREADY_EXISTS) {
-            Log("loader: another tenzin_fps_native is already running in this process - this copy stays idle");
-            g_status = kStatusOtherCopy;
-            return 0;
-        }
+            inDir ? "in the game folder, another tool's (no hero_fps / tenzin_fps proxy signature) - carrying on" : "not ours", g_dir);
     }
 #ifdef HFPS_PACK_ASSETS
     if (!packx::ExtractFromPack(g_dir, &Log)) {
@@ -6883,7 +6836,6 @@ DWORD WINAPI InitThread(LPVOID) {
         g_status = kStatusAssets;
         return 0;
     }
-    vmgame::SetPayloads(packx::MainIniName(), packx::FullMod(), packx::AddonIds());
 #endif
 #else
     Log("==== tenzin_fps native M1 + viewmodel test loaded (version.dll proxy) pid=%lu", GetCurrentProcessId());
@@ -6892,7 +6844,7 @@ DWORD WINAPI InitThread(LPVOID) {
     if (!VerifyGame()) return 0;
     LoadConfig();
     if (!cfg.enabled) {
-        Log("disabled by %ls", MainIniName());
+        Log("disabled by tenzin_fps.ini");
         g_status = kStatusDisabled;
         return 0;
     }
@@ -7405,7 +7357,6 @@ struct Fns {
     float (*tonumber)(void*, int);
     int (*type)(void*, int);
     size_t (*objlen)(void*, int);
-    const char* (*tolstring)(void*, int, size_t*);
 } f;
 int g_state = -1;
 char g_missing[48] = "";
@@ -7427,44 +7378,12 @@ bool Resolve() {
         }
         memcpy(e.slot, &p, sizeof p);
     }
-    if (FARPROC p = exe ? GetProcAddress(exe, "lua_tolstring") : nullptr) memcpy(&f.tolstring, &p, sizeof p);
     g_state = 1;
     return true;
 }
 int Api(void* L) {
     f.pushnumber(L, 5.f);
     return 1;
-}
-int UnitKeysFn(void* L) {
-    f.pushstring(L, vmgame::UnitKeys());
-    return 1;
-}
-int AccessAll(void* L) {
-    f.pushboolean(L, vmgame::UnitAllowed("") ? 1 : 0);
-    return 1;
-}
-int SetUnit(void* L) {
-    bool ok = false;
-    if (f.tolstring && f.type(L, 1) == kTUserdata && f.objlen(L, 1) >= sizeof(uintptr_t)) {
-        const void* blk = f.touserdata(L, 1);
-        uintptr_t wrap = 0;
-        if (blk) memcpy(&wrap, blk, sizeof wrap);
-        const uintptr_t p = wrap ? Ptr(wrap + 8) : 0;
-        size_t n = 0;
-        const char* key = f.tolstring(L, 2, &n);
-        if (p && key && n > 0 && n < 48) {
-            RememberUnitKey(p, key);
-            ok = true;
-        }
-    }
-    f.pushboolean(L, ok ? 1 : 0);
-    return 1;
-}
-int BattleStarted(void*) {
-    ForgetUnitKeys();
-    vmgame::NoteNewBattle();
-    Log("lua-api: battle started (unit keys cleared)");
-    return 0;
 }
 int Active(void* L) {
     f.pushboolean(L, S.active && S.unit ? 1 : 0);
@@ -7662,18 +7581,17 @@ int PushTable(void* L) {
         Log("lua-api: %s not exported by the game - no interface table (luaopen #%ld)", g_missing, n);
         return 0;
     }
-    f.createtable(L, 0, 23);
+    f.createtable(L, 0, 11);
     const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_enabled", HudEnabled},
-                                                        {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"unit_keys", UnitKeysFn}, {"access_all", AccessAll},
-                                                        {"set_unit", SetUnit}, {"battle_started", BattleStarted}, {"set_ui_covers", SetUiCoversApi}, {"cast_event", CastEvent},
-                                                        {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson}, {"tac_stamina", TacStaminaApi},
-                                                        {"refill_ammo", RefillAmmoApi}, {"prompt", Prompt}, {"refused", Refused}, {"status", Status},
+                                                        {"set_hud_rect", SetHudRect}, {"set_ui_covers", SetUiCoversApi}, {"ammo", Ammo}, {"cast_event", CastEvent},
+                                                        {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson},
+                                                        {"tac_stamina", TacStaminaApi}, {"refill_ammo", RefillAmmoApi}, {"prompt", Prompt}, {"refused", Refused}, {"status", Status},
                                                         {"cast_marker", CastMarkerApi}, {"cast_target", CastTargetApi}, {"cast_point", CastPointApi}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);
     }
-    Log("lua-api: interface table v4 returned (luaopen #%ld, lua state %p%s)", n, L, f.tolstring ? "" : ", lua_tolstring missing - set_unit off");
+    Log("lua-api: interface table v4 returned (luaopen #%ld, lua state %p)", n, L);
     return 1;
 }
 }
