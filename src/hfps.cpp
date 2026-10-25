@@ -456,8 +456,8 @@ bool g_noKnockOk = false;
 bool g_shieldGameOk = false;
 bool g_abilityOk = false;
 bool g_charOk = false;
-bool g_routOk = false;
 bool g_arrowOk = false;
+bool g_routOk = false;
 constexpr uintptr_t oUiHudRoot = 0x358, oUicChildCount = 0x1cc, oUicChildren = 0x1d0, oUicId = 0x2a0, oUicVisible = 0x353;
 constexpr int kMaxHideUi = 12;
 constexpr uintptr_t oUicPos = 0x2c0, oUicLayout = 0x2f0, oLayoutW = 0x11c, oLayoutH = 0x120;
@@ -1197,6 +1197,9 @@ struct State {
 } S;
 volatile LONG g_reqToggle = 0, g_reqExit = 0;
 volatile LONG g_staleFp = 0;
+volatile LONG g_camBeat = 0;
+bool g_fpDetached = false;
+uintptr_t g_detachMgr = 0;
 struct TacStamina {
     float st = 1.f;
     double lastTac = -1e9;
@@ -4773,8 +4776,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -4845,7 +4846,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -4928,26 +4928,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -6167,14 +6158,29 @@ bool InstallHook() {
     }
     g_installedMgr = mgr;
     Log("hooked battle camera manager %p (battle %p) via vtable copy %p", (void*)mgr, (void*)battle, (void*)ours);
-    if (S.active) {
+    if (S.active || g_fpDetached) {
         InterlockedExchange(&g_staleFp, 1);
-        Log("FPS: first-person state left over from camera manager %p (battle ended while in first person?) - dropped on the next frame",
-            (void*)S.mgr);
+        Log("FPS: first-person state left over from camera manager %p (%s) - dropped on the next frame", (void*)S.mgr,
+            S.active ? "battle ended while in first person?" : "already released on the window side");
     }
     return true;
 }
-LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+constexpr double kStaleHookSecs = 3.0, kStaleHookGap = 1.0;
+struct BeatWatch {
+    LONG beat = 0;
+    double since = -1, last = -1;
+    bool Step(LONG b, double now, double limit, double gap) {
+        if (since < 0 || b != beat || now - last > gap) {
+            beat = b;
+            since = last = now;
+            return false;
+        }
+        last = now;
+        return now - since >= limit;
+    }
+    void Reset() { since = last = -1; }
+} g_beatWatch;
+void WindowSideRestore() {
     if (!S.active && S.cursorHidden) {
         reinterpret_cast<void (*)(bool)>(g_base + kFnSetCursorVisible)(S.cursorVisOrig != 0);
         S.cursorHidden = false;
@@ -6184,6 +6190,27 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         reinterpret_cast<void (*)(bool)>(g_base + kFnSetCursorEnabled)(S.cursorOrig != 0);
         S.cursorOff = false;
     }
+}
+void StaleHookCheck() {
+    if (!S.active) {
+        g_beatWatch.Reset();
+        return;
+    }
+    if (!g_beatWatch.Step(g_camBeat, Now(), kStaleHookSecs, kStaleHookGap)) return;
+    g_beatWatch.Reset();
+    S.active = false;
+    ReleaseMouse();
+    vmgame::SetFirstPerson(false);
+    const LONG oldExit = InterlockedExchange(&g_reqExit, 0), oldLauncher = InterlockedExchange(&g_reqLauncher, 0);
+    g_fpDetached = true;
+    g_detachMgr = S.mgr;
+    Log("FPS state dropped on the window side: no camera update for %.0f s (battle ended while in first person?) - cursor, mouse and keys "
+        "released (camera manager %p, exit request %ld, launcher request %ld cleared)",
+        kStaleHookSecs, (void*)S.mgr, oldExit, oldLauncher);
+}
+LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    StaleHookCheck();
+    WindowSideRestore();
     switch (m) {
     case WM_INPUT:
         if (S.active && S.useRaw) {
@@ -6315,6 +6342,8 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return CallWindowProcW(g_prevProc, h, m, w, l);
 }
 LRESULT CALLBACK HfpsChildWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    StaleHookCheck();
+    WindowSideRestore();
     switch (m) {
     case WM_LBUTTONDOWN:
     case WM_LBUTTONUP:
@@ -7065,6 +7094,18 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
         Log("camera update runs on thread %lu (window thread %lu)", GetCurrentThreadId(), g_windowThread);
     }
     const bool staleFp = InterlockedExchange(&g_staleFp, 0) != 0;
+    InterlockedIncrement(&g_camBeat);
+    if (g_fpDetached) {
+        g_fpDetached = false;
+        if (mgr == g_detachMgr && !staleFp) {
+            S.active = true;
+            Exit(mgr, "camera update resumed after the window-side drop");
+        } else {
+            S.exitStage = 0;
+            Log("FPS: window-side drop confirmed - camera manager %p hooked anew (old %p); old battle left untouched", (void*)mgr,
+                (void*)g_detachMgr);
+        }
+    }
     if (S.active && (S.mgr != mgr || staleFp)) {
         S.active = false;
         ReleaseMouse();
