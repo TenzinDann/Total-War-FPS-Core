@@ -204,10 +204,6 @@ const CodePrint kShieldGamePrints904[] = {
     {0x8d3ca0, 0x3, 0x58389c18233078ffull}};
 constexpr uintptr_t kVtSoldier904 = 0x3912950, kFnProjHit904 = 0x306b1a8, kFnProjCanHit904 = 0x305947c, kFnRet0Of1c8_904 = 0x8d3ca0,
                     kFnHitReact904 = 0x307517c, kFnStagger904 = 0x306ee40, kMeleeRet1_904 = 0x3253e70, kMeleeRet2_904 = 0x326565e;
-const CodePrint kArmorPrints904[] = {
-    {0x306ee40, 0x296, 0xa637304bb565fab0ull},
-    {0x306b1a8, 0x8e4, 0x735cc3a5886923b0ull},
-    {0x307517c, 0x68, 0xc7cbd99e65c01a48ull}};
 const CodePrint kAbilityPrints904[] = {
     {0x2f008d0, 0x27b, 0x594cd05ca9272710ull},
     {0x2ea94e8, 0xa0, 0x744ebda3b94ebcedull},
@@ -465,11 +461,10 @@ bool g_shotOk = false;
 bool g_meleeHitOk = false;
 bool g_noKnockOk = false;
 bool g_shieldGameOk = false;
-bool g_armorOk = false;
 bool g_abilityOk = false;
 bool g_charOk = false;
-bool g_routOk = false;
 bool g_arrowOk = false;
+bool g_routOk = false;
 constexpr uintptr_t oUiHudRoot = 0x358, oUicChildCount = 0x1cc, oUicChildren = 0x1d0, oUicId = 0x2a0, oUicVisible = 0x353;
 constexpr int kMaxHideUi = 12;
 constexpr uintptr_t oUicPos = 0x2c0, oUicLayout = 0x2f0, oLayoutW = 0x11c, oLayoutH = 0x120;
@@ -545,7 +540,6 @@ struct Config {
     bool revealEnemies = true;
     bool noMelee = true;
     bool noKnock = true;
-    bool superArmor = true;
     bool heroesOnly = true;
     bool fly = true, flyTakeoff = true;
     float flyAhead = 60.f, flyInterval = 2.0f, flyTurnDeg = 20.f, flyEyeHeight = 1.2f;
@@ -675,10 +669,16 @@ float IniF(const wchar_t* sec, const wchar_t* key, float def, const wchar_t* ini
 void LoadMeleeCats(const wchar_t* ini);
 extern float g_meleeTargetRadiusMax;
 LONG g_cfgGen = 0;
+const wchar_t* MainIniName() {
+#ifdef HFPS_PACK_ASSETS
+    return packx::MainIniName();
+#else
+    return L"tenzin_fps.ini";
+#endif
+}
 void LoadConfig() {
     wchar_t ini[MAX_PATH];
-    wcscpy(ini, g_dir);
-    wcscat(ini, L"\\tenzin_fps.ini");
+    swprintf(ini, MAX_PATH, L"%ls\\%ls", g_dir, MainIniName());
     InterlockedIncrement(&g_cfgGen);
     cfg.enabled = GetPrivateProfileIntW(L"general", L"enabled", 1, ini) != 0;
     UINT key = GetPrivateProfileIntW(L"general", L"toggle_key", VK_F6, ini);
@@ -845,7 +845,6 @@ void LoadConfig() {
     cfg.revealEnemies = GetPrivateProfileIntW(L"hero", L"reveal_enemies", 1, ini) != 0;
     cfg.noMelee = GetPrivateProfileIntW(L"hero", L"no_melee", 1, ini) != 0;
     cfg.noKnock = GetPrivateProfileIntW(L"hero", L"no_knockdown", 1, ini) != 0;
-    cfg.superArmor = GetPrivateProfileIntW(L"hero", L"super_armor", 1, ini) != 0;
     cfg.heroesOnly = GetPrivateProfileIntW(L"hero", L"heroes_only", 1, ini) != 0;
     cfg.fly = GetPrivateProfileIntW(L"move", L"fly", 1, ini) != 0;
     cfg.flyTakeoff = GetPrivateProfileIntW(L"move", L"fly_takeoff", 1, ini) != 0;
@@ -1151,6 +1150,7 @@ struct State {
     double tLastTp = 0;
     unsigned tpSent = 0, tpFailed = 0, tpLogs = 0, leashHits = 0;
     int lastMode = -1;
+    float eyeHeight = 1.75f;
     bool flyer = false;
     TpRec tpHist[8] = {};
     unsigned tpHead = 0;
@@ -1437,6 +1437,36 @@ void Exit(uintptr_t mgr, const char* why, bool release = true) {
     Log("FPS exit reason=%s restoredPrev=%d active=%p prev=%p", why, restored, (void*)active,
         (void*)S.prevActive);
 }
+struct UnitKeyRec {
+    uintptr_t unit;
+    char key[48];
+};
+UnitKeyRec g_unitKeyTab[64];
+int g_unitKeyNext = 0;
+SRWLOCK g_unitKeyLock = SRWLOCK_INIT;
+void RememberUnitKey(uintptr_t unit, const char* key) {
+    AcquireSRWLockExclusive(&g_unitKeyLock);
+    int slot = -1;
+    for (int i = 0; i < 64 && slot < 0; ++i)
+        if (g_unitKeyTab[i].unit == unit) slot = i;
+    if (slot < 0) slot = g_unitKeyNext, g_unitKeyNext = (g_unitKeyNext + 1) % 64;
+    g_unitKeyTab[slot].unit = unit;
+    snprintf(g_unitKeyTab[slot].key, sizeof g_unitKeyTab[slot].key, "%s", key);
+    ReleaseSRWLockExclusive(&g_unitKeyLock);
+}
+void ForgetUnitKeys() {
+    AcquireSRWLockExclusive(&g_unitKeyLock);
+    memset(g_unitKeyTab, 0, sizeof g_unitKeyTab);
+    g_unitKeyNext = 0;
+    ReleaseSRWLockExclusive(&g_unitKeyLock);
+}
+void UnitKeyOf(uintptr_t unit, char* out, size_t n) {
+    out[0] = 0;
+    AcquireSRWLockShared(&g_unitKeyLock);
+    for (int i = 0; i < 64; ++i)
+        if (unit && g_unitKeyTab[i].unit == unit) snprintf(out, n, "%s", g_unitKeyTab[i].key);
+    ReleaseSRWLockShared(&g_unitKeyLock);
+}
 bool HeroRouting(uintptr_t unit, int* state = nullptr) {
     int32_t st = -1;
     if (state) *state = -1;
@@ -1494,6 +1524,14 @@ void Enter(uintptr_t mgr) {
             return;
         }
         Log("enter: lord / hero check passed (IsCharacter key len %d, IsGeneral %d)", keyLen, general ? 1 : 0);
+    }
+    char heroKey[48];
+    UnitKeyOf(unit, heroKey, sizeof heroKey);
+    if (!vmgame::UnitAllowed(heroKey)) {
+        Refuse(kRefuseNotOwner);
+        Log("enter refused: unit %p (unit key '%s') is not a weapon pack's hero - without hero_fps.pack only those heroes may enter (allowed: %s)",
+            (void*)unit, heroKey, vmgame::UnitKeys());
+        return;
     }
     int moraleState = -1;
     if (HeroRouting(unit, &moraleState)) {
@@ -1613,6 +1651,9 @@ void Enter(uintptr_t mgr) {
     SetupMouse();
     CastReset();
     S.active = true;
+    vmgame::SetHeroKey(heroKey);
+    S.eyeHeight = vmgame::EyeHeightFor(heroKey, cfg.eyeHeight);
+    if (S.eyeHeight != cfg.eyeHeight) Log("enter: eye height %.3f m for '%s' (weapon pack [character]; config %.2f)", S.eyeHeight, heroKey, cfg.eyeHeight);
     vmgame::SetFirstPerson(true);
     if (S.exitStage == 2) {
         Log("ghost: pending release cancelled - first person entered again");
@@ -4059,9 +4100,6 @@ struct NoKnock {
     uintptr_t copyOf = 0;
     bool copyKnock = false, copyShield = false;
     bool knock = false, shield = false;
-    bool copyArmor = false, armor = false;
-    volatile LONG armorSkipped = 0;
-    LONG armorLogged = 0;
     LONG gen = 0;
     size_t slots = 0;
     volatile LONG blocked[3] = {0, 0, 0};
@@ -4209,10 +4247,6 @@ uint64_t HeroHitReact(uintptr_t self, uintptr_t attacker, uintptr_t delta) {
 }
 using FnHeroStagger = uint64_t (*)(uintptr_t, uintptr_t);
 uint64_t HeroStagger(uintptr_t self, uintptr_t info) {
-    if (g_nk.armor && cfg.superArmor && S.active) {
-        InterlockedIncrement(&g_nk.armorSkipped);
-        return 0;
-    }
     float f = ShieldFrac(self);
     if (f > 0.f && info && shieldhit::EatStagger(f, cfg.shieldStagger)) {
         float v[3] = {};
@@ -4277,10 +4311,8 @@ void NoKnockRemove(const char* why) {
     bool ours = g_nk.copy && Ptr(g_nk.ent) == reinterpret_cast<uintptr_t>(g_nk.copy + 1);
     if (ours) Wr(g_nk.ent, g_nk.origVt);
     g_sb.ent = 0;
-    Log("hero: no-knockdown%s%s off for %p (%s)%s - blocked knock back %ld, knock down %ld, knock flying %ld, hit reactions skipped %ld",
-        g_nk.shield ? " + shield-game" : "", g_nk.armor ? " + super armor" : "", (void*)g_nk.ent, why, ours ? "" : " (vtable was not ours any more - left alone)",
-        g_nk.blocked[0], g_nk.blocked[1], g_nk.blocked[2], g_nk.armorSkipped);
-    g_nk.armor = false;
+    Log("hero: no-knockdown%s off for %p (%s)%s - blocked knock back %ld, knock down %ld, knock flying %ld", g_nk.shield ? " + shield-game" : "",
+        (void*)g_nk.ent, why, ours ? "" : " (vtable was not ours any more - left alone)", g_nk.blocked[0], g_nk.blocked[1], g_nk.blocked[2]);
     if (g_nk.shield)
         Log("shield-game: so far missile 100%% %ld / partial %ld, melee 100%% %ld / partial %ld / miss %ld, side %ld, stagger eaten %ld, hp refunds %ld (+%ld hp)",
             g_sb.missileFull, g_sb.missilePart, g_sb.meleeFull, g_sb.meleePart, g_sb.meleeMiss, g_sb.side, g_sb.stagger, g_sb.refunds, g_sb.refundHp);
@@ -4299,9 +4331,8 @@ bool NoKnockInstall(uintptr_t ent) {
     if (cfg.shieldGame && g_shieldGameOk && !shield && g_nk.logs++ < 8)
         Log("shield-game: entity %p vtable +0x%llx is not the soldier class +0x%llx (or its slots differ) - shield blocks only the debug key", (void*)ent,
             (unsigned long long)(vt - g_base), (unsigned long long)kVtSoldier904);
-    bool armor = cfg.superArmor && g_armorOk && Ptr(vt + 0x558) == g_base + kFnStagger904;
-    if (!knock && !shield && !armor) return false;
-    if (!g_nk.copy || g_nk.copyOf != vt || g_nk.copyKnock != knock || g_nk.copyShield != shield || g_nk.copyArmor != armor) {
+    if (!knock && !shield) return false;
+    if (!g_nk.copy || g_nk.copyOf != vt || g_nk.copyKnock != knock || g_nk.copyShield != shield) {
         size_t slots = 0;
         while (slots < 4096) {
             uintptr_t f = Ptr(vt + 8 * slots);
@@ -4332,12 +4363,7 @@ bool NoKnockInstall(uintptr_t ent) {
             c[1 + 0x3a8 / 8] = reinterpret_cast<uintptr_t>(&HeroHitReact);
             c[1 + 0x558 / 8] = reinterpret_cast<uintptr_t>(&HeroStagger);
         }
-        if (armor && !shield) {
-            g_sb.orig558 = c[1 + 0x558 / 8];
-            c[1 + 0x558 / 8] = reinterpret_cast<uintptr_t>(&HeroStagger);
-        }
         g_nk.copy = c;
-        g_nk.copyArmor = armor;
         g_nk.copyOf = vt;
         g_nk.copyKnock = knock;
         g_nk.copyShield = shield;
@@ -4347,8 +4373,6 @@ bool NoKnockInstall(uintptr_t ent) {
     g_nk.ent = ent;
     g_nk.knock = knock;
     g_nk.shield = shield;
-    g_nk.armor = armor;
-    g_nk.armorSkipped = g_nk.armorLogged = 0;
     g_nk.gen = g_cfgGen;
     if (shield) g_sb.ent = ent;
     bool ok = Wr(ent, reinterpret_cast<uintptr_t>(g_nk.copy + 1));
@@ -4360,7 +4384,7 @@ bool NoKnockInstall(uintptr_t ent) {
     return ok;
 }
 void NoKnockStep() {
-    bool want = S.active && S.entity && ((cfg.noKnock && g_noKnockOk) || (cfg.shieldGame && g_shieldGameOk) || (cfg.superArmor && g_armorOk));
+    bool want = S.active && S.entity && ((cfg.noKnock && g_noKnockOk) || (cfg.shieldGame && g_shieldGameOk));
     if (g_nk.ent && (!want || g_nk.ent != S.entity || g_nk.gen != g_cfgGen))
         NoKnockRemove(!want ? "first person off / switched off" : g_nk.ent != S.entity ? "hero changed" : "ini reloaded");
     if (!want) return;
@@ -4371,10 +4395,6 @@ void NoKnockStep() {
         g_sb.ent = 0;
     }
     if (g_nk.ent != S.entity) NoKnockInstall(S.entity);
-    if (g_nk.armorSkipped != g_nk.armorLogged && g_nk.logs++ < 60) {
-        g_nk.armorLogged = g_nk.armorSkipped;
-        Log("hero: super armor - hit reaction (state 18) skipped, so far %ld this time", g_nk.armorLogged);
-    }
     LONG total = g_nk.blocked[0] + g_nk.blocked[1] + g_nk.blocked[2];
     if (total != g_nk.logged && g_nk.logs++ < 60) {
         g_nk.logged = total;
@@ -4935,8 +4955,6 @@ struct LauncherGame {
     bool sawWind = false;
     double tHeroCheck = -1;
     uintptr_t heroUnit = 0;
-    uintptr_t cdInst[vmgame::kLauncherKinds] = {};
-    int32_t cdPrev[vmgame::kLauncherKinds] = {-1, -1, -1};
 } g_lg;
 int32_t AbilityId(int kind) {
     int32_t& id = g_lg.id[kind];
@@ -5007,7 +5025,6 @@ bool LauncherTryCast(int kind, const float eye[3], const float fwd[3]) {
     char why[96];
     if (steps > 0 || (flags & 1) || cool >= 1 || uses == 0) {
         snprintf(why, sizeof why, "not ready (wind-up steps %d, active %d, cooldown steps %d, uses %d)", steps, flags & 1, cool, uses);
-        if (cool >= 1 || uses == 0) vmgame::LauncherCue(0, kind);
         return refuse(why);
     }
     float H[3] = {0, 0, 0};
@@ -5090,26 +5107,17 @@ void LauncherWatchOtherCasts(double now) {
 }
 void LauncherGameStep(double now) {
     if (vmgame::LauncherConfigured() && g_abilityOk && (S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0 || now - g_lg.tHeroCheck >= 1.0)) {
-        bool has = false, newHero = S.unit != g_lg.heroUnit || g_lg.tHeroCheck < 0;
-        for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-            uintptr_t a = 0, d = 0;
+        bool has = false;
+        for (int k = 0; k < vmgame::kLauncherKinds && !has; ++k) {
+            uintptr_t a, d;
             int32_t id = AbilityId(k);
-            bool hk = id >= 0 && FindAbility(id, &a, &d);
-            has = has || hk;
-            if (!hk) a = 0;
-            if (a != g_lg.cdInst[k] || newHero) g_lg.cdInst[k] = a, g_lg.cdPrev[k] = -1;
+            has = id >= 0 && FindAbility(id, &a, &d);
         }
         if (has != (g_heroLauncher != 0) || S.unit != g_lg.heroUnit)
             Log("launcher: hero %p %s the shoulder cannon abilities (G / X / F %s)", (void*)S.unit, has ? "has" : "does not have",
                 has ? "are ours" : "go to the game");
         InterlockedExchange(&g_heroLauncher, has ? 1 : 0);
         g_lg.tHeroCheck = now, g_lg.heroUnit = S.unit;
-    }
-    for (int k = 0; k < vmgame::kLauncherKinds; ++k) {
-        int32_t cool = 0;
-        if (!g_lg.cdInst[k] || !Rd(g_lg.cdInst[k] + oAbCooldown, cool)) continue;
-        if (g_lg.cdPrev[k] > 0 && cool <= 0) vmgame::LauncherCue(1, k);
-        g_lg.cdPrev[k] = cool;
     }
     if (g_lg.kind < 0) LauncherWatchOtherCasts(now);
     if (g_lg.kind < 0) return;
@@ -6113,7 +6121,7 @@ void Apply(uintptr_t mgr) {
     const float* vRight = kv.right;
     const float* vUp = kv.up;
     vmgame::PublishView(S.yaw, S.pitch, (S.flyer || (mode == 0 && S.air)) ? 0.f : S.camSpeed);
-    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : cfg.eyeHeight),
+    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : S.eyeHeight),
                     camPos[2] + cy * cfg.eyeForward};
     float target[3] = {eye[0] + vFwd[0] * 10.f, eye[1] + vFwd[1] * 10.f, eye[2] + vFwd[2] * 10.f};
     float up[3] = {0.f, 1.f, 0.f};
@@ -6734,8 +6742,6 @@ bool VerifyGame() {
                          Ptr(g_base + kVtSoldier904 + 0x3a8) == g_base + kFnHitReact904 && Ptr(g_base + kVtSoldier904 + 0x558) == g_base + kFnStagger904;
         if (g_shieldGameOk) g_hero_1c8_ret1 = g_base + kMeleeRet1_904, g_hero_1c8_ret2 = g_base + kMeleeRet2_904;
         Log("shield-game: shield blocks real hits (missile +0x310 / melee +0x1c8 / stagger +0x558 / hp refund) %s", g_shieldGameOk ? "ok" : "OFF");
-        g_armorOk = PrintsMatch(Prints(kArmorPrints904), "super armor (hit reaction state 18)") && Ptr(g_base + kVtSoldier904 + 0x558) == g_base + kFnStagger904;
-        Log("hero: super armor (no hit-reaction stagger in first person) %s", g_armorOk ? "ok" : "OFF - hits still stagger the hero");
         g_abilityOk = m && PrintsMatch(Prints(kAbilityPrints904), "launcher ability cast") &&
                       Ptr(g_base + kVtAbilityCmd904) == g_base + kFnAbilityCmdWrite904;
         Log("launcher: ability cast (special ability on ground) %s", g_abilityOk ? "ok" : "OFF");
@@ -6829,7 +6835,17 @@ DWORD WINAPI InitThread(LPVOID) {
             return 0;
         }
         Log("loader: version.dll = %ls (%s), module dir %ls", vp[0] ? vp : L"(none)",
-            inDir ? "in the game folder, another tool's (no hero_fps / tenzin_fps proxy signature) - carrying on" : "not ours", g_dir);
+            inDir ? "in the game folder, another tool's (no tenzin_fps / tenzin_fps proxy signature) - carrying on" : "not ours", g_dir);
+    }
+    {
+        wchar_t name[64];
+        swprintf(name, 64, L"Local\\tenzin_fps_native_%lu", GetCurrentProcessId());
+        HANDLE mx = CreateMutexW(nullptr, FALSE, name);
+        if (mx && GetLastError() == ERROR_ALREADY_EXISTS) {
+            Log("loader: another tenzin_fps_native is already running in this process - this copy stays idle");
+            g_status = kStatusOtherCopy;
+            return 0;
+        }
     }
 #ifdef HFPS_PACK_ASSETS
     if (!packx::ExtractFromPack(g_dir, &Log)) {
@@ -6837,6 +6853,7 @@ DWORD WINAPI InitThread(LPVOID) {
         g_status = kStatusAssets;
         return 0;
     }
+    vmgame::SetPayloads(packx::MainIniName(), packx::FullMod(), packx::AddonIds());
 #endif
 #else
     Log("==== tenzin_fps native M1 + viewmodel test loaded (version.dll proxy) pid=%lu", GetCurrentProcessId());
@@ -6845,7 +6862,7 @@ DWORD WINAPI InitThread(LPVOID) {
     if (!VerifyGame()) return 0;
     LoadConfig();
     if (!cfg.enabled) {
-        Log("disabled by tenzin_fps.ini");
+        Log("disabled by %ls", MainIniName());
         g_status = kStatusDisabled;
         return 0;
     }
@@ -7358,6 +7375,7 @@ struct Fns {
     float (*tonumber)(void*, int);
     int (*type)(void*, int);
     size_t (*objlen)(void*, int);
+    const char* (*tolstring)(void*, int, size_t*);
 } f;
 int g_state = -1;
 char g_missing[48] = "";
@@ -7379,12 +7397,44 @@ bool Resolve() {
         }
         memcpy(e.slot, &p, sizeof p);
     }
+    if (FARPROC p = exe ? GetProcAddress(exe, "lua_tolstring") : nullptr) memcpy(&f.tolstring, &p, sizeof p);
     g_state = 1;
     return true;
 }
 int Api(void* L) {
     f.pushnumber(L, 5.f);
     return 1;
+}
+int UnitKeysFn(void* L) {
+    f.pushstring(L, vmgame::UnitKeys());
+    return 1;
+}
+int AccessAll(void* L) {
+    f.pushboolean(L, vmgame::UnitAllowed("") ? 1 : 0);
+    return 1;
+}
+int SetUnit(void* L) {
+    bool ok = false;
+    if (f.tolstring && f.type(L, 1) == kTUserdata && f.objlen(L, 1) >= sizeof(uintptr_t)) {
+        const void* blk = f.touserdata(L, 1);
+        uintptr_t wrap = 0;
+        if (blk) memcpy(&wrap, blk, sizeof wrap);
+        const uintptr_t p = wrap ? Ptr(wrap + 8) : 0;
+        size_t n = 0;
+        const char* key = f.tolstring(L, 2, &n);
+        if (p && key && n > 0 && n < 48) {
+            RememberUnitKey(p, key);
+            ok = true;
+        }
+    }
+    f.pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
+int BattleStarted(void*) {
+    ForgetUnitKeys();
+    vmgame::NoteNewBattle();
+    Log("lua-api: battle started (unit keys cleared)");
+    return 0;
 }
 int Active(void* L) {
     f.pushboolean(L, S.active && S.unit ? 1 : 0);
@@ -7562,17 +7612,18 @@ int PushTable(void* L) {
         Log("lua-api: %s not exported by the game - no interface table (luaopen #%ld)", g_missing, n);
         return 0;
     }
-    f.createtable(L, 0, 11);
+    f.createtable(L, 0, 22);
     const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_enabled", HudEnabled},
-                                                        {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"cast_event", CastEvent},
-                                                        {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson},
-                                                        {"tac_stamina", TacStaminaApi}, {"refill_ammo", RefillAmmoApi}, {"prompt", Prompt}, {"refused", Refused}, {"status", Status},
-                                                        {"cast_marker", CastMarkerApi}, {"cast_target", CastTargetApi}, {"cast_point", CastPointApi}};
+                                                        {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"unit_keys", UnitKeysFn}, {"access_all", AccessAll},
+                                                        {"set_unit", SetUnit}, {"battle_started", BattleStarted}, {"cast_event", CastEvent}, {"set_armed", SetArmed},
+                                                        {"view", View}, {"exit_first_person", ExitFirstPerson}, {"tac_stamina", TacStaminaApi}, {"refill_ammo", RefillAmmoApi},
+                                                        {"prompt", Prompt}, {"refused", Refused}, {"status", Status}, {"cast_marker", CastMarkerApi},
+                                                        {"cast_target", CastTargetApi}, {"cast_point", CastPointApi}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);
     }
-    Log("lua-api: interface table v4 returned (luaopen #%ld, lua state %p)", n, L);
+    Log("lua-api: interface table v4 returned (luaopen #%ld, lua state %p%s)", n, L, f.tolstring ? "" : ", lua_tolstring missing - set_unit off");
     return 1;
 }
 }
