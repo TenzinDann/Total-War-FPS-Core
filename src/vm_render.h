@@ -507,6 +507,7 @@ public:
     bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool rtvEncodesSrgb,
               const CrosshairSettings& s, float spread = 0.f, float alpha = 1.f);
     void Release();
+    bool Prewarm(ID3D11Device* dev);
 private:
     bool Init(ID3D11Device* dev);
     ID3D11Device* dev_ = nullptr;
@@ -536,6 +537,7 @@ public:
     bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool rtvEncodesSrgb, const WorldCam& cam, const cm::Frame& f,
               const CastMarkerStyle& s);
     void Release();
+    bool Prewarm(ID3D11Device* dev);
     int Verts() const { return verts_; }
 private:
     bool Init(ID3D11Device* dev);
@@ -582,6 +584,7 @@ public:
     void Release();
     bool Ready() const { return ready_; }
     ID3D11Device* Device() const { return dev_; }
+    bool PrewarmScreen(const D3D11_TEXTURE2D_DESC& backBuffer);
     unsigned Triangles() const { return indexCount_ / 3; }
     unsigned Bones() const { return boneCount_; }
     int BarrelBone() const { return barrelBone_; }
@@ -653,6 +656,8 @@ private:
     bool CreatePipeline(char* err, size_t errLen);
     bool EnsureDepth(UINT w, UINT h);
     bool EnsureScene(UINT w, UINT h, DXGI_FORMAT fmt);
+    bool EnsureDistTex(UINT w, UINT h, DXGI_FORMAT f);
+    void EnsureDistDepth(UINT w, UINT h);
     void EvalBones(const Look& look);
     void ArmIk(const Settings& s, const float* k12);
     void ShieldIk(const Look& look, const float* nInv12);

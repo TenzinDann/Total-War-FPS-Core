@@ -1718,8 +1718,7 @@ ID3D11ShaderResourceView* Renderer::CopyForDistort(ID3D11DeviceContext* ctx, ID3
     ScreenBufs& b = Sb();
     ID3D11Texture2D *&distTex_ = b.distTex, *&depthTex_ = b.depthTex, *&distDepthTex_ = b.distDepthTex;
     ID3D11ShaderResourceView *&distSrv_ = b.distSrv, *&distDepthSrv_ = b.distDepthSrv;
-    UINT &distW_ = b.distW, &distH_ = b.distH, &depthW_ = b.depthW, &depthH_ = b.depthH, &distDepthW_ = b.distDepthW, &distDepthH_ = b.distDepthH;
-    DXGI_FORMAT& distFmt_ = b.distFmt;
+    UINT &depthW_ = b.depthW, &depthH_ = b.depthH;
     D3D11_TEXTURE2D_DESC sd;
     backBuffer->GetDesc(&sd);
     if (sd.SampleDesc.Count != 1 || sd.Width != w || sd.Height != h) return nullptr;
@@ -1731,53 +1730,11 @@ ID3D11ShaderResourceView* Renderer::CopyForDistort(ID3D11DeviceContext* ctx, ID3
     case DXGI_FORMAT_R16G16B16A16_TYPELESS: f = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
     default: break;
     }
-    if (!distSrv_ || w != distW_ || h != distH_ || f != distFmt_) {
-        SafeRelease(distSrv_);
-        SafeRelease(distTex_);
-        D3D11_TEXTURE2D_DESC td = {};
-        td.Width = w;
-        td.Height = h;
-        td.MipLevels = 1;
-        td.ArraySize = 1;
-        td.Format = f;
-        td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_DEFAULT;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        if (FAILED(dev_->CreateTexture2D(&td, nullptr, &distTex_)) || FAILED(dev_->CreateShaderResourceView(distTex_, nullptr, &distSrv_))) {
-            SafeRelease(distSrv_);
-            SafeRelease(distTex_);
-            distBroken_ = true;
-            return nullptr;
-        }
-        distW_ = w;
-        distH_ = h;
-        distFmt_ = f;
-    }
+    if (!EnsureDistTex(w, h, f)) return nullptr;
     ctx->CopySubresourceRegion(distTex_, 0, 0, 0, 0, backBuffer, 0, nullptr);
     distDepthOk_ = false;
     if (depthTex_ && depthW_ == w && depthH_ == h) {
-        if (!distDepthSrv_ || distDepthW_ != w || distDepthH_ != h) {
-            SafeRelease(distDepthSrv_);
-            SafeRelease(distDepthTex_);
-            D3D11_TEXTURE2D_DESC dd = {};
-            dd.Width = w;
-            dd.Height = h;
-            dd.MipLevels = dd.ArraySize = 1;
-            dd.Format = DXGI_FORMAT_R32_TYPELESS;
-            dd.SampleDesc.Count = 1;
-            dd.Usage = D3D11_USAGE_DEFAULT;
-            dd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            D3D11_SHADER_RESOURCE_VIEW_DESC vd = {};
-            vd.Format = DXGI_FORMAT_R32_FLOAT;
-            vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-            vd.Texture2D.MipLevels = 1;
-            if (FAILED(dev_->CreateTexture2D(&dd, nullptr, &distDepthTex_)) || FAILED(dev_->CreateShaderResourceView(distDepthTex_, &vd, &distDepthSrv_))) {
-                SafeRelease(distDepthSrv_);
-                SafeRelease(distDepthTex_);
-            }
-            distDepthW_ = w;
-            distDepthH_ = h;
-        }
+        EnsureDistDepth(w, h);
         if (distDepthSrv_) {
             ctx->CopyResource(distDepthTex_, depthTex_);
             distDepthOk_ = true;
@@ -1786,6 +1743,79 @@ ID3D11ShaderResourceView* Renderer::CopyForDistort(ID3D11DeviceContext* ctx, ID3
     if (gamma)
         *gamma = !(f == DXGI_FORMAT_R16G16B16A16_FLOAT || f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
     return distSrv_;
+}
+bool Renderer::EnsureDistTex(UINT w, UINT h, DXGI_FORMAT f) {
+    if (distBroken_ || !dev_) return false;
+    ScreenBufs& b = Sb();
+    ID3D11Texture2D*& distTex_ = b.distTex;
+    ID3D11ShaderResourceView*& distSrv_ = b.distSrv;
+    UINT &distW_ = b.distW, &distH_ = b.distH;
+    DXGI_FORMAT& distFmt_ = b.distFmt;
+    if (distSrv_ && w == distW_ && h == distH_ && f == distFmt_) return true;
+    SafeRelease(distSrv_);
+    SafeRelease(distTex_);
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = w;
+    td.Height = h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = f;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(dev_->CreateTexture2D(&td, nullptr, &distTex_)) || FAILED(dev_->CreateShaderResourceView(distTex_, nullptr, &distSrv_))) {
+        SafeRelease(distSrv_);
+        SafeRelease(distTex_);
+        distBroken_ = true;
+        return false;
+    }
+    distW_ = w;
+    distH_ = h;
+    distFmt_ = f;
+    return true;
+}
+void Renderer::EnsureDistDepth(UINT w, UINT h) {
+    ScreenBufs& b = Sb();
+    ID3D11Texture2D*& distDepthTex_ = b.distDepthTex;
+    ID3D11ShaderResourceView*& distDepthSrv_ = b.distDepthSrv;
+    UINT &distDepthW_ = b.distDepthW, &distDepthH_ = b.distDepthH;
+    if (distDepthSrv_ && distDepthW_ == w && distDepthH_ == h) return;
+    SafeRelease(distDepthSrv_);
+    SafeRelease(distDepthTex_);
+    D3D11_TEXTURE2D_DESC dd = {};
+    dd.Width = w;
+    dd.Height = h;
+    dd.MipLevels = dd.ArraySize = 1;
+    dd.Format = DXGI_FORMAT_R32_TYPELESS;
+    dd.SampleDesc.Count = 1;
+    dd.Usage = D3D11_USAGE_DEFAULT;
+    dd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SHADER_RESOURCE_VIEW_DESC vd = {};
+    vd.Format = DXGI_FORMAT_R32_FLOAT;
+    vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    vd.Texture2D.MipLevels = 1;
+    if (FAILED(dev_->CreateTexture2D(&dd, nullptr, &distDepthTex_)) || FAILED(dev_->CreateShaderResourceView(distDepthTex_, &vd, &distDepthSrv_))) {
+        SafeRelease(distDepthSrv_);
+        SafeRelease(distDepthTex_);
+    }
+    distDepthW_ = w;
+    distDepthH_ = h;
+}
+bool Renderer::PrewarmScreen(const D3D11_TEXTURE2D_DESC& bb) {
+    if (!ready_ || !dev_ || bb.SampleDesc.Count != 1 || bb.Width < 16 || bb.Height < 16) return false;
+    const UINT w = bb.Width, h = bb.Height;
+    DXGI_FORMAT f = bb.Format;
+    switch (f) {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS: f = DXGI_FORMAT_R8G8B8A8_UNORM; break;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS: f = DXGI_FORMAT_B8G8R8A8_UNORM; break;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS: f = DXGI_FORMAT_R10G10B10A2_UNORM; break;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS: f = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
+    default: break;
+    }
+    const bool depth = EnsureDepth(w, h);
+    if (!sceneBroken_) EnsureScene(w, h, f);
+    if (EnsureDistTex(w, h, f) && depth) EnsureDistDepth(w, h);
+    return depth;
 }
 bool Renderer::EnsureScene(UINT w, UINT h, DXGI_FORMAT fmt) {
     if (sceneBroken_) return false;
@@ -4055,6 +4085,15 @@ void Crosshair::Release() {
     SafeRelease(rs_);
     SafeRelease(dss_);
     dev_ = nullptr;
+}
+bool Crosshair::Prewarm(ID3D11Device* dev) {
+    if (failed_ || !dev) return false;
+    if (dev == dev_ && vs_) return true;
+    if (!Init(dev)) {
+        failed_ = true;
+        return false;
+    }
+    return true;
 }
 bool Crosshair::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool rtvEncodesSrgb,
                      const CrosshairSettings& s, float spread, float alpha) {

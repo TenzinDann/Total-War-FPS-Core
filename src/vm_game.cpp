@@ -2,6 +2,8 @@
 #include <d3d11.h>
 #include <d3d11_1.h>
 #include <dxgi.h>
+#include <d3d11_4.h>
+#include <tlhelp32.h>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -290,6 +292,11 @@ struct MuzzlePub {
 } g_muz;
 using FnPresent = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
 FnPresent g_origPresent = nullptr;
+using FnResize = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
+using FnResize1 = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT*, IUnknown* const*);
+FnResize g_origResize = nullptr;
+FnResize1 g_origResize1 = nullptr;
+const GUID kIidSwapChain3 = {0x94d99bdb, 0xf1f8, 0x4ab0, {0xb2, 0x36, 0x7d, 0xa0, 0x17, 0x0e, 0xda, 0xb1}};
 uintptr_t* g_scVtCopy = nullptr;
 uintptr_t g_scVtOrig = 0;
 CRITICAL_SECTION g_hookLock;
@@ -378,6 +385,8 @@ bool InModule(uintptr_t p) {
            m;
 }
 HRESULT STDMETHODCALLTYPE HkPresent(IDXGISwapChain* sc, UINT sync, UINT flags);
+HRESULT STDMETHODCALLTYPE HkResizeBuffers(IDXGISwapChain* sc, UINT n, UINT w, UINT h, DXGI_FORMAT f, UINT fl);
+HRESULT STDMETHODCALLTYPE HkResizeBuffers1(IDXGISwapChain* sc, UINT n, UINT w, UINT h, DXGI_FORMAT f, UINT fl, const UINT* mask, IUnknown* const* q);
 bool InstallPresentHook() {
     if (!g_staticOk || !g_enabled) return false;
     EnterCriticalSection(&g_hookLock);
@@ -433,6 +442,16 @@ bool InstallPresentHook() {
             }
             g_origPresent = reinterpret_cast<FnPresent>(copy[2 + 8]);
             copy[2 + 8] = reinterpret_cast<uintptr_t>(&HkPresent);
+            g_origResize = reinterpret_cast<FnResize>(copy[2 + 13]);
+            copy[2 + 13] = reinterpret_cast<uintptr_t>(&HkResizeBuffers);
+            IUnknown* s3 = nullptr;
+            if (n > 39 && SUCCEEDED(reinterpret_cast<IUnknown*>(sc)->QueryInterface(kIidSwapChain3, reinterpret_cast<void**>(&s3))) && s3) {
+                if (reinterpret_cast<uintptr_t>(s3) == sc) {
+                    g_origResize1 = reinterpret_cast<FnResize1>(copy[2 + 39]);
+                    copy[2 + 39] = reinterpret_cast<uintptr_t>(&HkResizeBuffers1);
+                }
+                s3->Release();
+            }
             DWORD old;
             VirtualProtect(copy, (kScSlots + 2) * sizeof(uintptr_t), PAGE_READONLY, &old);
             g_scVtCopy = copy + 2;
@@ -473,27 +492,68 @@ volatile LONG g_curveFracMicro = -1, g_curveFovMilli = 0, g_curveFovScaling = 1;
 volatile LONG g_spreadMicro = 0;
 unsigned g_spreadRng = 0x2545f491u;
 volatile LONG64 g_hudCover = 0;
+bool LayerNoCreateHere();
+ID3D11Texture2D* LayerHudCopy(const D3D11_TEXTURE2D_DESC& td);
+ID3D11Texture2D* g_hudSavedTex = nullptr;
+bool g_hudSavedBorrowed = false;
+constexpr int kUiCoverMax = 32;
+SRWLOCK g_uiCoverLock = SRWLOCK_INIT;
+float g_uiCover[kUiCoverMax][4];
+int g_uiCoverN = 0;
 ID3D11Texture2D* g_hudTex = nullptr;
 UINT g_hudTexW = 0, g_hudTexH = 0;
 DXGI_FORMAT g_hudTexFmt = DXGI_FORMAT_UNKNOWN;
-D3D11_BOX g_hudBox = {};
+D3D11_BOX g_hudBox[kUiCoverMax + 1] = {};
+int g_hudBoxN = 0;
+int g_hudBoxLogged = -1, g_hudBoxLogs = 0;
 bool g_hudSaved = false;
 void HudCoverSave(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* bb, const D3D11_TEXTURE2D_DESC& td) {
     g_hudSaved = false;
-    const LONG64 v = g_hudCover;
-    if (!v || !g_fp) return;
-    auto px = [](LONG64 q, UINT size) { return static_cast<UINT>((static_cast<double>(q & 0xffff) / 65535.0) * size + 0.5); };
-    UINT x0 = px(v, td.Width), y0 = px(v >> 16, td.Height), x1 = px(v >> 32, td.Width), y1 = px(v >> 48, td.Height);
-    if (x1 > td.Width) x1 = td.Width;
-    if (y1 > td.Height) y1 = td.Height;
-    if (x1 <= x0 + 1 || y1 <= y0 + 1) return;
-    const UINT w = x1 - x0, h = y1 - y0;
-    if (!g_hudTex || g_hudTexW != w || g_hudTexH != h || g_hudTexFmt != td.Format) {
+    g_hudBoxN = 0;
+    if (!g_fp) return;
+    auto add = [&](float fx0, float fy0, float fx1, float fy1) {
+        auto px = [](float f, UINT size) { return f <= 0.f ? 0u : f >= 1.f ? size : static_cast<UINT>(f * size + 0.5f); };
+        UINT x0 = px(fx0, td.Width), y0 = px(fy0, td.Height), x1 = px(fx1, td.Width), y1 = px(fy1, td.Height);
+        if (x1 > x0 + 1 && y1 > y0 + 1 && g_hudBoxN < kUiCoverMax + 1) g_hudBox[g_hudBoxN++] = {x0, y0, 0, x1, y1, 1};
+    };
+    if (const LONG64 v = g_hudCover) {
+        auto q = [](LONG64 x) { return static_cast<float>(x & 0xffff) / 65535.f; };
+        add(q(v), q(v >> 16), q(v >> 32), q(v >> 48));
+    }
+    AcquireSRWLockShared(&g_uiCoverLock);
+    for (int i = 0; i < g_uiCoverN; ++i) add(g_uiCover[i][0], g_uiCover[i][1], g_uiCover[i][2], g_uiCover[i][3]);
+    ReleaseSRWLockShared(&g_uiCoverLock);
+    if (g_hudBoxN != g_hudBoxLogged && g_hudBoxLogs < 20 && g_log) {
+        ++g_hudBoxLogs;
+        g_hudBoxLogged = g_hudBoxN;
+        char s[400] = "";
+        int k = 0;
+        for (int i = 0; i < g_hudBoxN && i < 8 && k < 340; ++i)
+            k += snprintf(s + k, sizeof s - k, " %u,%u-%u,%u", g_hudBox[i].left, g_hudBox[i].top, g_hudBox[i].right, g_hudBox[i].bottom);
+        g_log("ui-cover: %d interface rect(s) kept above the gun drawn at Present (%ux%u):%s%s", g_hudBoxN, td.Width, td.Height, s,
+              g_hudBoxN > 8 ? " ..." : "");
+    }
+    if (!g_hudBoxN) return;
+    if (g_hudSavedBorrowed && g_hudSavedTex) g_hudSavedTex->Release();
+    g_hudSavedTex = nullptr, g_hudSavedBorrowed = false;
+    if (ID3D11Texture2D* lt = LayerHudCopy(td)) {
+        ctx->CopyResource(lt, bb);
+        g_hudSavedTex = lt, g_hudSavedBorrowed = true;
+        g_hudSaved = true;
+        return;
+    }
+    if (LayerNoCreateHere()) {
+        static bool told = false;
+        if (!told && g_log) g_log("ui-cover: no interface copy from the view maker yet - interface stays under the gun this frame");
+        told = true;
+        return;
+    }
+    if (!g_hudTex || g_hudTexW != td.Width || g_hudTexH != td.Height || g_hudTexFmt != td.Format) {
         if (g_hudTex) g_hudTex->Release();
         g_hudTex = nullptr;
         D3D11_TEXTURE2D_DESC d = {};
-        d.Width = w;
-        d.Height = h;
+        d.Width = td.Width;
+        d.Height = td.Height;
         d.MipLevels = d.ArraySize = 1;
         d.Format = td.Format;
         d.SampleDesc.Count = 1;
@@ -501,21 +561,23 @@ void HudCoverSave(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11Texture2D* 
         if (FAILED(dev->CreateTexture2D(&d, nullptr, &g_hudTex)) || !g_hudTex) {
             g_hudTex = nullptr;
             static bool told = false;
-            if (!told && g_log) g_log("viewmodel: hud cover texture %ux%u format %d failed - HUD stays under the gun", w, h, td.Format);
+            if (!told && g_log) g_log("viewmodel: interface cover copy %ux%u format %d failed - interface stays under the gun", td.Width, td.Height, td.Format);
             told = true;
             return;
         }
-        g_hudTexW = w;
-        g_hudTexH = h;
+        g_hudTexW = td.Width;
+        g_hudTexH = td.Height;
         g_hudTexFmt = td.Format;
     }
-    g_hudBox = {x0, y0, 0, x1, y1, 1};
-    ctx->CopySubresourceRegion(g_hudTex, 0, 0, 0, 0, bb, 0, &g_hudBox);
+    ctx->CopyResource(g_hudTex, bb);
+    g_hudSavedTex = g_hudTex, g_hudSavedBorrowed = false;
     g_hudSaved = true;
 }
 void HudCoverRestore(ID3D11DeviceContext* ctx, ID3D11Texture2D* bb) {
-    if (!g_hudSaved || !g_hudTex) return;
-    ctx->CopySubresourceRegion(bb, 0, g_hudBox.left, g_hudBox.top, 0, g_hudTex, 0, nullptr);
+    if (!g_hudSaved || !g_hudSavedTex) return;
+    for (int i = 0; i < g_hudBoxN; ++i) ctx->CopySubresourceRegion(bb, 0, g_hudBox[i].left, g_hudBox[i].top, 0, g_hudSavedTex, 0, &g_hudBox[i]);
+    if (g_hudSavedBorrowed) g_hudSavedTex->Release();
+    g_hudSavedTex = nullptr, g_hudSavedBorrowed = false;
     g_hudSaved = false;
 }
 bool CurveAdsOn() {
@@ -2184,6 +2246,7 @@ struct GpuTimer {
     bool Ensure(ID3D11Device* d) {
         if (broken) return false;
         if (d == dev && dj[0]) return true;
+        if (LayerNoCreateHere()) return false;
         Release();
         D3D11_QUERY_DESC qd = {D3D11_QUERY_TIMESTAMP_DISJOINT, 0}, qt = {D3D11_QUERY_TIMESTAMP, 0};
         for (int k = 0; k < kSlots; ++k)
@@ -2242,6 +2305,21 @@ void GameThreadAdd(double ms) {
     ReleaseSRWLockExclusive(&g_gtLock);
 }
 int g_profLogs = 0, g_warmProfLogs = 0;
+void LayerPrewarm(IDXGISwapChain* sc, ID3D11Device* dev) {
+    const double t0 = Now();
+    ID3D11Texture2D* bb = nullptr;
+    D3D11_TEXTURE2D_DESC td = {};
+    if (LayerBackBuffer(sc, &bb)) {
+        bb->GetDesc(&td);
+        bb->Release();
+    }
+    const bool gpu = g_gpuTimer && g_gpu.Ensure(dev);
+    const bool cross = g_cross.Prewarm(dev), cm = g_cmR.Prewarm(dev);
+    const bool screen = td.Width && Wp().rend.Ready() && Wp().rend.PrewarmScreen(td);
+    g_log("warm: first-person GPU objects made before first person in %.1f ms: GPU timer %s, crosshair %s, cast marker %s, screen buffers %ux%u %s",
+          (Now() - t0) * 1000.0, gpu ? "ok" : g_gpuTimer ? "failed" : "off", cross ? "ok" : "failed", cm ? "ok" : "failed", td.Width, td.Height,
+          screen ? "ok" : "not made");
+}
 void WarmStep(IDXGISwapChain* sc) {
     ID3D11Device* dev = nullptr;
     if (!LayerDevice(sc, &dev)) {
@@ -2283,6 +2361,7 @@ void WarmStep(IDXGISwapChain* sc) {
         for (LONG k = 0; k < g_rosterN; ++k) ready += g_w[g_roster[k]].rend.Ready();
         g_log("warm: %s in %.2f s before first person (%d of %ld weapons ready)", ok ? "preload done" : "stopped (current weapon failed)",
               Now() - g_warmT0, ready, static_cast<long>(g_rosterN));
+        if (ok) LayerPrewarm(sc, dev);
         InterlockedExchange(&g_warm, 0);
     }
     dev->Release();
@@ -2303,6 +2382,7 @@ void CastMarkerDraw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT 
 }
 void DrawLayer(IDXGISwapChain* sc, int part) {
     if (g_failed || !(g_testLayer || g_fp)) {
+        LayerTargetDrop();
         if (!g_failed && g_warm && part == kPartAll) WarmStep(sc);
         g_profWasFp = false;
         return;
@@ -2327,7 +2407,22 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
     }
     g_fprof.Mark("settings");
     ID3D11Device* dev = nullptr;
-    if (!LayerDevice(sc, &dev)) {
+    LayerUse lu;
+    const int lr = LayerNoCreateHere() ? LayerTargetFor(sc, false, &lu) : 2;
+    if (lr == 0) return;
+    if (lr == -1) {
+        if (!g_st.loggedFmt) g_log("viewmodel: %s; layer off", lu.fail);
+        g_st.loggedFmt = true;
+        g_failed = true;
+        return;
+    }
+    LayerGuard guard(lr == 1 ? lu.cs : nullptr);
+    if (!guard.Ok()) {
+        LayerGuardSkip(part == kPartGun);
+        return;
+    }
+    if (lr == 1) dev = lu.dev, lu.dev = nullptr;
+    if (!dev && !LayerDevice(sc, &dev)) {
         if (!g_st.loggedDev) g_log("viewmodel: swapchain has no D3D11 device; layer off");
         g_st.loggedDev = true;
         g_failed = true;
@@ -2351,8 +2446,9 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
         PreloadStep(dev);
         g_fprof.Mark("preload");
     }
-    ID3D11Texture2D* bb = nullptr;
-    if (LayerBackBuffer(sc, &bb)) {
+    ID3D11Texture2D* bb = lu.bb;
+    lu.bb = nullptr;
+    if (bb || LayerBackBuffer(sc, &bb)) {
         D3D11_TEXTURE2D_DESC td;
         bb->GetDesc(&td);
         bool hw = false;
@@ -2366,8 +2462,9 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
             D3D11_RENDER_TARGET_VIEW_DESC rd = {};
             rd.Format = rf;
             rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-            ID3D11RenderTargetView* rtv = nullptr;
-            if (SUCCEEDED(dev->CreateRenderTargetView(bb, &rd, &rtv)) && rtv) {
+            ID3D11RenderTargetView* rtv = lu.rtv;
+            lu.rtv = nullptr;
+            if (rtv || (SUCCEEDED(dev->CreateRenderTargetView(bb, &rd, &rtv)) && rtv)) {
                 ID3D11DeviceContext* ctx = nullptr;
                 dev->GetImmediateContext(&ctx);
                 if (ctx) {
@@ -2472,6 +2569,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
         bb->Release();
     }
     dev->Release();
+    lu.Release();
     double ms = (Now() - t0) * 1000.0;
     {
         bool first = g_fp && !g_profWasFp;
@@ -2519,7 +2617,9 @@ __attribute__((noinline)) HRESULT STDMETHODCALLTYPE HkPresent(IDXGISwapChain* sc
             UiLayerPickTarget(sc);
             int part = UiLayerPresentPart();
             g_probeMute = true;
+            InterlockedExchange(&g_rtPhase, 2);
             UiLayerPresentDraw(sc, part);
+            InterlockedExchange(&g_rtPhase, 0);
             g_probeMute = false;
             UiLayerBbStep();
             UiLayerCompStep();
@@ -2529,7 +2629,11 @@ __attribute__((noinline)) HRESULT STDMETHODCALLTYPE HkPresent(IDXGISwapChain* sc
         g_log("viewmodel: Present from elsewhere (return %p, thread %lu) - forwarded without drawing", (void*)ret,
               GetCurrentThreadId());
     }
-    return g_origPresent(sc, sync, flags);
+    const bool own = ret == g_base + g_ra.presentReturn;
+    if (own) InterlockedExchange(&g_rtPhase, 3);
+    const HRESULT hr = g_origPresent(sc, sync, flags);
+    if (own) InterlockedExchange(&g_rtPhase, 0);
+    return hr;
 }
 UINT IniKey(const wchar_t* key, UINT def) {
     UINT k = GetPrivateProfileIntW(L"viewmodel", key, def, g_ini);
@@ -3002,6 +3106,16 @@ void SetHudCover(float x0, float y0, float x1, float y1) {
     LONG64 v = 0;
     if (x1 > x0 && y1 > y0) v = q(x0) | (q(y0) << 16) | (q(x1) << 32) | (q(y1) << 48);
     InterlockedExchange64(&g_hudCover, v);
+}
+void SetUiCovers(const float* r, int n) {
+    AcquireSRWLockExclusive(&g_uiCoverLock);
+    g_uiCoverN = 0;
+    for (int i = 0; i < n && g_uiCoverN < kUiCoverMax; ++i) {
+        float c[4];
+        for (int k = 0; k < 4; ++k) c[k] = r[i * 4 + k] < 0.f ? 0.f : r[i * 4 + k] > 1.f ? 1.f : r[i * 4 + k];
+        if (c[2] > c[0] && c[3] > c[1]) memcpy(g_uiCover[g_uiCoverN++], c, sizeof c);
+    }
+    ReleaseSRWLockExclusive(&g_uiCoverLock);
 }
 void GetKick(kick::Params* out) {
     int idx = g_modelIdx;

@@ -69,6 +69,12 @@ bool g_uiPresentPartial = false;
 bool g_wdOn = true;
 UINT g_wdMs = 2000;
 int g_uiTarget = 0;
+bool g_ltOn = true;
+UINT g_ltWaitMs = 4;
+bool g_autoSafe = true;
+bool g_ltGuardOn = true;
+UINT g_ltGuardSpinUs = 1000;
+bool SafeMarkerMid(char* why, size_t n);
 double g_uiMidT = 0;
 bool g_uiLoggedManual = false, g_uiLoggedAfterMid = false;
 IDXGISwapChain* g_lastSc = nullptr;
@@ -492,6 +498,25 @@ void UiLayerReadIni() {
     g_log("ui-layer: draw target %s", g_uiTarget == 1 ? "swapchain (forced, the old way)"
                                       : g_uiTarget == 2 ? "game's back buffer (forced)"
                                                         : "auto (the game's own back buffer when the swapchain hands out a different one)");
+    g_ltOn = GetPrivateProfileIntW(L"ui_layer", L"lock_free", 1, g_ini) != 0;
+    g_ltWaitMs = GetPrivateProfileIntW(L"ui_layer", L"lock_free_wait_ms", 4, g_ini);
+    if (g_ltWaitMs > 50) g_ltWaitMs = 50;
+    g_log("ui-layer: lock-free %s", g_ltOn ? "on (in first person the render thread neither creates nor releases D3D objects - a helper thread does)"
+                                          : "off (old way: a render target view created / released every frame)");
+    g_ltGuardOn = GetPrivateProfileIntW(L"ui_layer", L"lock_guard", 1, g_ini) != 0;
+    g_ltGuardSpinUs = GetPrivateProfileIntW(L"ui_layer", L"lock_guard_spin_us", 1000, g_ini);
+    if (g_ltGuardSpinUs > 5000) g_ltGuardSpinUs = 5000;
+    g_log("ui-layer: lock guard %s (tries for up to %u us)", g_ltGuardOn ? "on (our drawing before Present only runs when the D3D11 device lock is free - never waits for it)" : "off",
+          g_ltGuardSpinUs);
+    g_autoSafe = GetPrivateProfileIntW(L"ui_layer", L"auto_safe", 1, g_ini) != 0;
+    wchar_t ms[8] = L"";
+    GetPrivateProfileStringW(L"ui_layer", L"mode", L"", ms, 8, g_ini);
+    char why[240];
+    if (g_autoSafe && !ms[0] && g_uiLayerMode == 1 && SafeMarkerMid(why, sizeof why)) {
+        g_uiLayerMode = 0;
+        g_log("ui-layer: safe mode: mid-frame gun drawing stays off on this PC - it froze here before (%s); the gun is drawn at Present with the "
+              "interface kept on top. [ui_layer] mode=1 forces it back, auto_safe=0 ignores the marker", why);
+    }
 }
 void UiLayerOnPresent(ID3D11DeviceContext* ctx, ID3D11Texture2D* bb, UINT bbW, UINT bbH) {
     UiLayerReadIni();
@@ -801,6 +826,7 @@ void PickDescribeTex(ID3D11Texture2D* t, char* out, size_t n) {
 }
 void UiLayerPickTarget(IDXGISwapChain* sc) {
     UiLayerReadIni();
+    if (LayerNoCreateHere()) return;
     const bool fp = g_fp || g_testLayer;
     if (!fp) g_pickLoggedFp = false;
     const uintptr_t ga = g_uiTarget == 1 ? 0 : GameBbTexAddr();
@@ -848,6 +874,537 @@ void UiLayerPickTarget(IDXGISwapChain* sc) {
     if (gd) gd->Release();
     if (gt) gt->Release();
 }
+struct LayerTarget {
+    IDXGISwapChain* sc = nullptr;
+    ID3D11Texture2D* gameObj = nullptr;
+    IDXGISwapChain* scKey = nullptr;
+    uintptr_t gameTex = 0;
+    int target = 0;
+    LONG gen = 0;
+    bool useGame = false;
+    bool cancel = false;
+    bool singleThreaded = false;
+    ID3D11Device* dev = nullptr;
+    ID3D11DeviceContext* ctx = nullptr;
+    ID3D11Texture2D* bb = nullptr;
+    ID3D11RenderTargetView* rtv = nullptr;
+    ID3D11Texture2D* hudTex = nullptr;
+    CRITICAL_SECTION* devCs = nullptr;
+    D3D11_TEXTURE2D_DESC td = {};
+    char fail[200] = "";
+    double ms = 0;
+    bool Ok() const { return !fail[0] && dev && ctx && bb && rtv; }
+    void Release() {
+        IUnknown* all[] = {hudTex, rtv, bb, ctx, dev, gameObj, sc};
+        for (IUnknown* u : all)
+            if (u) u->Release();
+        hudTex = nullptr, rtv = nullptr, bb = nullptr, ctx = nullptr, dev = nullptr, gameObj = nullptr, sc = nullptr;
+    }
+};
+struct LayerUse {
+    ID3D11Device* dev = nullptr;
+    ID3D11DeviceContext* ctx = nullptr;
+    ID3D11Texture2D* bb = nullptr;
+    ID3D11RenderTargetView* rtv = nullptr;
+    CRITICAL_SECTION* cs = nullptr;
+    D3D11_TEXTURE2D_DESC td = {};
+    char fail[200] = "";
+    void Release() {
+        IUnknown* all[] = {rtv, bb, ctx, dev};
+        for (IUnknown* u : all)
+            if (u) u->Release();
+        rtv = nullptr, bb = nullptr, ctx = nullptr, dev = nullptr;
+    }
+    ~LayerUse() { Release(); }
+};
+constexpr int kLtFreeMax = 64;
+SRWLOCK g_ltLock = SRWLOCK_INIT;
+HANDLE g_ltWake = nullptr, g_ltDone = nullptr, g_ltThread = nullptr;
+LayerTarget* g_ltCur = nullptr;
+LayerTarget* g_ltJob = nullptr;
+LayerTarget* g_ltWorking = nullptr;
+LayerTarget* g_ltMade = nullptr;
+LayerTarget* g_ltFree[kLtFreeMax];
+int g_ltFreeN = 0;
+volatile LONG g_ltGen = 0;
+volatile LONG g_ltDropping = 0;
+double g_ltJobT0 = 0;
+volatile bool g_ltToldStuck = false;
+int g_ltStuckLogs = 0, g_ltReadyLogs = 0, g_ltDropLogs = 0;
+UINT g_ltSkipFrames = 0;
+double g_ltWaitedMs = 0;
+bool g_ltFpSeen = false;
+volatile LONG g_rtPhase = 0;
+bool LayerOnRenderThread() { return g_presentTid && GetCurrentThreadId() == g_presentTid; }
+bool LayerNoCreateHere() { return g_ltOn && (g_fp || g_testLayer) && LayerOnRenderThread(); }
+CRITICAL_SECTION* LayerFindDeviceLock(ID3D11Device* dev) {
+    static ID3D11Device* lastDev = nullptr;
+    static CRITICAL_SECTION* lastCs = nullptr;
+    if (dev == lastDev) return lastCs;
+    lastDev = dev, lastCs = nullptr;
+    ID3D11DeviceContext* c = nullptr;
+    dev->GetImmediateContext(&c);
+    ID3D11Multithread* mt = nullptr;
+    if (c) c->QueryInterface(__uuidof(ID3D11Multithread), reinterpret_cast<void**>(&mt));
+    if (!mt) {
+        if (c) c->Release();
+        g_log("ui-layer: lock guard: no ID3D11Multithread on this device - guard off (lock-free creation still on)");
+        return nullptr;
+    }
+    auto readable = [](uintptr_t p, size_t cap) -> size_t {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (p < 0x10000 || (p & 7) || !VirtualQuery(reinterpret_cast<LPCVOID>(p), &mbi, sizeof mbi) || mbi.State != MEM_COMMIT ||
+            (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) || !(mbi.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_EXECUTE_READWRITE)))
+            return 0;
+        const size_t left = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize - p;
+        return left < cap ? left : cap;
+    };
+    constexpr int kMaxBlocks = 512;
+    uintptr_t blk[kMaxBlocks];
+    size_t len[kMaxBlocks];
+    int nb = 0;
+    const uintptr_t roots[2] = {reinterpret_cast<uintptr_t>(dev), reinterpret_cast<uintptr_t>(c)};
+    for (uintptr_t r : roots) {
+        const size_t l = readable(r, 0x8000);
+        if (!l || nb >= kMaxBlocks) continue;
+        blk[nb] = r, len[nb++] = l;
+        for (size_t off = 0; off + 8 <= l && off < 0x2000 && nb < kMaxBlocks; off += 8) {
+            uintptr_t q = 0;
+            SIZE_T got = 0;
+            if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(r + off), &q, 8, &got) || got != 8) continue;
+            const size_t l2 = readable(q, 0x400);
+            if (l2) blk[nb] = q, len[nb++] = l2;
+        }
+    }
+    const DWORD me = GetCurrentThreadId();
+    uintptr_t cand[8];
+    int nc = 0;
+    mt->Enter();
+    for (int b = 0; b < nb; ++b)
+        for (size_t off = 0; off + sizeof(CRITICAL_SECTION) <= len[b]; off += 8) {
+            CRITICAL_SECTION cs;
+            SIZE_T got = 0;
+            if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(blk[b] + off), &cs, sizeof cs, &got) || got != sizeof cs) continue;
+            if (reinterpret_cast<uintptr_t>(cs.OwningThread) != me || cs.RecursionCount < 1 || cs.RecursionCount > 16) continue;
+            bool dup = false;
+            for (int k = 0; k < nc; ++k) dup |= cand[k] == blk[b] + off;
+            if (!dup && nc < 8) cand[nc++] = blk[b] + off;
+        }
+    mt->Leave();
+    int nok = 0;
+    uintptr_t ok = 0;
+    for (int k = 0; k < nc; ++k) {
+        CRITICAL_SECTION cs;
+        SIZE_T got = 0;
+        if (ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(cand[k]), &cs, sizeof cs, &got) && got == sizeof cs &&
+            reinterpret_cast<uintptr_t>(cs.OwningThread) != me)
+            ++nok, ok = cand[k];
+    }
+    mt->Release();
+    c->Release();
+    if (nok == 1) lastCs = reinterpret_cast<CRITICAL_SECTION*>(ok);
+    g_log("ui-layer: lock guard: device lock %s (device %p; %d candidate(s) while held, %d released after Leave; %d blocks scanned)",
+          nok == 1 ? "found" : "not identified - guard off for this device", (void*)dev, nc, nok, nb);
+    return lastCs;
+}
+void LayerMake(LayerTarget* t) {
+    ID3D11Device *sd = nullptr, *gd = nullptr;
+    ID3D11Texture2D* sb = nullptr;
+    IDXGISwapChain* chain = t->sc;
+    if (FAILED(chain->GetDevice(IID_ID3D11Device, reinterpret_cast<void**>(&sd)))) sd = nullptr;
+    if (FAILED(chain->GetBuffer(0, IID_ID3D11Texture2D, reinterpret_cast<void**>(&sb)))) sb = nullptr;
+    ID3D11Texture2D* gt = t->gameObj;
+    if (gt) gt->GetDevice(&gd);
+    bool usable = false;
+    if (gt && gd) {
+        D3D11_TEXTURE2D_DESC d;
+        gt->GetDesc(&d);
+        bool hw = false;
+        usable = d.SampleDesc.Count == 1 && (d.BindFlags & D3D11_BIND_RENDER_TARGET) && RtvFormat(d.Format, &hw) != DXGI_FORMAT_UNKNOWN;
+    }
+    const bool differs = gt && (gt != sb || gd != sd);
+    const bool use = t->target != 1 && usable && (differs || t->target == 2);
+    const char* why = t->target == 1 ? "the swapchain's ([ui_layer] target=swapchain)"
+                      : use ? (differs ? "the game's own back buffer - the swapchain hands out a different device / texture (a layer wraps it); "
+                                               "drawing there would not reach the screen"
+                                             : "the game's own back buffer ([ui_layer] target=game; same as the swapchain's)")
+                      : !gt ? "the swapchain's (the game's back buffer is not readable)"
+                      : !usable ? "the swapchain's (the game's back buffer cannot take our render target view)"
+                                  : "the swapchain's (same texture and device as the game's)";
+    ID3D11Device* dev = use ? gd : sd;
+    ID3D11Texture2D* tex = use ? gt : sb;
+    t->useGame = use;
+    if (!dev || !tex) {
+        snprintf(t->fail, sizeof t->fail, "the swapchain hands out no %s", !dev ? "D3D11 device" : "back buffer");
+    } else if (dev->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED) {
+        t->singleThreaded = true;
+        snprintf(t->fail, sizeof t->fail, "the device is single-threaded (creation flags 0x%x)", dev->GetCreationFlags());
+    } else {
+        tex->GetDesc(&t->td);
+        bool hw = false;
+        const DXGI_FORMAT rf = RtvFormat(t->td.Format, &hw);
+        if (rf == DXGI_FORMAT_UNKNOWN || t->td.SampleDesc.Count != 1) {
+            snprintf(t->fail, sizeof t->fail, "back buffer format %d samples %u not supported", t->td.Format, t->td.SampleDesc.Count);
+        } else {
+            D3D11_RENDER_TARGET_VIEW_DESC rd = {};
+            rd.Format = rf;
+            rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+            HRESULT hr = dev->CreateRenderTargetView(tex, &rd, &t->rtv);
+            if (FAILED(hr) || !t->rtv) {
+                t->rtv = nullptr;
+                snprintf(t->fail, sizeof t->fail, "CreateRenderTargetView on the back buffer failed (hr 0x%08lx)", hr);
+            } else {
+                dev->GetImmediateContext(&t->ctx);
+                t->dev = dev, dev->AddRef();
+                t->bb = tex, tex->AddRef();
+                t->devCs = LayerFindDeviceLock(dev);
+                D3D11_TEXTURE2D_DESC d = {};
+                d.Width = t->td.Width, d.Height = t->td.Height, d.MipLevels = d.ArraySize = 1, d.Format = t->td.Format;
+                d.SampleDesc.Count = 1, d.Usage = D3D11_USAGE_DEFAULT;
+                if (FAILED(dev->CreateTexture2D(&d, nullptr, &t->hudTex))) t->hudTex = nullptr;
+            }
+        }
+    }
+    static uintptr_t lastTex = 1;
+    static UINT lastW = 0, lastH = 0, lastF = 0;
+    static bool lastUse = false;
+    static char lastFail[200] = "\x01";
+    static int logs = 0;
+    const uintptr_t texAddr = reinterpret_cast<uintptr_t>(tex);
+    const bool changed = texAddr != lastTex || t->td.Width != lastW || t->td.Height != lastH || static_cast<UINT>(t->td.Format) != lastF ||
+                         use != lastUse || strcmp(t->fail, lastFail) != 0;
+    if (changed && logs < 64) {
+        ++logs;
+        lastTex = texAddr, lastW = t->td.Width, lastH = t->td.Height, lastF = t->td.Format, lastUse = use;
+        memcpy(lastFail, t->fail, sizeof lastFail);
+        char vt[96], pr[96], sdd[400], sbd[160], gdd[400], gtd[160];
+        ProbeFmtAddr(reinterpret_cast<void*>(g_scVtOrig), vt, sizeof vt);
+        ProbeFmtAddr(reinterpret_cast<void*>(g_origPresent), pr, sizeof pr);
+        PickDescribeDevice(sd, sdd, sizeof sdd), PickDescribeTex(sb, sbd, sizeof sbd);
+        PickDescribeDevice(gd, gdd, sizeof gdd), PickDescribeTex(gt, gtd, sizeof gtd);
+        g_log("ui-layer: draw target: %s [first person] | swapchain %p (vtable %s, Present %s): device %s, buffer %s | game's back buffer (renderer +0x%llx, "
+              "+0x%llx): %s, device %s | made off the render thread%s%s",
+              why, (void*)t->sc, vt, pr, sdd, sbd, static_cast<unsigned long long>(g_ra.oBackBufferObj), static_cast<unsigned long long>(kBbTexOff), gtd,
+              gdd, t->fail[0] ? " - FAILED: " : "", t->fail);
+    }
+    if (sd) sd->Release();
+    if (sb) sb->Release();
+    if (gd) gd->Release();
+    if (t->gameObj) t->gameObj->Release(), t->gameObj = nullptr;
+    if (t->sc) t->sc->Release(), t->sc = nullptr;
+}
+DWORD WINAPI LayerMakerProc(LPVOID) {
+    for (;;) {
+        WaitForSingleObject(g_ltWake, 500);
+        LayerTarget* drop[kLtFreeMax];
+        int nd = 0;
+        AcquireSRWLockExclusive(&g_ltLock);
+        LayerTarget* job = g_ltJob;
+        g_ltJob = nullptr, g_ltWorking = job;
+        for (int i = 0; i < g_ltFreeN; ++i) drop[nd++] = g_ltFree[i];
+        g_ltFreeN = 0;
+        InterlockedExchange(&g_ltDropping, nd);
+        ReleaseSRWLockExclusive(&g_ltLock);
+        for (int i = 0; i < nd; ++i) {
+            drop[i]->Release();
+            delete drop[i];
+        }
+        InterlockedExchange(&g_ltDropping, 0);
+        if (!job) continue;
+        const double t0 = Now();
+        LayerMake(job);
+        job->ms = (Now() - t0) * 1000.0;
+        const double waited = Now() - g_ltJobT0;
+        AcquireSRWLockExclusive(&g_ltLock);
+        const bool keep = !job->cancel && job->gen == g_ltGen;
+        LayerTarget* old = nullptr;
+        if (keep) old = g_ltMade, g_ltMade = job, g_ltWorking = nullptr;
+        ReleaseSRWLockExclusive(&g_ltLock);
+        if (!keep) {
+            job->Release();
+            delete job;
+            AcquireSRWLockExclusive(&g_ltLock);
+            g_ltWorking = nullptr;
+            ReleaseSRWLockExclusive(&g_ltLock);
+        }
+        if (old) {
+            old->Release();
+            delete old;
+        }
+        if (g_ltToldStuck) {
+            g_ltToldStuck = false;
+            g_log("ui-layer: lock-free: the view maker got through after %.1f s (the D3D11 device lock was held elsewhere)", waited);
+        }
+        SetEvent(g_ltDone);
+    }
+}
+bool LayerStart() {
+    if (g_ltThread) return true;
+    g_ltWake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    g_ltDone = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (g_ltWake && g_ltDone) g_ltThread = CreateThread(nullptr, 64 * 1024, LayerMakerProc, nullptr, 0, nullptr);
+    if (!g_ltThread) {
+        g_ltOn = false;
+        g_log("ui-layer: lock-free: could not start the view maker thread - back to the old way");
+        return false;
+    }
+    g_log("ui-layer: lock-free: view maker thread started");
+    return true;
+}
+void LayerFreeLocked(LayerTarget* t) {
+    if (!t) return;
+    if (g_ltFreeN < kLtFreeMax) {
+        g_ltFree[g_ltFreeN++] = t;
+        return;
+    }
+    t->Release();
+    delete t;
+}
+int LayerTargetFor(IDXGISwapChain* sc, bool mayWait, LayerUse* u) {
+    if (!LayerStart()) return 2;
+    ID3D11Texture2D* gt = g_uiTarget == 1 ? nullptr : GameBbTex();
+    const uintptr_t ga = reinterpret_cast<uintptr_t>(gt);
+    int r = 0;
+    bool adopted = false, posted = false, dropped = false, postedNow = false;
+    double jobAge = 0;
+    for (int pass = 0; pass < 2; ++pass) {
+        AcquireSRWLockExclusive(&g_ltLock);
+        auto match = [&](const LayerTarget* t) { return t && t->scKey == sc && t->gameTex == ga && t->target == g_uiTarget && t->gen == g_ltGen; };
+        if (g_ltMade) {
+            if (match(g_ltMade)) {
+                LayerFreeLocked(g_ltCur);
+                g_ltCur = g_ltMade, g_ltMade = nullptr, adopted = true;
+            } else {
+                LayerFreeLocked(g_ltMade), g_ltMade = nullptr, dropped = true;
+            }
+        }
+        if (g_ltCur && !match(g_ltCur)) LayerFreeLocked(g_ltCur), g_ltCur = nullptr, dropped = true;
+        if (g_ltCur) {
+            LayerTarget* t = g_ltCur;
+            if (t->singleThreaded) {
+                r = 2;
+            } else if (!t->Ok()) {
+                memcpy(u->fail, t->fail, sizeof u->fail);
+                r = -1;
+            } else {
+                u->dev = t->dev, u->ctx = t->ctx, u->bb = t->bb, u->rtv = t->rtv, u->td = t->td, u->cs = t->devCs;
+                u->dev->AddRef(), u->ctx->AddRef(), u->bb->AddRef(), u->rtv->AddRef();
+                g_useGameBb = t->useGame;
+                r = 1;
+            }
+        } else if (!g_ltJob && !g_ltWorking) {
+            LayerTarget* j = new LayerTarget;
+            j->sc = j->scKey = sc;
+            sc->AddRef();
+            j->gameObj = gt, gt = nullptr;
+            j->gameTex = ga, j->target = g_uiTarget, j->gen = g_ltGen;
+            g_ltJob = j;
+            g_ltJobT0 = Now();
+            ResetEvent(g_ltDone);
+            posted = postedNow = true;
+        } else {
+            jobAge = Now() - g_ltJobT0;
+        }
+        ReleaseSRWLockExclusive(&g_ltLock);
+        if (posted || dropped) SetEvent(g_ltWake);
+        posted = dropped = false;
+        if (r || !mayWait || !postedNow || pass) break;
+        const double tw = Now();
+        const bool done = WaitForSingleObject(g_ltDone, g_ltWaitMs) == WAIT_OBJECT_0;
+        g_ltWaitedMs += (Now() - tw) * 1000.0;
+        if (!done) break;
+    }
+    if (gt) gt->Release();
+    if (r == 2) {
+        g_ltOn = false;
+        g_log("ui-layer: lock-free: the game's device is single-threaded - views created on the render thread again (the old way)");
+        return 2;
+    }
+    if (adopted) {
+        static UINT lastW = 0, lastH = 0, lastF = 0;
+        static bool lastGame = false;
+        AcquireSRWLockShared(&g_ltLock);
+        const double ms = g_ltCur ? g_ltCur->ms : 0;
+        const bool game = g_ltCur && g_ltCur->useGame;
+        const D3D11_TEXTURE2D_DESC td = g_ltCur ? g_ltCur->td : D3D11_TEXTURE2D_DESC{};
+        ReleaseSRWLockShared(&g_ltLock);
+        const bool changed = td.Width != lastW || td.Height != lastH || static_cast<UINT>(td.Format) != lastF || game != lastGame;
+        if (g_ltReadyLogs < 200 && (g_ltReadyLogs < 16 || changed || g_ltSkipFrames || ms > 5.0)) {
+            ++g_ltReadyLogs;
+            g_log("ui-layer: lock-free: back-buffer view ready (%s %ux%u fmt %u; made off the render thread in %.2f ms; first person waited %u frame(s), "
+                  "%.1f ms)",
+                  game ? "the game's own back buffer" : "the swapchain's buffer", td.Width, td.Height, static_cast<UINT>(td.Format), ms, g_ltSkipFrames,
+                  g_ltWaitedMs);
+        }
+        lastW = td.Width, lastH = td.Height, lastF = td.Format, lastGame = game;
+    }
+    if (r == 1) g_ltFpSeen = true;
+    if (r == 0) {
+        ++g_ltSkipFrames;
+        if (jobAge > 1.0 && !g_ltToldStuck && g_ltStuckLogs < 5) {
+            g_ltToldStuck = true;
+            ++g_ltStuckLogs;
+            g_log("ui-layer: lock-free: the view maker has waited %.1f s - the D3D11 device lock is held elsewhere; first person draws nothing "
+                  "meanwhile, the game keeps running", jobAge);
+        }
+    }
+    return r;
+}
+void LayerTargetDrop() {
+    g_ltSkipFrames = 0, g_ltWaitedMs = 0;
+    const bool seen = g_ltFpSeen;
+    g_ltFpSeen = false;
+    if (!g_ltCur && !g_ltMade && !g_ltJob) return;
+    AcquireSRWLockExclusive(&g_ltLock);
+    LayerFreeLocked(g_ltCur), g_ltCur = nullptr;
+    LayerFreeLocked(g_ltMade), g_ltMade = nullptr;
+    LayerFreeLocked(g_ltJob), g_ltJob = nullptr;
+    ReleaseSRWLockExclusive(&g_ltLock);
+    if (g_ltWake) SetEvent(g_ltWake);
+    if (seen && g_ltDropLogs < 8) {
+        ++g_ltDropLogs;
+        g_log("ui-layer: lock-free: first person off - our back-buffer view handed back to the view maker for release");
+    }
+}
+ID3D11Texture2D* LayerHudCopy(const D3D11_TEXTURE2D_DESC& td) {
+    if (!LayerNoCreateHere()) return nullptr;
+    ID3D11Texture2D* t = nullptr;
+    AcquireSRWLockShared(&g_ltLock);
+    if (g_ltCur && g_ltCur->hudTex && g_ltCur->td.Width == td.Width && g_ltCur->td.Height == td.Height && g_ltCur->td.Format == td.Format)
+        t = g_ltCur->hudTex, t->AddRef();
+    ReleaseSRWLockShared(&g_ltLock);
+    return t;
+}
+bool LayerTryLock(CRITICAL_SECTION* cs) {
+    if (TryEnterCriticalSection(cs)) return true;
+    const double until = Now() + g_ltGuardSpinUs * 1e-6;
+    while (Now() < until) {
+        YieldProcessor();
+        if (TryEnterCriticalSection(cs)) return true;
+    }
+    return false;
+}
+struct LayerGuard {
+    CRITICAL_SECTION* cs;
+    bool held;
+    explicit LayerGuard(CRITICAL_SECTION* c) : cs(g_ltGuardOn ? c : nullptr), held(!cs || LayerTryLock(cs)) {}
+    ~LayerGuard() {
+        if (cs && held) LeaveCriticalSection(cs);
+    }
+    bool Ok() const { return held; }
+};
+CRITICAL_SECTION* LayerCurrentLock() {
+    if (!LayerNoCreateHere()) return nullptr;
+    AcquireSRWLockShared(&g_ltLock);
+    CRITICAL_SECTION* cs = g_ltCur ? g_ltCur->devCs : nullptr;
+    ReleaseSRWLockShared(&g_ltLock);
+    return cs;
+}
+UINT g_ltBusySkips = 0, g_ltBusyMid = 0;
+double g_ltBusyT = 0;
+int g_ltBusyLogs = 0;
+void LayerGuardSkip(bool mid) {
+    ++(mid ? g_ltBusyMid : g_ltBusySkips);
+    const double now = Now();
+    if (now - g_ltBusyT < 5.0) return;
+    if (g_ltBusyLogs < 20)
+        ++g_ltBusyLogs, g_log("ui-layer: lock guard: the D3D11 device lock was held elsewhere - our drawing skipped %u time(s) at Present, %u mid-frame "
+                              "(last 5 s; the game never waited on us)",
+                              g_ltBusySkips, g_ltBusyMid);
+    g_ltBusyT = now, g_ltBusySkips = g_ltBusyMid = 0;
+}
+void LayerFlushForResize(const char* what, UINT w, UINT h) {
+    if (!g_ltThread) return;
+    LayerTarget* take[kLtFreeMax + 4];
+    int n = 0;
+    AcquireSRWLockExclusive(&g_ltLock);
+    InterlockedIncrement(&g_ltGen);
+    if (g_ltJob) take[n++] = g_ltJob, g_ltJob = nullptr;
+    if (g_ltWorking) g_ltWorking->cancel = true;
+    if (g_ltMade) take[n++] = g_ltMade, g_ltMade = nullptr;
+    if (g_ltCur) take[n++] = g_ltCur, g_ltCur = nullptr;
+    for (int i = 0; i < g_ltFreeN; ++i) take[n++] = g_ltFree[i];
+    g_ltFreeN = 0;
+    ReleaseSRWLockExclusive(&g_ltLock);
+    const double t0 = Now();
+    for (;;) {
+        AcquireSRWLockShared(&g_ltLock);
+        const bool busy = g_ltWorking != nullptr;
+        ReleaseSRWLockShared(&g_ltLock);
+        if ((!busy && !g_ltDropping) || Now() - t0 > 1.0) break;
+        Sleep(1);
+    }
+    for (int i = 0; i < n; ++i) {
+        take[i]->Release();
+        delete take[i];
+    }
+    static int logs = 0;
+    if (logs < 32) {
+        ++logs;
+        if (n)
+            g_log("ui-layer: %s %ux%u (thread %lu) - our back-buffer view released first (%d held, waited %.1f ms for the view maker)", what, w, h,
+                  GetCurrentThreadId(), n, (Now() - t0) * 1000.0);
+        else
+            g_log("ui-layer: %s %ux%u (thread %lu) - nothing of ours held, forwarded as is", what, w, h, GetCurrentThreadId());
+    }
+}
+HRESULT STDMETHODCALLTYPE HkResizeBuffers(IDXGISwapChain* sc, UINT n, UINT w, UINT h, DXGI_FORMAT f, UINT fl) {
+    LayerFlushForResize("ResizeBuffers", w, h);
+    return g_origResize(sc, n, w, h, f, fl);
+}
+HRESULT STDMETHODCALLTYPE HkResizeBuffers1(IDXGISwapChain* sc, UINT n, UINT w, UINT h, DXGI_FORMAT f, UINT fl, const UINT* mask, IUnknown* const* q) {
+    LayerFlushForResize("ResizeBuffers1", w, h);
+    return g_origResize1(sc, n, w, h, f, fl, mask, q);
+}
+constexpr int kMidGen = 1;
+wchar_t g_safePath[MAX_PATH] = L"";
+const wchar_t* SafePath() {
+    if (!g_safePath[0]) {
+        wchar_t p[MAX_PATH];
+        DWORD n = GetEnvironmentVariableW(L"APPDATA", p, MAX_PATH);
+        if (n && n < MAX_PATH - 80) swprintf(g_safePath, MAX_PATH, L"%ls\\The Creative Assembly\\Warhammer3\\logs\\tenzin_fps_safe_mode.txt", p);
+    }
+    return g_safePath;
+}
+bool SafeMarkerMid(char* why, size_t n) {
+    why[0] = 0;
+    const wchar_t* p = SafePath();
+    if (!p[0]) return false;
+    FILE* f = _wfopen(p, L"rb");
+    if (!f) return false;
+    char buf[1024];
+    size_t got = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[got] = 0;
+    int gen = -1;
+    const char* g = strstr(buf, "gen=");
+    if (g) gen = atoi(g + 4);
+    if (!strstr(buf, "mid_frame_off=1") || gen != kMidGen) return false;
+    const char* w = strstr(buf, "when=");
+    const char* where = strstr(buf, "where=");
+    char a[40] = "?", b[160] = "?";
+    if (w) sscanf(w + 5, "%39[^\r\n]", a);
+    if (where) sscanf(where + 6, "%159[^\r\n]", b);
+    snprintf(why, n, "%s, %s", a, b);
+    return true;
+}
+void SafeMarkerWrite(const char* where) {
+    g_uiLayerMode = 0;
+    const wchar_t* p = SafePath();
+    bool ok = false;
+    if (p[0]) {
+        if (FILE* f = _wfopen(p, L"wb")) {
+            SYSTEMTIME t;
+            GetLocalTime(&t);
+            fprintf(f, "mid_frame_off=1\r\ngen=%d\r\nwhen=%04u-%02u-%02u %02u:%02u:%02u\r\nwhere=%s\r\n", kMidGen, t.wYear, t.wMonth, t.wDay, t.wHour,
+                    t.wMinute, t.wSecond, where);
+            ok = fclose(f) == 0;
+        }
+    }
+    g_log("watchdog: safe mode: mid-frame gun drawing turned off on this PC%s%ls%s - from now on the gun is drawn at Present with the interface "
+          "kept on top; [ui_layer] mode=1 forces it back",
+          ok ? " (marker " : " (marker not written", ok ? p : L"", ")");
+}
 FullState g_presentFs;
 void (*g_uiPresentDrawFn)(IDXGISwapChain*, int) = nullptr;
 bool g_uiPresentLoggedFp = false;
@@ -886,11 +1443,22 @@ void UiLayerPresentDraw(IDXGISwapChain* sc, int part) {
     const bool on = g_fp || g_testLayer;
     if (!on) g_uiPresentLoggedFp = false;
     ID3D11DeviceContext* c = nullptr;
+    LayerUse lu;
+    const int lr = on && !g_failed && LayerNoCreateHere() ? LayerTargetFor(sc, true, &lu) : 2;
+    LayerGuard guard(lr == 1 ? lu.cs : nullptr);
+    if (!guard.Ok()) {
+        LayerGuardSkip(false);
+        return;
+    }
     if (on && !g_uiPresentPartial && !g_failed) {
-        ID3D11Device* dev = nullptr;
-        if (LayerDevice(sc, &dev)) {
-            dev->GetImmediateContext(&c);
-            dev->Release();
+        if (lr == 1) {
+            c = lu.ctx, c->AddRef();
+        } else if (lr == 2) {
+            ID3D11Device* dev = nullptr;
+            if (LayerDevice(sc, &dev)) {
+                dev->GetImmediateContext(&c);
+                dev->Release();
+            }
         }
     }
     if (!c) {
@@ -898,6 +1466,7 @@ void UiLayerPresentDraw(IDXGISwapChain* sc, int part) {
             g_uiPresentDrawFn(sc, part);
         else
             DrawLayer(sc, part);
+        lu.Release();
         return;
     }
     ID3D11DeviceContext1* c1 = nullptr;
@@ -907,7 +1476,10 @@ void UiLayerPresentDraw(IDXGISwapChain* sc, int part) {
         g_uiPresentLoggedFp = true;
         ++g_uiPresentLogs;
         ID3D11Texture2D* bb = nullptr;
-        LayerBackBuffer(sc, &bb);
+        if (lr == 1)
+            bb = lu.bb, bb->AddRef();
+        else
+            LayerBackBuffer(sc, &bb);
         char what[900];
         FullStateDescribe(g_presentFs, bb, what, sizeof what);
         if (bb) bb->Release();
@@ -922,6 +1494,7 @@ void UiLayerPresentDraw(IDXGISwapChain* sc, int part) {
     g_presentFs.Restore(c, c1);
     if (c1) c1->Release();
     c->Release();
+    lu.Release();
 }
 volatile LONG g_wdBeat = 0;
 DWORD g_wdRenderTid = 0, g_wdMainTid = 0;
@@ -934,6 +1507,7 @@ struct WdShot {
     bool ok;
     DWORD64 rip, rsp;
     size_t got;
+    DWORD64 reg[15];
 };
 bool WdCapture(DWORD tid, WdShot* s) {
     s->ok = false, s->got = 0, s->rip = s->rsp = 0;
@@ -949,6 +1523,8 @@ bool WdCapture(DWORD tid, WdShot* s) {
     ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
     if (GetThreadContext(h, &ctx)) {
         s->ok = true, s->rip = ctx.Rip, s->rsp = ctx.Rsp;
+        const DWORD64 regs[15] = {ctx.Rax, ctx.Rcx, ctx.Rdx, ctx.Rbx, ctx.Rbp, ctx.Rsi, ctx.Rdi, ctx.R8, ctx.R9, ctx.R10, ctx.R11, ctx.R12, ctx.R13, ctx.R14, ctx.R15};
+        memcpy(s->reg, regs, sizeof regs);
         size_t want = kWdStackBytes;
         MEMORY_BASIC_INFORMATION mbi;
         if (VirtualQuery(reinterpret_cast<LPCVOID>(ctx.Rsp), &mbi, sizeof mbi)) {
@@ -976,7 +1552,8 @@ bool WdIsReturnAddr(uintptr_t a) {
     return at(5) == 0xE8 || (at(6) == 0xFF && callModrm(at(5))) || (at(3) == 0xFF && callModrm(at(2))) ||
            (at(2) == 0xFF && at(1) >= 0xD0 && at(1) <= 0xD7) || (at(7) == 0xFF && callModrm(at(6))) || (at(4) == 0xFF && callModrm(at(3)));
 }
-void WdReport(const char* label, DWORD tid) {
+void WdFindLock(const WdShot& s, DWORD tid);
+void WdReport(const char* label, DWORD tid, bool findLock = false) {
     WdShot s;
     if (!WdCapture(tid, &s)) {
         g_log("watchdog: %s thread %lu - could not capture it", label, tid);
@@ -1001,6 +1578,90 @@ void WdReport(const char* label, DWORD tid) {
     }
     g_log("watchdog: %s thread %lu at %s (rsp %p, %zu stack bytes read); return addresses on the stack: %s", label, tid, rip,
           reinterpret_cast<void*>(s.rsp), s.got, n ? frames : "none found");
+    if (findLock) WdFindLock(s, tid);
+}
+void WdFindLock(const WdShot& s, DWORD tid) {
+    uintptr_t cand[15 + 512];
+    int nc = 0;
+    for (DWORD64 r : s.reg) cand[nc++] = static_cast<uintptr_t>(r);
+    for (size_t off = 0; off + 8 <= s.got && off < 4096; off += 8) memcpy(&cand[nc++], g_wdStack + off, 8);
+    struct Hit {
+        uintptr_t cs;
+        DWORD owner;
+        LONG rec, lock;
+    } hit[4];
+    int nh = 0;
+    for (int i = 0; i < nc && nh < 4; ++i) {
+        const uintptr_t v = cand[i];
+        if (v < 0x10000 || (v & 7)) continue;
+        bool dup = false;
+        for (int k = 0; k < nh; ++k) dup |= hit[k].cs == v;
+        if (dup) continue;
+        CRITICAL_SECTION cs;
+        SIZE_T got = 0;
+        if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(v), &cs, sizeof cs, &got) || got != sizeof cs) continue;
+        const uintptr_t ow = reinterpret_cast<uintptr_t>(cs.OwningThread);
+        if (!ow || ow > 0xffffffffu || ow == tid || cs.RecursionCount < 1 || cs.RecursionCount > 256 || (cs.LockCount & 1)) continue;
+        HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(ow));
+        const bool ours = h && GetProcessIdOfThread(h) == GetCurrentProcessId();
+        if (h) CloseHandle(h);
+        if (!ours) continue;
+        hit[nh++] = {v, static_cast<DWORD>(ow), cs.RecursionCount, cs.LockCount};
+    }
+    if (!nh) {
+        g_log("watchdog: lock: no critical section with an owner found around thread %lu's wait", tid);
+        return;
+    }
+    for (int k = 0; k < nh; ++k)
+        g_log("watchdog: lock: thread %lu is near critical section %p owned by thread %lu (recursion %ld, lock count 0x%lx)%s", tid, (void*)hit[k].cs,
+              hit[k].owner, hit[k].rec, static_cast<unsigned long>(hit[k].lock),
+              hit[k].owner == g_wdMainTid ? " = the main thread" : hit[k].owner == GetCurrentThreadId() ? " = the watchdog" : "");
+    int told = 0;
+    for (int k = 0; k < nh && told < 2; ++k) {
+        bool seen = hit[k].owner == g_wdMainTid || hit[k].owner == GetCurrentThreadId();
+        for (int j = 0; j < k; ++j) seen |= hit[j].owner == hit[k].owner;
+        if (seen) continue;
+        ++told;
+        WdReport("lock owner", hit[k].owner);
+    }
+}
+void WdThreads() {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    struct One {
+        DWORD tid;
+        DWORD64 rip;
+    } th[128];
+    int n = 0, total = 0;
+    THREADENTRY32 te;
+    te.dwSize = sizeof te;
+    const DWORD pid = GetCurrentProcessId(), self = GetCurrentThreadId();
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != pid || te.th32ThreadID == self) continue;
+        ++total;
+        if (n >= 128) continue;
+        HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, te.th32ThreadID);
+        if (!h) continue;
+        CONTEXT c;
+        memset(&c, 0, sizeof c);
+        c.ContextFlags = CONTEXT_CONTROL;
+        if (SuspendThread(h) != static_cast<DWORD>(-1)) {
+            if (GetThreadContext(h, &c)) th[n++] = {te.th32ThreadID, c.Rip};
+            ResumeThread(h);
+        }
+        CloseHandle(h);
+    }
+    CloseHandle(snap);
+    char out[6000];
+    size_t used = 0;
+    for (int i = 0; i < n; ++i) {
+        char a[96];
+        ProbeFmtAddr(reinterpret_cast<void*>(th[i].rip), a, sizeof a);
+        int w = snprintf(out + used, sizeof out - used, "%s%lu %s", i ? " | " : "", th[i].tid, a);
+        if (w < 0 || used + w >= sizeof out) break;
+        used += w;
+    }
+    g_log("watchdog: threads (%d of %d): %s", n, total, n ? out : "none captured");
 }
 void WdStep(double now) {
     static LONG lastBeat = -1;
@@ -1017,8 +1678,19 @@ void WdStep(double now) {
     ++g_wdReports;
     g_log("watchdog: no Present for %.1f s in first person (report %d of %d) - render thread %lu, main thread %lu", now - lastChange, g_wdReports,
           kWdMaxReports, g_wdRenderTid, g_wdMainTid);
-    WdReport("render", g_wdRenderTid);
+    const LONG ph = g_rtPhase;
+    const bool mid = g_midDone;
+    const char* where = ph == 1 ? "inside our mid-frame gun drawing"
+                        : ph == 2 ? "inside our gun drawing at Present"
+                        : ph == 3 ? "inside the real Present (our drawing for this frame was done)"
+                        : mid ? "in the game's own code, after our mid-frame gun drawing this frame"
+                                  : "in the game's own code (none of our drawing in progress)";
+    g_log("watchdog: where: the render thread is %s (phase %ld, mid-frame drawing %s, lock-free %s)", where, ph, g_uiLayerMode == 1 ? "on" : "off",
+          g_ltOn ? "on" : "off");
+    if (g_autoSafe && g_uiLayerMode == 1 && (ph == 1 || (ph == 0 && mid))) SafeMarkerWrite(where);
+    WdReport("render", g_wdRenderTid, true);
     if (g_wdMainTid && g_wdMainTid != g_wdRenderTid) WdReport("main", g_wdMainTid);
+    WdThreads();
 }
 DWORD WINAPI WdThreadProc(LPVOID) {
     for (;;) {
@@ -1048,6 +1720,12 @@ bool UiLayerMidDraw(ID3D11DeviceContext* c) {
         }
         return false;
     }
+    LayerGuard guard(LayerCurrentLock());
+    if (!guard.Ok()) {
+        LayerGuardSkip(true);
+        return false;
+    }
+    InterlockedExchange(&g_rtPhase, 1);
     if (g_uiStateSwap) {
         if (!UiLayerStateReady(c)) {
             ++g_uls.skipState;
@@ -1055,6 +1733,7 @@ bool UiLayerMidDraw(ID3D11DeviceContext* c) {
                 g_uls.loggedState = true;
                 g_log("ui-layer: no ID3D11DeviceContext1 state object; gun stays at Present");
             }
+            InterlockedExchange(&g_rtPhase, 0);
             return false;
         }
         ID3DDeviceContextState* prev = nullptr;
@@ -1078,6 +1757,7 @@ bool UiLayerMidDraw(ID3D11DeviceContext* c) {
         }
         if (c1) c1->Release();
     }
+    InterlockedExchange(&g_rtPhase, 0);
     g_uiMidT = Now();
     g_midDone = true;
     ++g_uls.mid;
