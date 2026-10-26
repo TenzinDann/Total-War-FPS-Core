@@ -572,8 +572,6 @@ struct Config {
     bool hudEnabled = true;
     bool castKeys = true;
     bool castMarker = true;
-    bool castHold = false;
-    float castHoldMax = 1.5f, castHoldWindupMax = 6.f;
     float castMarkerPillar = 6.f;
     bool hudCover = true;
     char hideNames[kMaxHideUi][48] = {};
@@ -914,13 +912,6 @@ void LoadConfig() {
     cfg.hudCover = GetPrivateProfileIntW(L"hud", L"cover_viewmodel", 1, ini) != 0;
     cfg.castKeys = GetPrivateProfileIntW(L"hud", L"cast_keys", 1, ini) != 0;
     cfg.castMarker = GetPrivateProfileIntW(L"hud", L"cast_marker", 1, ini) != 0;
-    cfg.castHold = GetPrivateProfileIntW(L"cast", L"hold", 0, ini) != 0;
-    cfg.castHoldMax = IniF(L"cast", L"hold_max", 1.5f, ini);
-    if (!(cfg.castHoldMax >= 0.2f && cfg.castHoldMax <= 3.f)) cfg.castHoldMax = 1.5f;
-    cfg.castHoldWindupMax = IniF(L"cast", L"hold_windup_max", 6.f, ini);
-    if (!(cfg.castHoldWindupMax >= 0.5f && cfg.castHoldWindupMax <= 10.f)) cfg.castHoldWindupMax = 6.f;
-    Log("cast: hold after casting %s (turn %.2f s with WASD held, wind-up %.2f s with WASD free; [cast] hold / hold_max / hold_windup_max)",
-        cfg.castHold ? "ON" : "off", cfg.castHoldMax, cfg.castHoldWindupMax);
     cfg.castMarkerPillar = IniF(L"hud", L"cast_marker_pillar", cfg.castMarkerPillar, ini);
     if (!cfg.hudCover) vmgame::SetHudCover(0, 0, 0, 0);
     {
@@ -1191,10 +1182,6 @@ struct State {
     int32_t pinAct = 0;
     double tPinned = 0;
     unsigned pinLogs = 0;
-    bool castHold = false, castRepin = false;
-    int castPhase = 0;
-    double tCastHold = 0, tCastWind = 0, castHoldUntil = 0;
-    unsigned castHolds = 0, castHoldLogs = 0;
     bool loggedProj = false;
     float entVel[2] = {0, 0};
     double tAliveCheck = 0;
@@ -1290,7 +1277,6 @@ struct CastState {
     float eye[3] = {}, fwd[3] = {};
     LONG events = 0;
 } g_cast;
-volatile LONG g_castHoldReq = 0, g_castHoldWindReq = 0;
 struct CastMarkerShared {
     SRWLOCK lock = SRWLOCK_INIT;
     cm::Req req;
@@ -1626,11 +1612,6 @@ void Enter(uintptr_t mgr) {
     S.tNoFollow = -1;
     S.pinned = false;
     S.pinLogs = 0;
-    S.castHold = S.castRepin = false;
-    S.castPhase = 0;
-    S.castHoldLogs = 0;
-    InterlockedExchange(&g_castHoldReq, 0);
-    InterlockedExchange(&g_castHoldWindReq, 0);
     S.meleeSkipUnit = 0;
     S.meleeLogs = 0;
     S.moraleSkipUnit = 0;
@@ -5381,57 +5362,6 @@ bool LeashSkipAhead(float ex, float ez, const float vel[2], float ed, float leas
     float along = -(ex * vel[0] + ez * vel[1]) / v;
     return along > 0.5f * ed && ed < leash + v * 0.5f + 2.f;
 }
-void CastHoldStep(double now) {
-    LONG req = InterlockedExchange(&g_castHoldReq, 0);
-    LONG wind = InterlockedExchange(&g_castHoldWindReq, 0);
-    if (req > 0) {
-        double until = now + req / 1000.0;
-        if (!S.castHold || S.castPhase == 2) {
-            bool again = S.castHold;
-            S.castHold = true;
-            S.castPhase = 1;
-            S.tCastHold = now;
-            S.castHoldUntil = until;
-            ++S.castHolds;
-            bool h = g_haltOk && IssueOvrHalt();
-            if (S.castHoldLogs++ < 60)
-                Log("cast-hold: start #%u%s - teleports paused, override released (entity halt %d), WASD held while the hero turns (up to %.2f s)",
-                    S.castHolds, again ? " (a new cast during a wind-up)" : "", h, req / 1000.0);
-        } else if (until > S.castHoldUntil) {
-            S.castHoldUntil = until;
-        }
-    }
-    if (wind > 0 && req >= 0) {
-        if (!S.castHold) {
-            S.castHold = true;
-            S.tCastHold = now;
-            ++S.castHolds;
-            bool h = g_haltOk && IssueOvrHalt();
-            if (S.castHoldLogs++ < 60) Log("cast-hold: start #%u at the wind-up (entity halt %d)", S.castHolds, h);
-        }
-        if (S.castPhase != 2) {
-            S.castPhase = 2;
-            S.tCastWind = now;
-            if (S.castHoldLogs++ < 60)
-                Log("cast-hold: wind-up %.2f s after the order - WASD free, the hero stays to finish the cast (up to %.2f s)", now - S.tCastHold,
-                    wind / 1000.0);
-        }
-        S.castHoldUntil = now + wind / 1000.0;
-    }
-    const char* why = nullptr;
-    if (S.castHold && req < 0)
-        why = "the script saw it go off, or gave up";
-    else if (S.castHold && now >= S.castHoldUntil)
-        why = S.castPhase == 2 ? "wind-up timeout" : "turn timeout";
-    if (why) {
-        if (S.castHoldLogs++ < 60)
-            Log("cast-hold: end after %.2f s (%s%s) - teleports resume, the hero is brought back to the camera", now - S.tCastHold, why,
-                S.castPhase == 2 ? ", wind-up phase" : ", turn phase");
-        S.castHold = false;
-        S.castPhase = 0;
-        S.castRepin = true;
-    }
-}
 void Apply(uintptr_t mgr) {
     double now = Now();
     uintptr_t ent = EntityByPath(S.unit, S.entPath);
@@ -5689,13 +5619,11 @@ void Apply(uintptr_t mgr) {
             }
             S.pinned = pinned;
         }
-        CastHoldStep(now);
-        if (S.castHold && S.castPhase == 1 && !S.ghostWanted) pinned = true;
         bool judged = false, follow = false;
         bool unbound = S.ghostWanted || S.airFar || S.air || (S.tLand > 0 && now - S.tLand < 0.5);
-        if (unbound || pinned || S.castHold) judged = true, follow = true;
+        if (unbound || pinned) judged = true, follow = true;
         for (const TpRec& r : S.tpHist) {
-            if (unbound || pinned || S.castHold) break;
+            if (unbound || pinned) break;
             if (r.t <= 0 || now - r.t > 0.45) continue;
             float fx = raw[0] - r.x, fz = raw[2] - r.z;
             if (fx * fx + fz * fz < 0.16f) follow = true;
@@ -6096,7 +6024,7 @@ void Apply(uintptr_t mgr) {
             unsigned sig = static_cast<unsigned>(S.bldBlocks) + S.blocks + static_cast<unsigned>(S.bodyLogs);
             if (sig != S.bumpSig) S.bumpSig = sig, S.tBump = now;
         }
-        if (cfg.leadAuto && cfg.tpLead > 0.f && dt > 0.f && !S.stuck && !paused && !unbound && !pinned && !S.castHold && !S.air && now - S.tGuard > 0.5 &&
+        if (cfg.leadAuto && cfg.tpLead > 0.f && dt > 0.f && !S.stuck && !paused && !unbound && !pinned && !S.air && now - S.tGuard > 0.5 &&
             (S.tLand < 0 || now - S.tLand > 0.5) && now - S.tLeashHit > 1.0 && now - S.tBump > 0.5 &&
             std::fabs(S.outPos[1] - S.footY) < 0.8f) {
             float v = std::sqrt(S.kinVel[0] * S.kinVel[0] + S.kinVel[1] * S.kinVel[1]);
@@ -6127,7 +6055,7 @@ void Apply(uintptr_t mgr) {
             S.leadPos[1] += vtz * L + (S.kinVel[1] - vtz) * f;
         }
         float tx = S.leadPos[0] - S.lastTp[0], tz = S.leadPos[1] - S.lastTp[1];
-        if (haveDest && !S.airFar && !S.castHold && (tx * tx + tz * tz > 0.02f * 0.02f || S.castRepin) && now - S.tLastTp >= cfg.tpInterval) {
+        if (haveDest && !S.airFar && tx * tx + tz * tz > 0.02f * 0.02f && now - S.tLastTp >= cfg.tpInterval) {
             float gx = S.leadPos[0], gz = S.leadPos[1];
             bool skipTp = false;
             if (cfg.tpShotGuard > 0.f && !S.ghost && !cfg.fireShooter) {
@@ -6187,7 +6115,6 @@ void Apply(uintptr_t mgr) {
                 S.lastTp[0] = gx;
                 S.lastTp[1] = gz;
                 S.tLastTp = now;
-                S.castRepin = false;
             }
         }
         S.camSpeed = std::sqrt(S.kinVel[0] * S.kinVel[0] + S.kinVel[1] * S.kinVel[1]);
@@ -7720,21 +7647,6 @@ int ExitFirstPerson(void* L) {
     }
     return 0;
 }
-int CastHoldApi(void* L) {
-    float secs = f.type(L, 1) == kTNumber ? f.tonumber(L, 1) : 0.f;
-    int phase = f.type(L, 2) == kTNumber ? static_cast<int>(f.tonumber(L, 2)) : 1;
-    bool ok = S.active && cfg.castHold && S.lastMode == 0;
-    if (ok) {
-        if (secs <= 0.f)
-            InterlockedExchange(&g_castHoldReq, -1);
-        else if (phase == 2)
-            InterlockedExchange(&g_castHoldWindReq, static_cast<LONG>(std::fmax(1.f, std::fmin(secs, cfg.castHoldWindupMax) * 1000.f + 0.5f)));
-        else
-            InterlockedExchange(&g_castHoldReq, static_cast<LONG>(std::fmax(1.f, std::fmin(secs, cfg.castHoldMax) * 1000.f + 0.5f)));
-    }
-    f.pushboolean(L, ok ? 1 : 0);
-    return 1;
-}
 int PushTable(void* L) {
     LONG n = InterlockedIncrement(&g_opens);
     if (!Resolve()) {
@@ -7746,8 +7658,7 @@ int PushTable(void* L) {
                                                         {"set_hud_rect", SetHudRect}, {"set_ui_covers", SetUiCoversApi}, {"ammo", Ammo}, {"cast_event", CastEvent},
                                                         {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson},
                                                         {"tac_stamina", TacStaminaApi}, {"refill_ammo", RefillAmmoApi}, {"prompt", Prompt}, {"refused", Refused}, {"status", Status},
-                                                        {"cast_marker", CastMarkerApi}, {"cast_target", CastTargetApi}, {"cast_point", CastPointApi},
-                                                        {"cast_hold", CastHoldApi}};
+                                                        {"cast_marker", CastMarkerApi}, {"cast_target", CastTargetApi}, {"cast_point", CastPointApi}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);
