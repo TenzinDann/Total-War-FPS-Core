@@ -102,6 +102,7 @@ constexpr uintptr_t kRegUnitHalt904 = 0x4af1a0, kFnUnitHaltFactory904 = 0x2ed5da
 const CodePrint kUnitHaltPrints904[] = {{0x2ed5da4, 0x36, 0xf2992bea123bdfd1ull},
                                        {0x2eaf754, 0x90, 0x2e660c50610378f1ull},
                                        {0x2eeedd8, 0x38, 0x1e40299fca8b7e54ull}};
+const CodePrint kMpFlagPrints904[] = {{0x2eea97c, 0x57, 0xeb6c5089a78dfbc0ull}};
 const CodePrint kTpPrints904[] = {{0x2ecfbd4, 0xb3, 0x1987684e822436bdull},
                                  {0x2f64f54, 0x5a, 0xe98dc842affae2a9ull},
                                  {0x2f78b30, 0x167, 0xf7ff13396414fd5bull},
@@ -400,6 +401,7 @@ float EyeFromHeight(float h, float def) {
     return def;
 }
 constexpr uintptr_t oScriptBattle = 0x468, oBattleCmdQueue = 0x644e8, oBattleNoCmd1 = 0x3b0, oBattleNoCmd2 = 0x3b1;
+constexpr uintptr_t oBattleIsMp = 0x645c8;
 constexpr uintptr_t oUnitProjectile = 0x3d50;
 constexpr uintptr_t oEntId = 0x258;
 struct FireCmd {
@@ -437,6 +439,7 @@ struct alignas(16) HaltCmdBuf {
 bool g_tpOk = false;
 bool g_ovrOk = false, g_haltOk = false;
 bool g_unitHaltOk = false;
+bool g_mpFlagOk = false;
 constexpr uintptr_t oEntActivity = 0x324;
 struct EnableCmd {
     uintptr_t vt;
@@ -572,6 +575,8 @@ struct Config {
     bool hudEnabled = true;
     bool castKeys = true;
     bool castMarker = true;
+    bool castHold = false;
+    float castHoldMax = 1.5f, castHoldWindupMax = 6.f;
     float castMarkerPillar = 6.f;
     bool hudCover = true;
     char hideNames[kMaxHideUi][48] = {};
@@ -912,6 +917,13 @@ void LoadConfig() {
     cfg.hudCover = GetPrivateProfileIntW(L"hud", L"cover_viewmodel", 1, ini) != 0;
     cfg.castKeys = GetPrivateProfileIntW(L"hud", L"cast_keys", 1, ini) != 0;
     cfg.castMarker = GetPrivateProfileIntW(L"hud", L"cast_marker", 1, ini) != 0;
+    cfg.castHold = GetPrivateProfileIntW(L"cast", L"hold", 0, ini) != 0;
+    cfg.castHoldMax = IniF(L"cast", L"hold_max", 1.5f, ini);
+    if (!(cfg.castHoldMax >= 0.2f && cfg.castHoldMax <= 3.f)) cfg.castHoldMax = 1.5f;
+    cfg.castHoldWindupMax = IniF(L"cast", L"hold_windup_max", 6.f, ini);
+    if (!(cfg.castHoldWindupMax >= 0.5f && cfg.castHoldWindupMax <= 10.f)) cfg.castHoldWindupMax = 6.f;
+    Log("cast: hold after casting %s (turn %.2f s with WASD held, wind-up %.2f s with WASD free; [cast] hold / hold_max / hold_windup_max)",
+        cfg.castHold ? "ON" : "off", cfg.castHoldMax, cfg.castHoldWindupMax);
     cfg.castMarkerPillar = IniF(L"hud", L"cast_marker_pillar", cfg.castMarkerPillar, ini);
     if (!cfg.hudCover) vmgame::SetHudCover(0, 0, 0, 0);
     {
@@ -1182,6 +1194,10 @@ struct State {
     int32_t pinAct = 0;
     double tPinned = 0;
     unsigned pinLogs = 0;
+    bool castHold = false, castRepin = false;
+    int castPhase = 0;
+    double tCastHold = 0, tCastWind = 0, castHoldUntil = 0;
+    unsigned castHolds = 0, castHoldLogs = 0;
     bool loggedProj = false;
     float entVel[2] = {0, 0};
     double tAliveCheck = 0;
@@ -1277,6 +1293,7 @@ struct CastState {
     float eye[3] = {}, fwd[3] = {};
     LONG events = 0;
 } g_cast;
+volatile LONG g_castHoldReq = 0, g_castHoldWindReq = 0;
 struct CastMarkerShared {
     SRWLOCK lock = SRWLOCK_INIT;
     cm::Req req;
@@ -1612,6 +1629,11 @@ void Enter(uintptr_t mgr) {
     S.tNoFollow = -1;
     S.pinned = false;
     S.pinLogs = 0;
+    S.castHold = S.castRepin = false;
+    S.castPhase = 0;
+    S.castHoldLogs = 0;
+    InterlockedExchange(&g_castHoldReq, 0);
+    InterlockedExchange(&g_castHoldWindReq, 0);
     S.meleeSkipUnit = 0;
     S.meleeLogs = 0;
     S.moraleSkipUnit = 0;
@@ -1658,6 +1680,10 @@ void Enter(uintptr_t mgr) {
         if (cfg.fastFire && g_shotOk) FastFireInstall(sbf ? Ptr(sbf + oScriptBattle) : 0);
         if (cfg.earlyFlight && g_shotOk && cfg.fireShooter) EarlyFlightInstall(sbf ? Ptr(sbf + oScriptBattle) : 0, entity);
         if (sbf && Ptr(sbf + oScriptBattle)) LogUnitLists(Ptr(sbf + oScriptBattle));
+        uint64_t mp = 1;
+        uintptr_t btm = sbf ? Ptr(sbf + oScriptBattle) : 0;
+        if (!(g_mpFlagOk && btm && Rd(btm + oBattleIsMp, mp))) mp = 1;
+        vmgame::SetMpBattle(mp != 0);
     }
     S.fpProj = 0;
     S.fpProjId = -1;
@@ -2140,6 +2166,18 @@ struct MeleeCatCfg {
     float blockAngle;
 };
 MeleeCatCfg g_meleeCat[vmgame::kMeleeCats];
+float g_meleeDmgMul[vmgame::kMeleeCats] = {1.f, 1.f, 1.f, 1.f};
+float g_meleeReachAdd[vmgame::kMeleeCats] = {};
+static_assert(vmgame::kMeleeCats == 4, "g_meleeDmgMul 的初值按 4 类写的");
+MeleeCatCfg MeleeCatEff(int cat) {
+    MeleeCatCfg m = g_meleeCat[cat];
+    m.damageScale *= g_meleeDmgMul[cat];
+    for (MeleeKindCfg& k : m.k) {
+        k.reach += g_meleeReachAdd[cat];
+        if (k.reach < 0.3f) k.reach = 0.3f;
+    }
+    return m;
+}
 const wchar_t* const kMeleeKindKey[vmgame::kStrikeKinds] = {L"stab", L"sweep", L"heavy_sweep", L"heavy", L"bash"};
 void LoadMeleeCats(const wchar_t* ini) {
     for (int c = 0; c < vmgame::kMeleeCats; ++c) {
@@ -2462,7 +2500,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         const MeleeReq& rq = reqs[ri];
         if (rq.hero != hero || Now() - rq.t > 0.6) continue;
         const int cat = rq.cat >= 0 && rq.cat < vmgame::kMeleeCats ? rq.cat : vmgame::kMeleeCatSword;
-        const MeleeKindCfg& arc = g_meleeCat[cat].k[rq.kind];
+        const MeleeKindCfg arc = MeleeCatEff(cat).k[rq.kind];
         org[no][0] = rq.ox, org[no][1] = rq.oz;
         org[no][2] = arc.reach + (arc.splashR > 0.f && arc.splashMax > 0 ? arc.splashR : 0.f) + MeleeBigSlack();
         ++no;
@@ -2478,7 +2516,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
             continue;
         }
         const int cat = rq.cat >= 0 && rq.cat < vmgame::kMeleeCats ? rq.cat : vmgame::kMeleeCatSword;
-        const MeleeCatCfg& cc = g_meleeCat[cat];
+        const MeleeCatCfg cc = MeleeCatEff(cat);
         const MeleeKindCfg& arc = cc.k[rq.kind];
         const bool heavy = rq.kind == vmgame::kStrikeHeavySweep || rq.kind == vmgame::kStrikeHeavy;
         const float splashR = arc.splashR, splashDmg = arc.splashDmg;
@@ -2647,6 +2685,71 @@ void HitFeedback(const AimHit& hit, const float eye[3], const float fwd[3]) {
         Log("hit-fx: shot on enemy %p at %.1f m, hp %u vs damage %d + ap %d -> %s (so far %u hits / %u kills of %u shots)", (void*)hit.ent,
             hit.dist, hp, dmg, ap, kill ? "kill (bigger blood)" : "hit", g_hfx.hits, g_hfx.kills, g_hfx.shots);
 }
+struct ShotDmgRec {
+    uintptr_t rec;
+    int32_t orig[2], set[2];
+};
+struct ShotDmgState {
+    ShotDmgRec r[32];
+    int n = 0;
+    int logs = 0;
+} g_sdmg;
+void ShotDamageApply(uintptr_t rec) {
+    if (!rec || rec != S.fpProj) return;
+    const char* key = vmgame::WeaponProjectile(S.projFor)[0] ? vmgame::WeaponProjectile(S.projFor) : cfg.fireProjectile;
+    if (!strstr(key, "fps")) return;
+    const int pct = vmgame::WeaponDamagePct(S.projFor);
+    int32_t cur[2] = {0, 0};
+    if (!Rd(rec + 0x70, cur[0]) || !Rd(rec + 0x74, cur[1])) return;
+    ShotDmgRec* d = nullptr;
+    for (int i = 0; i < g_sdmg.n && !d; ++i)
+        if (g_sdmg.r[i].rec == rec) d = &g_sdmg.r[i];
+    if (!d) {
+        if (pct == 100 || g_sdmg.n >= 32) return;
+        d = &g_sdmg.r[g_sdmg.n++];
+        d->rec = rec;
+        for (int k = 0; k < 2; ++k) d->orig[k] = d->set[k] = cur[k];
+    } else if (cur[0] != d->set[0] || cur[1] != d->set[1]) {
+        for (int k = 0; k < 2; ++k) d->orig[k] = d->set[k] = cur[k];
+    }
+    int32_t want[2];
+    for (int k = 0; k < 2; ++k) {
+        want[k] = d->orig[k];
+        if (d->orig[k] > 0 && pct != 100) {
+            int64_t v = (static_cast<int64_t>(d->orig[k]) * pct + 50) / 100;
+            want[k] = v < 1 ? 1 : v > 100000 ? 100000 : static_cast<int32_t>(v);
+        }
+    }
+    if (want[0] != cur[0]) Wr(rec + 0x70, want[0]);
+    if (want[1] != cur[1]) Wr(rec + 0x74, want[1]);
+    if ((want[0] != cur[0] || want[1] != cur[1]) && g_sdmg.logs++ < 16)
+        Log("fire: custom weapon stats - weapon %d damage %d%%: projectile %p damage %d -> %d, ap %d -> %d (original %d / %d)", S.projFor, pct, (void*)rec,
+            cur[0], want[0], cur[1], want[1], d->orig[0], d->orig[1]);
+    d->set[0] = want[0];
+    d->set[1] = want[1];
+}
+void ShotDamageRestore(const char* why) {
+    int n = 0;
+    for (int i = 0; i < g_sdmg.n; ++i) {
+        ShotDmgRec& d = g_sdmg.r[i];
+        if (d.set[0] == d.orig[0] && d.set[1] == d.orig[1]) continue;
+        int32_t cur[2] = {0, 0};
+        if (Rd(d.rec + 0x70, cur[0]) && Rd(d.rec + 0x74, cur[1]) && cur[0] == d.set[0] && cur[1] == d.set[1]) {
+            Wr(d.rec + 0x70, d.orig[0]);
+            Wr(d.rec + 0x74, d.orig[1]);
+            ++n;
+        }
+        d.set[0] = d.orig[0];
+        d.set[1] = d.orig[1];
+    }
+    if (n) Log("fire: custom weapon stats - damage restored on %d projectile record(s) (%s)", n, why);
+}
+void WeaponParamsSync() {
+    for (int c = 0; c < vmgame::kMeleeCats; ++c) {
+        g_meleeDmgMul[c] = vmgame::MeleeCatDamageMul(c);
+        g_meleeReachAdd[c] = vmgame::MeleeCatReachAdd(c);
+    }
+}
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
               int nBodies, float clearance) {
     uintptr_t sb = Ptr(g_base + kGlobalScript);
@@ -2670,6 +2773,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
                 (void*)S.battle, (void*)queue, no1, no2, (void*)proj, projId, entId);
         return false;
     }
+    ShotDamageApply(proj);
     if (!S.loggedProj && proj) {
         S.loggedProj = true;
         float f[48] = {};
@@ -4763,6 +4867,8 @@ void ShotStep() {
     bool active = S.active && g_shotOk && g_fireOk && cfg.fireEnabled;
     uintptr_t rec = active && cfg.bulletSpeed > 0.f && S.unit ? (S.fpProj ? S.fpProj : Ptr(S.unit + oUnitProjectile)) : 0;
     if (S.speedApplied && rec != S.speedRec) ShotRestoreSpeed(rec ? "weapon changed" : "first person ended");
+    if (!active) ShotDamageRestore("first person ended");
+    WeaponParamsSync();
     if (rec && !S.speedApplied) {
         float sp = 0, m = 0;
         if (Rd(rec + oProjSpeed, sp) && Rd(rec + oProjMass, m) && std::fabs(sp - cfg.bulletSpeed) < 1.f) {
@@ -5362,6 +5468,57 @@ bool LeashSkipAhead(float ex, float ez, const float vel[2], float ed, float leas
     float along = -(ex * vel[0] + ez * vel[1]) / v;
     return along > 0.5f * ed && ed < leash + v * 0.5f + 2.f;
 }
+void CastHoldStep(double now) {
+    LONG req = InterlockedExchange(&g_castHoldReq, 0);
+    LONG wind = InterlockedExchange(&g_castHoldWindReq, 0);
+    if (req > 0) {
+        double until = now + req / 1000.0;
+        if (!S.castHold || S.castPhase == 2) {
+            bool again = S.castHold;
+            S.castHold = true;
+            S.castPhase = 1;
+            S.tCastHold = now;
+            S.castHoldUntil = until;
+            ++S.castHolds;
+            bool h = g_haltOk && IssueOvrHalt();
+            if (S.castHoldLogs++ < 60)
+                Log("cast-hold: start #%u%s - teleports paused, override released (entity halt %d), WASD held while the hero turns (up to %.2f s)",
+                    S.castHolds, again ? " (a new cast during a wind-up)" : "", h, req / 1000.0);
+        } else if (until > S.castHoldUntil) {
+            S.castHoldUntil = until;
+        }
+    }
+    if (wind > 0 && req >= 0) {
+        if (!S.castHold) {
+            S.castHold = true;
+            S.tCastHold = now;
+            ++S.castHolds;
+            bool h = g_haltOk && IssueOvrHalt();
+            if (S.castHoldLogs++ < 60) Log("cast-hold: start #%u at the wind-up (entity halt %d)", S.castHolds, h);
+        }
+        if (S.castPhase != 2) {
+            S.castPhase = 2;
+            S.tCastWind = now;
+            if (S.castHoldLogs++ < 60)
+                Log("cast-hold: wind-up %.2f s after the order - WASD free, the hero stays to finish the cast (up to %.2f s)", now - S.tCastHold,
+                    wind / 1000.0);
+        }
+        S.castHoldUntil = now + wind / 1000.0;
+    }
+    const char* why = nullptr;
+    if (S.castHold && req < 0)
+        why = "the script saw it go off, or gave up";
+    else if (S.castHold && now >= S.castHoldUntil)
+        why = S.castPhase == 2 ? "wind-up timeout" : "turn timeout";
+    if (why) {
+        if (S.castHoldLogs++ < 60)
+            Log("cast-hold: end after %.2f s (%s%s) - teleports resume, the hero is brought back to the camera", now - S.tCastHold, why,
+                S.castPhase == 2 ? ", wind-up phase" : ", turn phase");
+        S.castHold = false;
+        S.castPhase = 0;
+        S.castRepin = true;
+    }
+}
 void Apply(uintptr_t mgr) {
     double now = Now();
     uintptr_t ent = EntityByPath(S.unit, S.entPath);
@@ -5619,11 +5776,13 @@ void Apply(uintptr_t mgr) {
             }
             S.pinned = pinned;
         }
+        CastHoldStep(now);
+        if (S.castHold && S.castPhase == 1 && !S.ghostWanted) pinned = true;
         bool judged = false, follow = false;
         bool unbound = S.ghostWanted || S.airFar || S.air || (S.tLand > 0 && now - S.tLand < 0.5);
-        if (unbound || pinned) judged = true, follow = true;
+        if (unbound || pinned || S.castHold) judged = true, follow = true;
         for (const TpRec& r : S.tpHist) {
-            if (unbound || pinned) break;
+            if (unbound || pinned || S.castHold) break;
             if (r.t <= 0 || now - r.t > 0.45) continue;
             float fx = raw[0] - r.x, fz = raw[2] - r.z;
             if (fx * fx + fz * fz < 0.16f) follow = true;
@@ -6024,7 +6183,7 @@ void Apply(uintptr_t mgr) {
             unsigned sig = static_cast<unsigned>(S.bldBlocks) + S.blocks + static_cast<unsigned>(S.bodyLogs);
             if (sig != S.bumpSig) S.bumpSig = sig, S.tBump = now;
         }
-        if (cfg.leadAuto && cfg.tpLead > 0.f && dt > 0.f && !S.stuck && !paused && !unbound && !pinned && !S.air && now - S.tGuard > 0.5 &&
+        if (cfg.leadAuto && cfg.tpLead > 0.f && dt > 0.f && !S.stuck && !paused && !unbound && !pinned && !S.castHold && !S.air && now - S.tGuard > 0.5 &&
             (S.tLand < 0 || now - S.tLand > 0.5) && now - S.tLeashHit > 1.0 && now - S.tBump > 0.5 &&
             std::fabs(S.outPos[1] - S.footY) < 0.8f) {
             float v = std::sqrt(S.kinVel[0] * S.kinVel[0] + S.kinVel[1] * S.kinVel[1]);
@@ -6055,7 +6214,7 @@ void Apply(uintptr_t mgr) {
             S.leadPos[1] += vtz * L + (S.kinVel[1] - vtz) * f;
         }
         float tx = S.leadPos[0] - S.lastTp[0], tz = S.leadPos[1] - S.lastTp[1];
-        if (haveDest && !S.airFar && tx * tx + tz * tz > 0.02f * 0.02f && now - S.tLastTp >= cfg.tpInterval) {
+        if (haveDest && !S.airFar && !S.castHold && (tx * tx + tz * tz > 0.02f * 0.02f || S.castRepin) && now - S.tLastTp >= cfg.tpInterval) {
             float gx = S.leadPos[0], gz = S.leadPos[1];
             bool skipTp = false;
             if (cfg.tpShotGuard > 0.f && !S.ghost && !cfg.fireShooter) {
@@ -6115,6 +6274,7 @@ void Apply(uintptr_t mgr) {
                 S.lastTp[0] = gx;
                 S.lastTp[1] = gz;
                 S.tLastTp = now;
+                S.castRepin = false;
             }
         }
         S.camSpeed = std::sqrt(S.kinVel[0] * S.kinVel[0] + S.kinVel[1] * S.kinVel[1]);
@@ -6776,6 +6936,8 @@ bool VerifyGame() {
                        PrintsMatch(Prints(kUnitHaltPrints904), "silent unit halt");
         Log("move: silent unit halt when entering / leaving first person (BCQ_UNIT_ISSUE_HALT_COMMAND) %s (silent_halt=%d)",
             g_unitHaltOk ? "ok" : "OFF - falls back to the selection halt (the hero says STOP / Halt)", cfg.silentHalt);
+        g_mpFlagOk = PrintsMatch(Prints(kMpFlagPrints904), "multiplayer flag");
+        Log("custom weapon stats: multiplayer flag [battle+0x645c8] %s", g_mpFlagOk ? "ok" : "NOT verified - custom weapon stats stay off");
         g_ovrOk = o;
         g_tpOk = t;
         g_ghostOk = f && Ptr(g_base + kVtUnitEnableCmd) == g_base + kFnUnitEnableWrite && PrintsMatch(game->ghost, "ghost (unit enable)");
@@ -7647,6 +7809,21 @@ int ExitFirstPerson(void* L) {
     }
     return 0;
 }
+int CastHoldApi(void* L) {
+    float secs = f.type(L, 1) == kTNumber ? f.tonumber(L, 1) : 0.f;
+    int phase = f.type(L, 2) == kTNumber ? static_cast<int>(f.tonumber(L, 2)) : 1;
+    bool ok = S.active && cfg.castHold && S.lastMode == 0;
+    if (ok) {
+        if (secs <= 0.f)
+            InterlockedExchange(&g_castHoldReq, -1);
+        else if (phase == 2)
+            InterlockedExchange(&g_castHoldWindReq, static_cast<LONG>(std::fmax(1.f, std::fmin(secs, cfg.castHoldWindupMax) * 1000.f + 0.5f)));
+        else
+            InterlockedExchange(&g_castHoldReq, static_cast<LONG>(std::fmax(1.f, std::fmin(secs, cfg.castHoldMax) * 1000.f + 0.5f)));
+    }
+    f.pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
 int PushTable(void* L) {
     LONG n = InterlockedIncrement(&g_opens);
     if (!Resolve()) {
@@ -7658,7 +7835,8 @@ int PushTable(void* L) {
                                                         {"set_hud_rect", SetHudRect}, {"set_ui_covers", SetUiCoversApi}, {"ammo", Ammo}, {"cast_event", CastEvent},
                                                         {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson},
                                                         {"tac_stamina", TacStaminaApi}, {"refill_ammo", RefillAmmoApi}, {"prompt", Prompt}, {"refused", Refused}, {"status", Status},
-                                                        {"cast_marker", CastMarkerApi}, {"cast_target", CastTargetApi}, {"cast_point", CastPointApi}};
+                                                        {"cast_marker", CastMarkerApi}, {"cast_target", CastTargetApi}, {"cast_point", CastPointApi},
+                                                        {"cast_hold", CastHoldApi}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);

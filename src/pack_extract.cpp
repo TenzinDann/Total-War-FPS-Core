@@ -393,10 +393,13 @@ bool ExtractFromPack(const wchar_t* gameRoot, LogFn log) {
         if (ok) ++written;
         else {
             ++failed;
-            log("onepack: write failed for %s", rel.c_str());
+            bool removed = DeleteFileW(dst.c_str()) != 0;
+            log("onepack: write failed for %s%s", rel.c_str(), removed ? " - partial file removed" : "");
         }
     }
     CloseHandle(src);
+    if (!packcodec::BuiltinReason().empty())
+        log("onepack: tzc1: built-in MSZIP decoder used (%s)", packcodec::BuiltinReason().c_str());
     if (failed) {
         log("onepack: %zu of %zu files failed - not marking as extracted", failed, ours.size());
         return false;
