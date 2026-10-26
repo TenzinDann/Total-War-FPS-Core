@@ -208,6 +208,9 @@ const CodePrint kArmorPrints904[] = {
     {0x306ee40, 0x296, 0xa637304bb565fab0ull},
     {0x306b1a8, 0x8e4, 0x735cc3a5886923b0ull},
     {0x307517c, 0x68, 0xc7cbd99e65c01a48ull}};
+const CodePrint kMoraleLockPrints904[] = {
+    {0x3033e40, 0x31, 0x9c69c6976f544645ull},
+    {0x304c190, 0x1cd, 0x618f86e8ee295c36ull}};
 const CodePrint kAbilityPrints904[] = {
     {0x2f008d0, 0x27b, 0x594cd05ca9272710ull},
     {0x2ea94e8, 0xa0, 0x744ebda3b94ebcedull},
@@ -461,6 +464,8 @@ struct StatAttrCmd {
 constexpr uintptr_t oUnitAttrScript = 0x36f0;
 constexpr int32_t kAttrMeleeDisabled = 0x2a;
 bool g_meleeOk = false;
+constexpr int32_t kAttrUnbreakable = 0x15;
+bool g_moraleLockOk = false;
 bool g_shotOk = false;
 bool g_meleeHitOk = false;
 bool g_noKnockOk = false;
@@ -544,6 +549,7 @@ struct Config {
     bool ghost = false;
     bool revealEnemies = true;
     bool noMelee = true;
+    bool lockMorale = true;
     bool noKnock = true;
     bool superArmor = true;
     bool heroesOnly = true;
@@ -844,6 +850,7 @@ void LoadConfig() {
         cfg.wall, cfg.stepUp, cfg.stepDown, cfg.gravity, cfg.jumpHeight, cfg.airControl, cfg.airTpMax, cfg.landDip);
     cfg.revealEnemies = GetPrivateProfileIntW(L"hero", L"reveal_enemies", 1, ini) != 0;
     cfg.noMelee = GetPrivateProfileIntW(L"hero", L"no_melee", 1, ini) != 0;
+    cfg.lockMorale = GetPrivateProfileIntW(L"hero", L"lock_morale", 1, ini) != 0;
     cfg.noKnock = GetPrivateProfileIntW(L"hero", L"no_knockdown", 1, ini) != 0;
     cfg.superArmor = GetPrivateProfileIntW(L"hero", L"super_armor", 1, ini) != 0;
     cfg.heroesOnly = GetPrivateProfileIntW(L"hero", L"heroes_only", 1, ini) != 0;
@@ -1210,6 +1217,8 @@ struct State {
     unsigned pathRewrites = 0;
     uintptr_t meleeUnit = 0, meleeBattle = 0, meleeSkipUnit = 0;
     unsigned meleeLogs = 0;
+    uintptr_t moraleUnit = 0, moraleBattle = 0, moraleSkipUnit = 0;
+    unsigned moraleLogs = 0;
     int heroAlliance = -1;
     double tStat = 0;
     unsigned frames = 0, writes = 0, yields = 0;
@@ -1597,6 +1606,8 @@ void Enter(uintptr_t mgr) {
     S.pinLogs = 0;
     S.meleeSkipUnit = 0;
     S.meleeLogs = 0;
+    S.moraleSkipUnit = 0;
+    S.moraleLogs = 0;
     S.loggedProj = false;
     S.tAliveCheck = 0;
     S.shotLogs = S.moveLogs = S.latLogs = S.tpLogs = 0;
@@ -4062,6 +4073,37 @@ void MeleeStep() {
     }
     if (S.meleeLogs++ < 20)
         Log("melee: hero %p melee_disabled set (no melee, no fighting back; enemies can still hit it) issued %d", (void*)S.unit, ok);
+}
+void MoraleStep() {
+    bool want = S.active && !S.ghostWanted && cfg.lockMorale && g_moraleLockOk && S.unit;
+    if (!want && !S.moraleUnit) return;
+    uintptr_t battle = 0;
+    uintptr_t queue = CmdQueue(&battle);
+    if (S.moraleUnit && battle != S.moraleBattle) {
+        Log("morale: battle changed, forgetting unbreakable on %p", (void*)S.moraleUnit);
+        S.moraleUnit = 0;
+    }
+    if (S.moraleUnit && (!want || S.moraleUnit != S.unit)) {
+        if (!queue) return;
+        bool ok = IssueStatAttr(queue, S.moraleUnit, kAttrUnbreakable, false);
+        if (S.moraleLogs++ < 20) Log("morale: hero %p unbreakable removed - morale works as usual again (issued %d)", (void*)S.moraleUnit, ok);
+        S.moraleUnit = 0;
+    }
+    if (!want || S.moraleUnit || S.moraleSkipUnit == S.unit || !queue) return;
+    uint64_t bits = 0;
+    if (Rd(S.unit + oUnitAttrScript, bits) && (bits >> kAttrUnbreakable) & 1) {
+        S.moraleSkipUnit = S.unit;
+        Log("morale: hero %p already has unbreakable; left as it is", (void*)S.unit);
+        return;
+    }
+    bool ok = IssueStatAttr(queue, S.unit, kAttrUnbreakable, true);
+    if (ok) {
+        S.moraleUnit = S.unit;
+        S.moraleBattle = battle;
+    }
+    if (S.moraleLogs++ < 20)
+        Log("morale: hero %p unbreakable set (morale locked in first person: no wavering / routing; [hero] lock_morale=0 turns it off) issued %d",
+            (void*)S.unit, ok);
 }
 constexpr uintptr_t kVtKnockBack = 0x540, kVtKnockDown = 0x548, kVtKnockFlying = 0x550;
 struct NoKnock {
@@ -6720,6 +6762,8 @@ bool VerifyGame() {
         Log("ghost: reveal enemies (always visible) %s", g_revealOk ? "ok" : "OFF");
         g_meleeOk = f && Ptr(g_base + kVtStatAttrCmd) == g_base + kFnStatAttrWrite && PrintsMatch(game->melee, "no melee (stat attribute)");
         Log("hero: no-melee switch (melee_disabled) %s", g_meleeOk ? "ok" : "OFF");
+        g_moraleLockOk = g_meleeOk && PrintsMatch(Prints(kMoraleLockPrints904), "morale lock (unbreakable)");
+        Log("hero: morale lock in first person (unbreakable) %s", g_moraleLockOk ? "ok" : "OFF - morale can still break in first person");
         g_uiOk = PrintsMatch(game->ui, "battle hud hide");
         Log("ui: battle hud hiding %s", g_uiOk ? "ok" : "OFF");
         g_shotOk = PrintsMatch(game->shot, "fire owner / bullet speed");
@@ -7299,6 +7343,10 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     }
     const bool staleFp = InterlockedExchange(&g_staleFp, 0) != 0;
     InterlockedIncrement(&g_camBeat);
+    if (staleFp && S.moraleUnit) {
+        Log("morale: forgetting unbreakable on %p (left over from the previous battle)", (void*)S.moraleUnit);
+        S.moraleUnit = 0;
+    }
     if (g_fpDetached) {
         g_fpDetached = false;
         if (mgr == g_detachMgr && !staleFp) {
@@ -7330,6 +7378,7 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     if (S.active) Apply(mgr);
     RevealStep(mgr);
     MeleeStep();
+    MoraleStep();
     NoKnockStep();
     UiStep();
     CursorStep();
