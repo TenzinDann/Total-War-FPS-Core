@@ -4,6 +4,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "mszip_decode.h"
 namespace packcodec {
 constexpr unsigned kAlgMsZip = 2;
 enum class Kind { Plain, Compressed, Alias };
@@ -32,22 +33,27 @@ inline unsigned Crc32(const void* data, size_t n) {
     for (size_t i = 0; i < n; ++i) c = table[(c ^ p[i]) & 0xFF] ^ (c >> 8);
     return c ^ 0xFFFFFFFFu;
 }
+inline std::string& BuiltinReason() {
+    static std::string r;
+    return r;
+}
+inline bool Builtin(const char* in, size_t n, char* out, size_t outN, const char* why, std::string& err) {
+    if (BuiltinReason().empty()) BuiltinReason() = why;
+    return mszip::Decode(reinterpret_cast<const unsigned char*>(in), n, reinterpret_cast<unsigned char*>(out), outN, err);
+}
 inline bool MsZip(const char* in, size_t n, char* out, size_t outN, std::string& err) {
+#ifdef PACKCODEC_FORCE_BUILTIN
+    return Builtin(in, n, out, outN, "forced by PACKCODEC_FORCE_BUILTIN (offline test)", err);
+#else
     using CreateFn = BOOL(WINAPI*)(DWORD, void*, void**);
     using DecompressFn = BOOL(WINAPI*)(void*, const void*, SIZE_T, void*, SIZE_T, SIZE_T*);
     using CloseFn = BOOL(WINAPI*)(void*);
     static HMODULE mod = LoadLibraryExW(L"cabinet.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!mod) {
-        err = "cabinet.dll not available (err " + std::to_string(GetLastError()) + ")";
-        return false;
-    }
+    if (!mod) return Builtin(in, n, out, outN, "cabinet.dll not available", err);
     auto create = reinterpret_cast<CreateFn>(reinterpret_cast<void*>(GetProcAddress(mod, "CreateDecompressor")));
     auto decompress = reinterpret_cast<DecompressFn>(reinterpret_cast<void*>(GetProcAddress(mod, "Decompress")));
     auto close = reinterpret_cast<CloseFn>(reinterpret_cast<void*>(GetProcAddress(mod, "CloseDecompressor")));
-    if (!create || !decompress || !close) {
-        err = "cabinet.dll has no Decompress API";
-        return false;
-    }
+    if (!create || !decompress || !close) return Builtin(in, n, out, outN, "cabinet.dll has no Decompress API", err);
     void* h = nullptr;
     if (!create(kAlgMsZip, nullptr, &h)) {
         err = "CreateDecompressor failed (err " + std::to_string(GetLastError()) + ")";
@@ -62,6 +68,7 @@ inline bool MsZip(const char* in, size_t n, char* out, size_t outN, std::string&
         return false;
     }
     return true;
+#endif
 }
 inline bool Decode(const std::string& stored, std::string& raw, std::string& err) {
     if (stored.size() < 16 || memcmp(stored.data(), "TZC1", 4) != 0) {
