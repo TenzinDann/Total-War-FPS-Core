@@ -98,6 +98,10 @@ const CodePrint kCmdPrints904[] = {{0x1bb1924, 0x59, 0x7710609ca2576686ull},
 const CodePrint kOvrPrints904[] = {{0x2ecfb0c, 0xc7, 0x676e2663dc2d068dull},
                                   {0x2f6496c, 0x63, 0xb58bc000221fc6a1ull}};
 const CodePrint kHaltPrints904[] = {{0x2ecf98c, 0x59, 0xb4942d93f7bdd5a6ull}};
+constexpr uintptr_t kRegUnitHalt904 = 0x4af1a0, kFnUnitHaltFactory904 = 0x2ed5da4, kTypeUnitHalt904 = 0x406ca38;
+const CodePrint kUnitHaltPrints904[] = {{0x2ed5da4, 0x36, 0xf2992bea123bdfd1ull},
+                                       {0x2eaf754, 0x90, 0x2e660c50610378f1ull},
+                                       {0x2eeedd8, 0x38, 0x1e40299fca8b7e54ull}};
 const CodePrint kTpPrints904[] = {{0x2ecfbd4, 0xb3, 0x1987684e822436bdull},
                                  {0x2f64f54, 0x5a, 0xe98dc842affae2a9ull},
                                  {0x2f78b30, 0x167, 0xf7ff13396414fd5bull},
@@ -432,6 +436,7 @@ struct alignas(16) HaltCmdBuf {
 };
 bool g_tpOk = false;
 bool g_ovrOk = false, g_haltOk = false;
+bool g_unitHaltOk = false;
 constexpr uintptr_t oEntActivity = 0x324;
 struct EnableCmd {
     uintptr_t vt;
@@ -553,6 +558,7 @@ struct Config {
     bool noKnock = true;
     bool superArmor = true;
     bool heroesOnly = true;
+    bool silentHalt = true;
     bool fly = true, flyTakeoff = true;
     float flyAhead = 60.f, flyInterval = 2.0f, flyTurnDeg = 20.f, flyEyeHeight = 1.2f;
     bool shieldGame = true;
@@ -856,6 +862,7 @@ void LoadConfig() {
     cfg.noKnock = GetPrivateProfileIntW(L"hero", L"no_knockdown", 1, ini) != 0;
     cfg.superArmor = GetPrivateProfileIntW(L"hero", L"super_armor", 1, ini) != 0;
     cfg.heroesOnly = GetPrivateProfileIntW(L"hero", L"heroes_only", 1, ini) != 0;
+    cfg.silentHalt = GetPrivateProfileIntW(L"move", L"silent_halt", 1, ini) != 0;
     cfg.fly = GetPrivateProfileIntW(L"move", L"fly", 1, ini) != 0;
     cfg.flyTakeoff = GetPrivateProfileIntW(L"move", L"fly_takeoff", 1, ini) != 0;
     cfg.flyAhead = IniF(L"move", L"fly_ahead", cfg.flyAhead, ini);
@@ -1393,6 +1400,7 @@ void ReleaseMouse() {
 }
 bool IssueHalt();
 bool IssueDesiredFlying(bool fly);
+bool IssueQuietUnitHalt();
 bool StopMoving();
 int MoveMode();
 void HookRenderChild();
@@ -1720,7 +1728,7 @@ void Enter(uintptr_t mgr) {
             (unsigned long long)(f48 > g_base ? f48 - g_base : 0));
     }
     HookRenderChild();
-    if (g_moveOk && cfg.moveEnabled && (MoveMode() == 2 || MoveMode() == 0)) IssueHalt();
+    if (g_moveOk && cfg.moveEnabled && (MoveMode() == 2 || MoveMode() == 0)) IssueQuietUnitHalt();
     if (S.flyer && cfg.flyTakeoff && !flyAlways) IssueDesiredFlying(true);
     Log("FPS enter mgr=%p battle=%p fpCtrl=%p cam=%p prevActive=%p(vt %p) unit=%p entities=%u entity=%p "
         "pos=%.2f,%.2f,%.2f yaw=%.1f fov=%.4f near=%.3f(prev %.3f) far=%.1f camDone=%u selCount=%d",
@@ -3005,6 +3013,17 @@ bool IssueOvrHalt() {
     if (S.moveLogs++ < 12) Log("move(entity): halt issued=%d entityId=%d", ok, entId);
     return ok;
 }
+bool IssueQuietUnitHalt() {
+    if (!cfg.silentHalt || !g_unitHaltOk) return IssueHalt();
+    int32_t unitId = 0;
+    if (!S.unit || !Rd(S.unit + 8, unitId) || !unitId) {
+        Log("move: silent unit halt: no unit id for unit %p - using the selection halt", (void*)S.unit);
+        return IssueHalt();
+    }
+    bool ok = IssueOverride(kTypeUnitHalt904, [&](void* w) { BsWrite(w, 0x28, &unitId, 4); });
+    if (S.moveLogs++ < 12) Log("move: unit halt (silent, BCQ_UNIT_ISSUE_HALT_COMMAND) issued=%d unitId=%d", ok, unitId);
+    return ok;
+}
 bool MakeDestPm(uintptr_t pm, float x, float z, float* dest, uintptr_t hint) {
     using FnDest = void* (*)(uintptr_t, void*, const float*, uintptr_t, int);
     const float xz[2] = {x, z};
@@ -3539,7 +3558,7 @@ bool StopMoving() { return UseOverride() ? IssueOvrHalt() : IssueHalt(); }
 void ReleaseHero(int mode, const char* why) {
     bool h = false, u = false;
     if (mode != 1 && g_haltOk) h = IssueOvrHalt();
-    if (g_moveOk) u = IssueHalt();
+    if (g_moveOk) u = IssueQuietUnitHalt();
     Log("move: release hero (%s, mode %s) entity-halt=%d unit-halt=%d", why, ModeName(mode), h, u);
 }
 bool IssueUnitEnabled(bool enabled) {
@@ -6826,6 +6845,10 @@ bool VerifyGame() {
                               "BCQ_ENTITY_USER_OVERRIDE_ORDER_TELEPORT") &&
                  Ptr(g_base + kVtOvrTeleport + 8) == g_base + kFnOvrTeleportStart && PrintsMatch(game->tp, "entity teleport");
         g_haltOk = h;
+        g_unitHaltOk = base && CheckRegStub(kRegUnitHalt904, kFnUnitHaltFactory904, kTypeUnitHalt904, "BCQ_UNIT_ISSUE_HALT_COMMAND") &&
+                       PrintsMatch(Prints(kUnitHaltPrints904), "silent unit halt");
+        Log("move: silent unit halt when entering / leaving first person (BCQ_UNIT_ISSUE_HALT_COMMAND) %s (silent_halt=%d)",
+            g_unitHaltOk ? "ok" : "OFF - falls back to the selection halt (the hero says STOP / Halt)", cfg.silentHalt);
         g_ovrOk = o;
         g_tpOk = t;
         g_ghostOk = f && Ptr(g_base + kVtUnitEnableCmd) == g_base + kFnUnitEnableWrite && PrintsMatch(game->ghost, "ghost (unit enable)");
