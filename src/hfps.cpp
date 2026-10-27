@@ -1165,6 +1165,9 @@ struct State {
     uintptr_t footBlk = 0;
     bool air = false, airFar = false, spacePrev = false;
     double tAir = 0, tLand = -1, tWallCheck = 0;
+    bool jumping = false;
+    double tJump = -1;
+    unsigned jumpEdgeLogs = 0, jumpArchLogs = 0;
     unsigned jumps = 0, drops = 0, lands = 0, blocks = 0, wallLogs = 0;
     bool dropActive = false;
     float dropP0[2] = {0, 0}, dropDir[2] = {0, 0}, dropS = 0, dropTarget = 0, dropSpeed = 0;
@@ -3612,6 +3615,38 @@ float FindDropPush(float x0, float z0, float dx, float dz, float foot, float ste
     }
     return -1.f;
 }
+float FallTime(float vy, float h, float g) {
+    h = std::fmax(h, 0.1f);
+    return (vy + std::sqrt(vy * vy + 2.f * g * h)) / g;
+}
+int JumpOffEdge(const Surf* s, int n, float footNow, float startY, float stepDown) {
+    const int i = n ? PickSurface(s, n, kNoSurf, footNow, 0.05f) : -1;
+    return i >= 0 && s[i].h < startY - stepDown ? i : -1;
+}
+constexpr float kJumpHeadroom = 2.2f;
+template <class NetPass>
+bool AirCovered(const Surf* s, int n, float foot, float startY, float head, float stepDown, NetPass netPass, int* why) {
+    *why = 0;
+    bool over = false, stand = false;
+    for (int j = 0; j < n; ++j) {
+        if (s[j].h > foot + 0.3f) {
+            if (!s[j].blk || s[j].h <= foot + head) return true;
+            over = true;
+        } else if (s[j].blk && s[j].h >= startY - stepDown) {
+            stand = true;
+        }
+    }
+    if (!over) return false;
+    if (stand) {
+        *why = 1;
+        return false;
+    }
+    if (netPass()) {
+        *why = 2;
+        return false;
+    }
+    return true;
+}
 bool SurfaceNear(float x, float z, float refY, float* h, uintptr_t* blk) {
     Surf s[kMaxSurf];
     int n = SurfacesAt(x, z, s);
@@ -5853,6 +5888,9 @@ void Apply(uintptr_t mgr) {
             S.airStartY = S.footY;
             S.airGap = 0;
             S.tAir = now;
+            S.jumping = true;
+            S.tJump = now;
+            S.dropPolyN = 0;
             ++S.jumps;
             vmgame::MoveImpulse(1.f, 0.f);
             if (S.wallLogs++ < 80)
@@ -6116,20 +6154,33 @@ void Apply(uintptr_t mgr) {
                 }
             }
         }
+        const bool jumpLevel = S.air && S.jumping && S.tJump == S.tAir;
         if (S.air && !S.dropActive && ns) {
-            auto covered = [&](const Surf* s, int n) {
-                for (int j = 0; j < n; ++j)
-                    if (s[j].h > S.footY + 0.3f) return true;
-                return false;
+            RegionNet airNet;
+            int airNetOk = -1;
+            auto covered = [&](const Surf* s, int n, float px, float pz) {
+                bool old = false;
+                for (int j = 0; j < n; ++j) old = old || s[j].h > S.footY + 0.3f;
+                if (!old || !jumpLevel) return old;
+                int why = 0;
+                const bool c = AirCovered(s, n, S.footY, S.airStartY, kJumpHeadroom, cfg.stepDown, [&] {
+                    if (airNetOk < 0) airNetOk = cfg.wallBodyNet && g_netOk && RegionNetNow(&airNet) ? 1 : 0;
+                    uintptr_t hit = 0;
+                    return airNetOk == 1 && NetStep(airNet, prevKin[0], prevKin[1], px, pz, &hit) == 0;
+                }, &why);
+                if (!c && S.jumpArchLogs++ < 20)
+                    Log("wall: jump at %.2f,%.2f (foot %.2f, took off at %.2f) under a walkway / roof - %s, not a wall body", px, pz, S.footY,
+                        S.airStartY, why == 1 ? "the take-off layer goes on under it" : "the game's ground net lets it through (arch / open passage)");
+                return c;
             };
-            if (covered(sf, ns)) {
+            if (covered(sf, ns, S.kinPos[0], S.kinPos[1])) {
                 const float tryPos[2][2] = {{S.kinPos[0], prevKin[1]}, {prevKin[0], S.kinPos[1]}};
                 bool slid = false;
                 for (int k = 0; k < 2 && !slid; ++k) {
                     if (tryPos[k][0] == prevKin[0] && tryPos[k][1] == prevKin[1]) continue;
                     Surf s5[kMaxSurf];
                     int n5 = SurfacesAt(tryPos[k][0], tryPos[k][1], s5);
-                    if (n5 && !covered(s5, n5)) {
+                    if (n5 && !covered(s5, n5, tryPos[k][0], tryPos[k][1])) {
                         S.kinPos[0] = tryPos[k][0];
                         S.kinPos[1] = tryPos[k][1];
                         S.kinVel[k == 0 ? 1 : 0] = 0;
@@ -6146,6 +6197,62 @@ void Apply(uintptr_t mgr) {
                 }
                 if (S.blocks++ < 20) Log("wall: in the air, ran into a structure at %.2f,%.2f (foot %.2f) - %s", prevKin[0], prevKin[1], S.footY,
                                          slid ? "slid along one axis" : "held");
+            }
+        }
+        if (jumpLevel && !S.dropActive && S.footBlk && ns) {
+            const int ci = JumpOffEdge(sf, ns, S.footY, S.airStartY, cfg.stepDown);
+            if (ci >= 0) {
+                float dx = S.kinPos[0] - prevKin[0], dz = S.kinPos[1] - prevKin[1], dl = std::sqrt(dx * dx + dz * dz);
+                if (dl < 1e-4f) dx = S.kinVel[0], dz = S.kinVel[1], dl = std::sqrt(dx * dx + dz * dz);
+                if (dl < 1e-4f) dx = sy, dz = cy, dl = 1.f;
+                dx /= dl;
+                dz /= dl;
+                float drop0 = S.airStartY - sf[ci].h, gap = std::fmin(cfg.dropClearance, 0.5f + 0.3f * drop0), landH = sf[ci].h;
+                float v0 = std::sqrt(S.kinVel[0] * S.kinVel[0] + S.kinVel[1] * S.kinVel[1]);
+                float range = std::fmax(cfg.dropMaxPush, v0 * FallTime(S.vy, S.footY - landH, cfg.gravity));
+                float push = cfg.dropClearance <= 0.f ? 0.f
+                           : FindDropPush(S.kinPos[0], S.kinPos[1], dx, dz, S.airStartY, cfg.stepDown, range,
+                                          [&](float px, float pz) { return BlockNear(S.footBlk, px, pz, gap); },
+                                          [&](float px, float pz, Surf* o) { return SurfacesAt(px, pz, o); }, &landH);
+                bool clear = push >= 0.f;
+                uint32_t t3 = 0;
+                float h3[3] = {};
+                if (clear && cfg.building && g_buildOk && !S.bldInside) {
+                    float ahead = std::fmax(push, 1.5f) + 0.5f;
+                    const float q2[2] = {S.kinPos[0] + dx * ahead, S.kinPos[1] + dz * ahead};
+                    if (TallWallBetween(S.kinPos, q2, S.airStartY, &t3, h3)) clear = false;
+                }
+                if (!clear) {
+                    if (S.jumpEdgeLogs++ < 20)
+                        Log("wall: jumped over the edge at %.2f,%.2f (took off at %.2f, drop %.1f m) but %s - held, back onto the take-off layer",
+                            S.kinPos[0], S.kinPos[1], S.airStartY, drop0, push < 0.f ? "no clear landing within range (wall / tower below)"
+                                                                                      : "a tall building wall is right ahead");
+                    S.kinPos[0] = prevKin[0];
+                    S.kinPos[1] = prevKin[1];
+                    S.kinVel[0] = S.kinVel[1] = 0;
+                    ns = SurfacesAt(S.kinPos[0], S.kinPos[1], sf);
+                } else {
+                    const float tFall = FallTime(S.vy, S.footY - landH, cfg.gravity);
+                    const double tUp = now - S.tJump;
+                    S.jumping = false;
+                    S.tAir = now;
+                    ++S.drops;
+                    S.dropActive = push > 0.01f;
+                    S.dropP0[0] = S.kinPos[0];
+                    S.dropP0[1] = S.kinPos[1];
+                    S.dropDir[0] = dx;
+                    S.dropDir[1] = dz;
+                    S.dropS = 0;
+                    S.dropTarget = push;
+                    S.dropSpeed = std::fmin(20.f, std::fmax(cfg.dropPushSpeed, push / (0.8f * tFall)));
+                    S.dropPolyN = push > 0.01f ? CopyBlockPoly(S.footBlk, S.dropPoly, 16) : 0;
+                    S.dropGap = gap;
+                    S.dropKept = 0;
+                    if (S.jumpEdgeLogs++ < 20)
+                        Log("wall: jumped off the edge at %.2f,%.2f %.2f s after take-off (took off at %.2f, foot %.2f, up %.1f m/s) at %.1f m/s -> "
+                            "clear ground %.2f m out (clearance %.2f, below %.2f), min push %.1f m/s", S.kinPos[0], S.kinPos[1], tUp, S.airStartY,
+                            S.footY, S.vy, v0, push, gap, landH, S.dropSpeed);
+                }
             }
         }
         if (S.air) {
