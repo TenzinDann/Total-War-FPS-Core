@@ -84,6 +84,7 @@ SRWLOCK g_kickLock = SRWLOCK_INIT;
 volatile LONG g_kickShots = 0;
 kick::GunSpring g_gunKick;
 volatile LONG g_jlJumpMilli = 0, g_jlLandMilli = 0;
+volatile LONG g_jlCrouchMilli = 0;
 float g_jlX[2] = {}, g_jlV[2] = {};
 kick::Sustain g_sustain;
 kick::Jitter g_jitter;
@@ -354,14 +355,21 @@ volatile LONG g_infAmmo = 0;
 volatile LONG g_infTac = 0;
 volatile LONG g_wpOn = 0;
 volatile LONG g_wDmgPct[kMaxModels] = {};
-volatile LONG g_wPenSet[kMaxModels] = {};
+volatile LONG g_wRpmPct[kMaxModels] = {};
 volatile LONG g_catDmgPct[kMeleeCats] = {};
 volatile LONG g_catReachCm[kMeleeCats] = {};
 volatile LONG g_mpBattle = 1;
 inline bool WpLive() { return g_wpOn && !g_mpBattle; }
 float EffRpm(int i) {
     if (i < 0 || i >= kMaxModels) return 0.f;
-    return g_w[i].set.fireRpm;
+    float r = g_w[i].set.fireRpm;
+    LONG p = WpLive() ? g_wRpmPct[i] : 0;
+    if (r > 0.f && p > 0 && p != 100) {
+        r = r * static_cast<float>(p) / 100.f;
+        if (r > 2000.f) r = 2000.f;
+        if (r < 10.f) r = 10.f;
+    }
+    return r;
 }
 void RefreshFireRate() {
     int m = g_mag.loadedModel;
@@ -930,6 +938,7 @@ vm::Look ComputeLook() {
     {
         static const float kJlSpring[2] = {6.f, 0.45f};
         float jump = InterlockedExchange(&g_jlJumpMilli, 0) * 1e-3f, land = InterlockedExchange(&g_jlLandMilli, 0) * 1e-3f;
+        float crouch = InterlockedExchange(&g_jlCrouchMilli, 0) * 1e-3f;
         if (!g_fp) {
             g_jlX[0] = g_jlX[1] = g_jlV[0] = g_jlV[1] = 0.f;
         } else {
@@ -943,6 +952,10 @@ vm::Look ComputeLook() {
                 g_jlV[0] += kick::Impulse(-(0.012f + 0.030f * land) * k, kJlSpring[0], kJlSpring[1]);
                 g_jlV[1] += kick::Impulse(-(0.8f + 3.0f * land) * k, kJlSpring[0], kJlSpring[1]);
                 Wp().stepFoot.Play(Wp().set.stepFootVolume * (0.8f + 0.7f * land));
+            }
+            if (crouch != 0.f) {
+                g_jlV[0] += kick::Impulse(-0.008f * k * crouch, kJlSpring[0], kJlSpring[1]);
+                g_jlV[1] += kick::Impulse(-0.5f * k * crouch, kJlSpring[0], kJlSpring[1]);
             }
             kick::StepSprings(g_jlX, g_jlV, 2, kJlSpring, dt);
             l.kickPos[1] += g_jlX[0];
@@ -2046,8 +2059,8 @@ void UnloadWeapon(int i) {
 }
 struct WpEntry {
     char id[64];
-    float dmg, pen, reach;
-    bool hasDmg, hasPen, hasReach;
+    float dmg, rpm, reach;
+    bool hasDmg, hasRpm, hasReach;
 };
 const char* WpNum(const char* p, double* v) {
     bool neg = *p == '-';
@@ -2119,8 +2132,8 @@ int ParseWeaponParams(const char* s, WpEntry* out, int cap) {
             p = end;
             if (!strcmp(key, "damage"))
                 e.dmg = static_cast<float>(v), e.hasDmg = true;
-            else if (!strcmp(key, "pen"))
-                e.pen = static_cast<float>(v), e.hasPen = true;
+            else if (!strcmp(key, "rpm"))
+                e.rpm = static_cast<float>(v), e.hasRpm = true;
             else if (!strcmp(key, "reach"))
                 e.reach = static_cast<float>(v), e.hasReach = true;
         }
@@ -2138,7 +2151,7 @@ float WpClamp(float v, float lo, float hi) {
 }
 void LoadWeaponParams(const wchar_t* armoryPath, const char* flag) {
     static WpEntry ent[kMaxModels + kMeleeCats + 32];
-    LONG dmg[kMaxModels] = {}, pen[kMaxModels] = {}, cdmg[kMeleeCats] = {}, creach[kMeleeCats] = {};
+    LONG dmg[kMaxModels] = {}, rpm[kMaxModels] = {}, cdmg[kMeleeCats] = {}, creach[kMeleeCats] = {};
     const bool want = !strcmp(flag, "1");
     bool read = false;
     int nEnt = 0, nW = 0, nC = 0;
@@ -2181,21 +2194,15 @@ void LoadWeaponParams(const wchar_t* armoryPath, const char* flag) {
             snprintf(a, sizeof a, "%ls", g_w[i].set.weaponId);
             if (!a[0] || strcmp(a, w.id)) continue;
             if (w.hasDmg) dmg[i] = lround(WpClamp(w.dmg, 10.f, 300.f));
-            if (w.hasPen) pen[i] = lround(WpClamp(w.pen, 0.f, 20.f)) + 1;
+            if (w.hasRpm) rpm[i] = lround(WpClamp(w.rpm, 50.f, 200.f));
             ++nW;
-            if (ln >= 0 && ln < static_cast<int>(sizeof line)) {
-                char pn[16];
-                if (pen[i])
-                    snprintf(pn, sizeof pn, "%ld", pen[i] - 1);
-                else
-                    snprintf(pn, sizeof pn, "default");
-                ln += snprintf(line + ln, sizeof line - ln, " | %s dmg %ld%% pen %s", w.id, dmg[i] ? dmg[i] : 100L, pn);
-            }
+            if (ln >= 0 && ln < static_cast<int>(sizeof line))
+                ln += snprintf(line + ln, sizeof line - ln, " | %s dmg %ld%% rpm %ld%%", w.id, dmg[i] ? dmg[i] : 100L, rpm[i] ? rpm[i] : 100L);
         }
     }
     for (int i = 0; i < kMaxModels; ++i) {
         InterlockedExchange(&g_wDmgPct[i], dmg[i]);
-        InterlockedExchange(&g_wPenSet[i], pen[i]);
+        InterlockedExchange(&g_wRpmPct[i], rpm[i]);
     }
     for (int c = 0; c < kMeleeCats; ++c) {
         InterlockedExchange(&g_catDmgPct[c], cdmg[c]);
@@ -3450,6 +3457,9 @@ void ShieldGame(float* weight, float* moveScale, float* zoomKeep) {
     *zoomKeep = 1.f - (1.f - g_sh.zoomMilli * 1e-3f) * w;
 }
 float ShieldCamKick() { return InterlockedExchange(&g_sh.camKickMdeg, 0) * 1e-3f; }
+void CrouchImpulse(float s) {
+    InterlockedExchangeAdd(&g_jlCrouchMilli, static_cast<LONG>(s * 1000.f + (s < 0.f ? -0.5f : 0.5f)));
+}
 void MoveImpulse(float jump, float land) {
     if (jump > 0.f) InterlockedExchangeAdd(&g_jlJumpMilli, static_cast<LONG>(jump * 1000.f + 0.5f));
     if (land > 0.f) InterlockedExchangeAdd(&g_jlLandMilli, static_cast<LONG>(land * 1000.f + 0.5f));
@@ -3496,10 +3506,6 @@ const wchar_t* MeleeCatSection(int cat) { return cat >= 0 && cat < kMeleeCats ? 
 int WeaponDamagePct(int idx) {
     LONG p = (WpLive() && idx >= 0 && idx < kMaxModels) ? g_wDmgPct[idx] : 0;
     return p > 0 ? static_cast<int>(p) : 100;
-}
-int WeaponPenetration(int idx) {
-    LONG p = (WpLive() && idx >= 0 && idx < kMaxModels) ? g_wPenSet[idx] : 0;
-    return p > 0 ? static_cast<int>(p - 1) : -1;
 }
 float MeleeCatDamageMul(int cat) {
     LONG p = (WpLive() && cat >= 0 && cat < kMeleeCats) ? g_catDmgPct[cat] : 0;

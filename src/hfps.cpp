@@ -554,6 +554,9 @@ struct Config {
     float leadAutoTau = 1.5f;
     bool wall = true;
     float stepUp = 0.6f, stepDown = 0.8f, gravity = 20.3f, jumpHeight = 0.f, airControl = 0.35f, airTpMax = 1.5f, landDip = 0.12f;
+    bool crouch = true, crouchToggle = true;
+    unsigned crouchKey = VK_CONTROL;
+    float crouchEye = 0.65f, crouchSpeed = 0.5f, crouchTime = 0.2f;
     float dropClearance = 3.5f, dropPushSpeed = 6.f, dropMaxPush = 6.f;
     bool building = true;
     float bldLow = 1.f, bldHigh = 2.05f, bldSkin = 0.4f;
@@ -823,6 +826,18 @@ void LoadConfig() {
     cfg.airControl = IniF(L"move", L"air_control", 0.35f, ini);
     cfg.airTpMax = IniF(L"move", L"air_teleport_max", 1.5f, ini);
     cfg.landDip = IniF(L"move", L"land_dip", 0.12f, ini);
+    cfg.crouch = GetPrivateProfileIntW(L"move", L"crouch", 1, ini) != 0;
+    cfg.crouchKey = GetPrivateProfileIntW(L"move", L"crouch_key", VK_CONTROL, ini);
+    if (!(cfg.crouchKey > 0 && cfg.crouchKey < 0xFF)) cfg.crouchKey = VK_CONTROL;
+    cfg.crouchToggle = GetPrivateProfileIntW(L"move", L"crouch_toggle", 1, ini) != 0;
+    cfg.crouchEye = IniF(L"move", L"crouch_eye", 0.65f, ini);
+    cfg.crouchSpeed = IniF(L"move", L"crouch_speed", 0.5f, ini);
+    cfg.crouchTime = IniF(L"move", L"crouch_time", 0.2f, ini);
+    if (!(cfg.crouchEye >= 0.3f && cfg.crouchEye <= 1.f)) cfg.crouchEye = 0.65f;
+    if (!(cfg.crouchSpeed >= 0.1f && cfg.crouchSpeed <= 1.f)) cfg.crouchSpeed = 0.5f;
+    if (!(cfg.crouchTime >= 0.f && cfg.crouchTime <= 1.f)) cfg.crouchTime = 0.2f;
+    Log("crouch: enabled=%d key=0x%02X %s eye x%.2f speed x%.2f time %.2f s", cfg.crouch, cfg.crouchKey, cfg.crouchToggle ? "toggle" : "hold",
+        cfg.crouchEye, cfg.crouchSpeed, cfg.crouchTime);
     cfg.dropClearance = IniF(L"move", L"drop_clearance", 3.5f, ini);
     cfg.dropPushSpeed = IniF(L"move", L"drop_push_speed", 6.f, ini);
     cfg.dropMaxPush = IniF(L"move", L"drop_max_push", 6.f, ini);
@@ -1115,6 +1130,9 @@ struct State {
     double nextShot = 0;
     bool fireChain = false;
     bool sprint = false, tac = false, ads = false;
+    bool crouch = false, ctrlPrev = false, crouchLatch = false;
+    float crouchT = 0;
+    unsigned crouchLogs = 0;
     bool shiftPrev = false;
     float adsT = 0;
     double fireBlock = 0;
@@ -1594,6 +1612,9 @@ void Enter(uintptr_t mgr) {
     S.baseFov = S.lastFov = (std::isfinite(fov) && fov > 0.2f && fov < 2.8f) ? fov : 0.f;
     S.sprint = S.tac = S.ads = false;
     S.shiftPrev = true;
+    S.crouch = S.crouchLatch = false;
+    S.ctrlPrev = true;
+    S.crouchT = 0;
     S.adsT = 0;
     S.fireBlock = 0;
     S.adsKind = 0;
@@ -2765,96 +2786,6 @@ void WeaponParamsSync() {
         g_meleeReachAdd[c] = vmgame::MeleeCatReachAdd(c);
     }
 }
-constexpr size_t kPenRowBytes = 0x80;
-constexpr size_t kPenRowMin = 0x38;
-struct PenRow {
-    unsigned char b[kPenRowBytes];
-};
-struct ShotPenRec {
-    uintptr_t rec;
-    uintptr_t orig, set;
-    uintptr_t copyOf;
-    int32_t origCap, origN;
-    alignas(16) PenRow copy;
-};
-struct ShotPenState {
-    ShotPenRec r[32];
-    int n = 0;
-    int logs = 0;
-} g_spen;
-bool PenRowCopy(uintptr_t row, PenRow* out, int32_t* cap, int32_t* n) {
-    memset(out, 0, sizeof *out);
-    size_t got = 0;
-    for (; got < kPenRowBytes; got += 8) {
-        uint64_t q = 0;
-        if (!Rd(row + got, q)) break;
-        memcpy(out->b + got, &q, 8);
-    }
-    if (got < kPenRowMin) return false;
-    memcpy(cap, out->b + 0x08, 4);
-    memcpy(n, out->b + 0x30, 4);
-    return *cap >= 0 && *cap <= 5 && *n >= -1 && *n <= 1000;
-}
-void ShotPenApply(uintptr_t rec) {
-    if (!rec || rec != S.fpProj) return;
-    const char* key = vmgame::WeaponProjectile(S.projFor)[0] ? vmgame::WeaponProjectile(S.projFor) : cfg.fireProjectile;
-    if (!strstr(key, "fps")) return;
-    const int want = vmgame::WeaponPenetration(S.projFor);
-    uintptr_t cur = 0;
-    if (!Rd(rec + 0xe8, cur)) return;
-    ShotPenRec* d = nullptr;
-    for (int i = 0; i < g_spen.n && !d; ++i)
-        if (g_spen.r[i].rec == rec) d = &g_spen.r[i];
-    if (!d) {
-        if (want < 0 || !cur || g_spen.n >= 32) return;
-        d = &g_spen.r[g_spen.n++];
-        d->rec = rec;
-        d->orig = d->set = cur;
-        d->copyOf = 0;
-    } else if (cur != d->set && cur != reinterpret_cast<uintptr_t>(&d->copy)) {
-        d->orig = d->set = cur;
-    }
-    uintptr_t to = d->orig;
-    if (want >= 0 && d->orig) {
-        if (d->copyOf != d->orig) {
-            PenRow row;
-            int32_t cap = 0, n = 0;
-            if (PenRowCopy(d->orig, &row, &cap, &n)) {
-                memcpy(&d->copy, &row, sizeof row);
-                d->copyOf = d->orig;
-                d->origCap = cap, d->origN = n;
-            } else if (g_spen.logs++ < 16) {
-                Log("fire: custom penetration - weapon %d: projectile %p penetration row %p does not look like one (size cap %d, max %d) - left alone",
-                    S.projFor, (void*)rec, (void*)d->orig, cap, n);
-            }
-        }
-        if (d->copyOf == d->orig && want != d->origN) {
-            InterlockedExchange(reinterpret_cast<volatile LONG*>(d->copy.b + 0x30), want);
-            to = reinterpret_cast<uintptr_t>(&d->copy);
-        }
-    }
-    if (to != cur) {
-        Wr(rec + 0xe8, to);
-        if (g_spen.logs++ < 16)
-            Log("fire: custom penetration - weapon %d: projectile %p passes through %d (original %d, size cap %d, row %p%s)", S.projFor, (void*)rec,
-                to == d->orig ? d->origN : want, d->origN, d->origCap, (void*)d->orig, to == d->orig ? "" : " -> our copy");
-    }
-    d->set = to;
-}
-void ShotPenRestore(const char* why) {
-    int n = 0;
-    for (int i = 0; i < g_spen.n; ++i) {
-        ShotPenRec& d = g_spen.r[i];
-        if (d.set == d.orig) continue;
-        uintptr_t cur = 0;
-        if (Rd(d.rec + 0xe8, cur) && cur == d.set) {
-            Wr(d.rec + 0xe8, d.orig);
-            ++n;
-        }
-        d.set = d.orig;
-    }
-    if (n) Log("fire: custom penetration - %d projectile record(s) pointed back to their own penetration row (%s)", n, why);
-}
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
               int nBodies, float clearance) {
     uintptr_t sb = Ptr(g_base + kGlobalScript);
@@ -2879,7 +2810,6 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
         return false;
     }
     ShotDamageApply(proj);
-    ShotPenApply(proj);
     if (!S.loggedProj && proj) {
         S.loggedProj = true;
         float f[48] = {};
@@ -3737,6 +3667,31 @@ bool AirCovered(const Surf* s, int n, float foot, float startY, float head, floa
         return false;
     }
     return true;
+}
+bool CrouchWant(bool cur, bool key, bool keyPrev, bool toggle, bool standUp, bool* latch) {
+    if (toggle) {
+        *latch = false;
+        if (key && !keyPrev) cur = !cur;
+        return standUp ? false : cur;
+    }
+    if (!key) *latch = false;
+    if (standUp && key) *latch = true;
+    return key && !*latch;
+}
+float CrouchBlend(float t, bool want, float dt, float time) {
+    const float step = time > 1e-3f ? dt / time : 1.f;
+    t += want ? step : -step;
+    return t < 0.f ? 0.f : t > 1.f ? 1.f : t;
+}
+float CrouchEyeScale(float t, float eye) {
+    const float s = t * t * (3.f - 2.f * t);
+    return 1.f - (1.f - eye) * s;
+}
+bool CrouchKeyMsg(WPARAM w) {
+    const unsigned k = cfg.crouchKey;
+    if (w == k) return true;
+    if ((k == VK_LCONTROL || k == VK_RCONTROL) && w == VK_CONTROL) return true;
+    return (k == VK_LSHIFT || k == VK_RSHIFT) && w == VK_SHIFT;
 }
 bool SurfaceNear(float x, float z, float refY, float* h, uintptr_t* blk) {
     Surf s[kMaxSurf];
@@ -5006,7 +4961,6 @@ void ShotStep() {
     uintptr_t rec = active && cfg.bulletSpeed > 0.f && S.unit ? (S.fpProj ? S.fpProj : Ptr(S.unit + oUnitProjectile)) : 0;
     if (S.speedApplied && rec != S.speedRec) ShotRestoreSpeed(rec ? "weapon changed" : "first person ended");
     if (!active) ShotDamageRestore("first person ended");
-    if (!active) ShotPenRestore("first person ended");
     WeaponParamsSync();
     if (rec && !S.speedApplied) {
         float sp = 0, m = 0;
@@ -5838,6 +5792,24 @@ void Apply(uintptr_t mgr) {
                 S.tac = true;
         }
         TacStaminaStep(now, dt);
+        {
+            const bool ck = fg && cfg.crouch && !S.flyer && KeyDown(static_cast<int>(cfg.crouchKey));
+            if (ck && !S.ctrlPrev && S.sprint) {
+                S.fireBlock = now + (S.tac ? cfg.tacSprintToFire : cfg.sprintToFire);
+                S.exitTac = S.tac;
+                S.sprint = S.tac = false;
+            }
+            const bool was = S.crouch;
+            S.crouch = cfg.crouch && !S.flyer && CrouchWant(S.crouch, ck, S.ctrlPrev, cfg.crouchToggle, S.sprint && !wasSprint, &S.crouchLatch);
+            S.ctrlPrev = ck;
+            if (S.crouch != was) {
+                vmgame::CrouchImpulse(S.crouch ? 1.f : -1.f);
+                if (S.crouchLogs++ < 60)
+                    Log("stance: %s (%s%s)", S.crouch ? "crouch" : "stand up", cfg.crouchToggle ? "toggle" : "hold",
+                        !S.crouch && S.sprint ? ", sprint" : was && !S.crouch && !ck && !cfg.crouchToggle ? ", key released" : "");
+            }
+            S.crouchT = CrouchBlend(S.crouchT, S.crouch, dt, cfg.crouchTime);
+        }
         S.ads = rmb && !S.sprint && !reloading && !vmgame::MeleeActive();
         if (S.ads && !wasAds) S.adsKind = now < S.fireBlock ? (S.exitTac ? 2 : 1) : 0;
         if (!S.ads) S.adsKind = 0;
@@ -5972,6 +5944,7 @@ void Apply(uintptr_t mgr) {
         float spd = S.tac ? cfg.tacSprintSpeed
                     : S.sprint ? cfg.sprintSpeed : cfg.runSpeed * (1.f - (1.f - cfg.adsMoveScale) * S.adsT);
         spd *= shieldMove;
+        spd *= 1.f - (1.f - cfg.crouchSpeed) * S.crouchT;
         (void)run;
         bool space = fg && KeyDown(VK_SPACE);
         if (space && !S.spacePrev && !S.air && !pinned && !S.stuck && !paused && cfg.jumpHeight > 0.f) {
@@ -5983,6 +5956,12 @@ void Apply(uintptr_t mgr) {
             S.jumping = true;
             S.tJump = now;
             S.dropPolyN = 0;
+            if (S.crouch) {
+                S.crouchLatch = !cfg.crouchToggle && KeyDown(static_cast<int>(cfg.crouchKey));
+                S.crouch = false;
+                vmgame::CrouchImpulse(-1.f);
+                if (S.crouchLogs++ < 60) Log("stance: stand up (jump)");
+            }
             ++S.jumps;
             vmgame::MoveImpulse(1.f, 0.f);
             if (S.wallLogs++ < 80)
@@ -6562,7 +6541,7 @@ void Apply(uintptr_t mgr) {
     const float* vRight = kv.right;
     const float* vUp = kv.up;
     vmgame::PublishView(S.yaw, S.pitch, (S.flyer || (mode == 0 && S.air)) ? 0.f : S.camSpeed);
-    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : cfg.eyeHeight),
+    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : cfg.eyeHeight * CrouchEyeScale(S.crouchT, cfg.crouchEye)),
                     camPos[2] + cy * cfg.eyeForward};
     float target[3] = {eye[0] + vFwd[0] * 10.f, eye[1] + vFwd[1] * 10.f, eye[2] + vFwd[2] * 10.f};
     float up[3] = {0.f, 1.f, 0.f};
@@ -6935,6 +6914,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D')) return 0;
         if (S.active && cfg.wallUp && w == cfg.wallUpKey) return 0;
         if (S.active && w == VK_SPACE && cfg.jumpHeight > 0.f) return 0;
+        if (S.active && cfg.crouch && CrouchKeyMsg(w)) return 0;
         break;
     case WM_KEYUP:
     case WM_SYSKEYUP:
@@ -6950,6 +6930,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D' || w == 'R' || (w >= '1' && w <= '9'))) return 0;
         if (S.active && w == VK_SPACE && cfg.jumpHeight > 0.f) return 0;
+        if (S.active && cfg.crouch && CrouchKeyMsg(w)) return 0;
         if (S.active && ((vmgame::ShieldKey() && w == vmgame::ShieldKey()) || (vmgame::ShieldHitKey() && w == vmgame::ShieldHitKey()))) return 0;
         if (S.active && g_heroLauncher && vmgame::LauncherConfigured() &&
             (w == vmgame::LauncherFireKey() || w == vmgame::LauncherSwitchKey() || w == vmgame::LauncherFlameKey()))

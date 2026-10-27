@@ -75,6 +75,7 @@ void RequestReload();
 void SetFirstPerson(bool on);
 void PublishView(float yaw, float pitch, float speed);
 void MoveImpulse(float jump, float land);
+void CrouchImpulse(float s);
 void PublishStance(bool ads, bool sprint, bool tac, int adsKind = 0);
 void PublishAdsTime(float normal, float sprint, float tac);
 float CurrentAdsTime(int kind);
@@ -104,7 +105,6 @@ enum MeleeCatId { kMeleeCatShieldSpear, kMeleeCatSword, kMeleeCatHammer, kMeleeC
 int CurrentMeleeCat();
 const wchar_t* MeleeCatSection(int cat);
 int WeaponDamagePct(int idx);
-int WeaponPenetration(int idx);
 float MeleeCatDamageMul(int cat);
 float MeleeCatReachAdd(int cat);
 void SetMpBattle(bool mp);
