@@ -1112,6 +1112,8 @@ struct State {
     int adsKind = 0;
     bool exitTac = false;
     float baseFov = 0, lastFov = 0;
+    float scopeZoom = 0;
+    double tScope = 0;
     unsigned stanceLogs = 0;
     kick::CamKick camKick;
     unsigned shots = 0, shotsFailed = 0, shotLogs = 0;
@@ -5612,6 +5614,24 @@ void Apply(uintptr_t mgr) {
             }
         }
     }
+    {
+        const float sz = vmgame::ScopeCameraZoom();
+        float dtz = S.tScope > 0 ? static_cast<float>(now - S.tScope) : 0.f;
+        S.tScope = now;
+        if (!(dtz > 0.f)) dtz = 0.f;
+        if (dtz > 0.1f) dtz = 0.1f;
+        if (sz > 0.f) {
+            if (zoomCurve <= 0.001f || !(S.scopeZoom > 0.f)) {
+                S.scopeZoom = sz;
+            } else {
+                const float k = 1.f - std::exp(-dtz / 0.033f);
+                S.scopeZoom = std::exp(std::log(S.scopeZoom) + (std::log(sz) - std::log(S.scopeZoom)) * k);
+            }
+            zoomMax = std::fmax(1.f, S.scopeZoom);
+        } else {
+            S.scopeZoom = 0.f;
+        }
+    }
     float zoomNow = 1.f + (zoomMax - 1.f) * shieldZoom * zoomCurve;
     float rad = cfg.sensitivity * kPi / 180.f / zoomNow;
     S.yaw += dx * rad;
@@ -6731,7 +6751,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         break;
     case WM_MOUSEWHEEL:
         if (S.active) {
-            vmgame::CycleWeapon(GET_WHEEL_DELTA_WPARAM(w) < 0 ? 1 : -1);
+            if (!vmgame::ScopeWheel(GET_WHEEL_DELTA_WPARAM(w))) vmgame::CycleWeapon(GET_WHEEL_DELTA_WPARAM(w) < 0 ? 1 : -1);
             return 0;
         }
         break;
@@ -6783,7 +6803,7 @@ LRESULT CALLBACK HfpsChildWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         break;
     case WM_MOUSEWHEEL:
         if (S.active) {
-            vmgame::CycleWeapon(GET_WHEEL_DELTA_WPARAM(w) < 0 ? 1 : -1);
+            if (!vmgame::ScopeWheel(GET_WHEEL_DELTA_WPARAM(w))) vmgame::CycleWeapon(GET_WHEEL_DELTA_WPARAM(w) < 0 ? 1 : -1);
             return 0;
         }
         break;

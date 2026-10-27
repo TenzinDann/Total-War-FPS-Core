@@ -3030,7 +3030,24 @@ void AmmoRefillStep() {
     }
     g_log("weapon: ability ammo refill %.3f of total -> %d weapon(s) topped up", m / 1000.0, done);
 }
+volatile LONG g_scopeLvlP1[kMaxModels] = {};
+int g_scopeWheelAcc = 0;
+int ScopeLevelIdx(int i) {
+    if (i < 0 || i >= g_modelCount || i >= kMaxModels) return -1;
+    const auto& s = g_w[i].set;
+    if (s.scopeLevelCount < 1) return -1;
+    const LONG v = g_scopeLvlP1[i];
+    const int k = v > 0 ? static_cast<int>(v) - 1 : s.scopeLevelDefault;
+    return k < 0 ? 0 : k >= s.scopeLevelCount ? s.scopeLevelCount - 1 : k;
+}
 void RefillForNewBattle() {
+    for (int i = 0; i < kMaxModels; ++i) InterlockedExchange(&g_scopeLvlP1[i], 0);
+    for (int i = 0; i < g_modelCount && i < kMaxModels; ++i) {
+        const auto& s = g_w[i].set;
+        if (s.scopeLevelCount > 0)
+            g_log("scope: %ls zoom levels %d (%.1fx - %.1fx), default %.1fx, wheel while aiming", s.weaponId, s.scopeLevelCount, s.scopeLevels[0],
+                  s.scopeLevels[s.scopeLevelCount - 1], s.scopeLevels[s.scopeLevelDefault]);
+    }
     InterlockedExchange(&g_refillMilli, 0);
     for (int i = 0; i < g_modelCount && i < kMaxModels; ++i) {
         const auto& s = g_w[i].set;
@@ -3403,6 +3420,34 @@ void MeleeHitFeedback(int hits) {
 }
 const char* WeaponProjectile(int idx) { return idx >= 0 && idx < g_modelCount ? g_w[idx].set.projectile : ""; }
 float WeaponFireRange(int idx) { return idx >= 0 && idx < g_modelCount ? g_w[idx].set.fireRange : 0.f; }
+bool ScopeWheel(int delta) {
+    const int i = g_modelIdx;
+    const int k = ScopeLevelIdx(i);
+    if (!Enabled() || !g_fp || !(g_stance & 1) || k < 0) {
+        g_scopeWheelAcc = 0;
+        return false;
+    }
+    g_scopeWheelAcc += delta;
+    int n = k;
+    while (g_scopeWheelAcc >= 120) g_scopeWheelAcc -= 120, ++n;
+    while (g_scopeWheelAcc <= -120) g_scopeWheelAcc += 120, --n;
+    const auto& s = g_w[i].set;
+    if (n < 0) n = 0;
+    if (n >= s.scopeLevelCount) n = s.scopeLevelCount - 1;
+    if (n != k) {
+        InterlockedExchange(&g_scopeLvlP1[i], n + 1);
+        g_log("scope: %ls zoom %.1fx -> %.1fx (wheel)", s.weaponId, s.scopeLevels[k], s.scopeLevels[n]);
+    }
+    return true;
+}
+float ScopeCameraZoom() {
+    const int i = g_modelIdx;
+    const int k = ScopeLevelIdx(i);
+    if (k < 0) return 0.f;
+    const auto& s = g_w[i].set;
+    const float mag = s.scopeLevels[k];
+    return s.scopeZoom > 1.f ? mag / s.scopeZoom : mag;
+}
 float CurrentAdsTime(int kind) {
     LONG us = kind >= 0 && kind < 3 ? g_curAdsUs[kind] : 0;
     return us > 0 ? us * 1e-6f : 0.f;

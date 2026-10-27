@@ -60,6 +60,8 @@ bool InfTacStamina();
 bool StartMagReload();
 void SelectWeapon(int n);
 void CycleWeapon(int dir);
+bool ScopeWheel(int delta);
+float ScopeCameraZoom();
 bool Busy();
 void SetTrigger(bool held);
 int CurrentWeapon();
