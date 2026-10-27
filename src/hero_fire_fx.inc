@@ -61,7 +61,7 @@ void LogListeners(uintptr_t lis) {
 bool Install(uintptr_t battle, uintptr_t heroEntity, uintptr_t projRecord) {
     if (g.keepFx < 0) {
         wchar_t ini[MAX_PATH];
-        swprintf(ini, MAX_PATH, L"%ls\\%ls", g_dir, MainIniName());
+        swprintf(ini, MAX_PATH, L"%ls\\tenzin_fps.ini", g_dir);
         g.keepFx = GetPrivateProfileIntW(L"fire", L"hero_weapon_fx", 0, ini) != 0;
     }
     if (g.keepFx) {
