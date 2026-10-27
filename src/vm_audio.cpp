@@ -11,6 +11,29 @@ IXAudio2MasteringVoice* g_master = nullptr;
 bool g_xaTried = false, g_xaOk = false;
 constexpr float kMasterGain = 0.56234133f;
 float g_gameGain = 1.f;
+IXAudio2SourceVoice* g_clock = nullptr;
+unsigned g_clockRate = 0;
+alignas(16) unsigned char g_zero[65536] = {};
+struct PassClock final : IXAudio2EngineCallback {
+    volatile LONG seq = 0;
+    volatile LONG started = 0;
+    volatile LONG endIdx = 0;
+    volatile long long endAt = -1;
+    volatile long long quantum = 0;
+    void STDMETHODCALLTYPE OnProcessingPassStart() override { InterlockedIncrement(&started); }
+    void STDMETHODCALLTYPE OnProcessingPassEnd() override {
+        if (!g_clock) return;
+        XAUDIO2_VOICE_STATE st = {};
+        g_clock->GetState(&st, 0);
+        long long s = static_cast<long long>(st.SamplesPlayed);
+        InterlockedIncrement(&seq);
+        if (endAt >= 0 && s > endAt && s - endAt <= 8192) quantum = s - endAt;
+        endAt = s;
+        endIdx = started;
+        InterlockedIncrement(&seq);
+    }
+    void STDMETHODCALLTYPE OnCriticalError(HRESULT) override {}
+} g_pass;
 bool EngineLocked(char* err, size_t errLen) {
     if (g_xaTried) {
         if (!g_xaOk) snprintf(err, errLen, "xaudio2 unavailable");
@@ -44,6 +67,33 @@ bool EngineLocked(char* err, size_t errLen) {
         return false;
     }
     g_master->SetVolume(kMasterGain * g_gameGain);
+    {
+        XAUDIO2_VOICE_DETAILS d = {};
+        g_master->GetVoiceDetails(&d);
+        WAVEFORMATEX cf = {};
+        cf.wFormatTag = WAVE_FORMAT_PCM;
+        cf.nChannels = 1;
+        cf.nSamplesPerSec = d.InputSampleRate >= 8000 ? d.InputSampleRate : 48000;
+        cf.wBitsPerSample = 16;
+        cf.nBlockAlign = 2;
+        cf.nAvgBytesPerSec = cf.nSamplesPerSec * 2;
+        if (SUCCEEDED(g_xa->CreateSourceVoice(&g_clock, &cf)) && g_clock) {
+            XAUDIO2_BUFFER zb = {};
+            zb.AudioBytes = sizeof g_zero;
+            zb.pAudioData = g_zero;
+            zb.LoopCount = XAUDIO2_LOOP_INFINITE;
+            g_clock->SetVolume(0.f);
+            if (SUCCEEDED(g_clock->SubmitSourceBuffer(&zb)) && SUCCEEDED(g_clock->Start(0))) {
+                g_clockRate = cf.nSamplesPerSec;
+                g_xa->RegisterForCallbacks(&g_pass);
+            } else {
+                g_clock->DestroyVoice();
+                g_clock = nullptr;
+            }
+        } else {
+            g_clock = nullptr;
+        }
+    }
     g_xaOk = true;
     return true;
 }
@@ -369,6 +419,94 @@ void GunSound::Play(float volume, bool loop, float pitch) {
         v->Start(0);
         started_[pick] = now;
     }
+}
+long long GunSound::ClockSamples() {
+    if (!g_clock || !g_clockRate) return -1;
+    for (int i = 0; i < 16; ++i) {
+        LONG q1 = g_pass.seq;
+        MemoryBarrier();
+        if (q1 & 1) {
+            YieldProcessor();
+            continue;
+        }
+        long long at = g_pass.endAt, qn = g_pass.quantum;
+        LONG idx = g_pass.endIdx, s = g_pass.started;
+        MemoryBarrier();
+        if (g_pass.seq != q1) continue;
+        if (at < 0) break;
+        if (qn <= 0) qn = g_clockRate / 100;
+        return at + static_cast<long long>(s - idx) * qn;
+    }
+    XAUDIO2_VOICE_STATE st = {};
+    g_clock->GetState(&st, 0);
+    return static_cast<long long>(st.SamplesPlayed);
+}
+unsigned GunSound::ClockRate() { return g_clock ? g_clockRate : 0; }
+long long GunSound::PlayAt(float volume, long long targetSample) {
+    long long clk = ClockSamples();
+    if (clk < 0 || targetSample < 0 || !nPcm_ || !nVoices_) {
+        Play(volume);
+        return 0;
+    }
+    int vi = 0;
+    if (nPcm_ > 1) {
+        rng_ = rng_ * 1664525u + 1013904223u;
+        vi = static_cast<int>((rng_ >> 8) % static_cast<unsigned>(nPcm_ - 1));
+        if (last_ >= 0 && vi >= last_) ++vi;
+    }
+    last_ = vi;
+    double now = NowS();
+    int busy = 0, oldest = -1, freeV = -1;
+    for (int i = 0; i < nVoices_; ++i) {
+        XAUDIO2_VOICE_STATE st = {};
+        voices_[i]->GetState(&st, XAUDIO2_VOICE_NOSAMPLESPLAYED);
+        if (st.BuffersQueued == 0) {
+            fadeAt_[i] = 0;
+            if (freeV < 0) freeV = i;
+        } else if (fadeAt_[i] <= 0) {
+            ++busy;
+            if (oldest < 0 || started_[i] < started_[oldest]) oldest = i;
+        }
+    }
+    if (busy >= maxVoices_ && oldest >= 0) fadeAt_[oldest] = now;
+    int pick = freeV;
+    if (pick < 0) {
+        for (int i = 0; i < nVoices_; ++i)
+            if (pick < 0 || started_[i] < started_[pick]) pick = i;
+        voices_[pick]->Stop(0);
+        voices_[pick]->FlushSourceBuffers();
+    }
+    fadeAt_[pick] = 0;
+    if (volume < 0.f) volume = 0.f;
+    if (volume > 2.f) volume = 2.f;
+    IXAudio2SourceVoice* v = voices_[pick];
+    v->SetVolume(volume);
+    v->SetFrequencyRatio(1.f);
+    vol_[pick] = volume;
+    long long d = targetSample - clk;
+    if (d > 0) {
+        long long pad = d * static_cast<long long>(fmt_.nSamplesPerSec) / static_cast<long long>(g_clockRate);
+        long long cap = static_cast<long long>(fmt_.nSamplesPerSec) / 2;
+        if (pad > cap) pad = cap;
+        const long long chunk = static_cast<long long>(sizeof g_zero) / fmt_.nBlockAlign;
+        while (pad > 0) {
+            long long n = pad < chunk ? pad : chunk;
+            XAUDIO2_BUFFER z = {};
+            z.AudioBytes = static_cast<UINT32>(n * fmt_.nBlockAlign);
+            z.pAudioData = g_zero;
+            if (FAILED(v->SubmitSourceBuffer(&z))) break;
+            pad -= n;
+        }
+    }
+    XAUDIO2_BUFFER buf = {};
+    buf.AudioBytes = bytesV_[vi];
+    buf.pAudioData = pcmV_[vi];
+    buf.Flags = XAUDIO2_END_OF_STREAM;
+    if (SUCCEEDED(v->SubmitSourceBuffer(&buf))) {
+        v->Start(0);
+        started_[pick] = now;
+    }
+    return d;
 }
 void GunSound::FadeAll() {
     double now = NowS();

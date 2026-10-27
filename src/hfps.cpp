@@ -551,6 +551,9 @@ struct Config {
     float leadAutoTau = 1.5f;
     bool wall = true;
     float stepUp = 0.6f, stepDown = 0.8f, gravity = 20.3f, jumpHeight = 0.f, airControl = 0.35f, airTpMax = 1.5f, landDip = 0.12f;
+    bool crouch = true, crouchToggle = true;
+    unsigned crouchKey = VK_CONTROL;
+    float crouchEye = 0.65f, crouchSpeed = 0.5f, crouchTime = 0.2f;
     float dropClearance = 3.5f, dropPushSpeed = 6.f, dropMaxPush = 6.f;
     bool building = true;
     float bldLow = 1.f, bldHigh = 2.05f, bldSkin = 0.4f;
@@ -820,6 +823,18 @@ void LoadConfig() {
     cfg.airControl = IniF(L"move", L"air_control", 0.35f, ini);
     cfg.airTpMax = IniF(L"move", L"air_teleport_max", 1.5f, ini);
     cfg.landDip = IniF(L"move", L"land_dip", 0.12f, ini);
+    cfg.crouch = GetPrivateProfileIntW(L"move", L"crouch", 1, ini) != 0;
+    cfg.crouchKey = GetPrivateProfileIntW(L"move", L"crouch_key", VK_CONTROL, ini);
+    if (!(cfg.crouchKey > 0 && cfg.crouchKey < 0xFF)) cfg.crouchKey = VK_CONTROL;
+    cfg.crouchToggle = GetPrivateProfileIntW(L"move", L"crouch_toggle", 1, ini) != 0;
+    cfg.crouchEye = IniF(L"move", L"crouch_eye", 0.65f, ini);
+    cfg.crouchSpeed = IniF(L"move", L"crouch_speed", 0.5f, ini);
+    cfg.crouchTime = IniF(L"move", L"crouch_time", 0.2f, ini);
+    if (!(cfg.crouchEye >= 0.3f && cfg.crouchEye <= 1.f)) cfg.crouchEye = 0.65f;
+    if (!(cfg.crouchSpeed >= 0.1f && cfg.crouchSpeed <= 1.f)) cfg.crouchSpeed = 0.5f;
+    if (!(cfg.crouchTime >= 0.f && cfg.crouchTime <= 1.f)) cfg.crouchTime = 0.2f;
+    Log("crouch: enabled=%d key=0x%02X %s eye x%.2f speed x%.2f time %.2f s", cfg.crouch, cfg.crouchKey, cfg.crouchToggle ? "toggle" : "hold",
+        cfg.crouchEye, cfg.crouchSpeed, cfg.crouchTime);
     cfg.dropClearance = IniF(L"move", L"drop_clearance", 3.5f, ini);
     cfg.dropPushSpeed = IniF(L"move", L"drop_push_speed", 6.f, ini);
     cfg.dropMaxPush = IniF(L"move", L"drop_max_push", 6.f, ini);
@@ -1112,12 +1127,17 @@ struct State {
     double nextShot = 0;
     bool fireChain = false;
     bool sprint = false, tac = false, ads = false;
+    bool crouch = false, ctrlPrev = false, crouchLatch = false;
+    float crouchT = 0;
+    unsigned crouchLogs = 0;
     bool shiftPrev = false;
     float adsT = 0;
     double fireBlock = 0;
     int adsKind = 0;
     bool exitTac = false;
     float baseFov = 0, lastFov = 0;
+    float scopeZoom = 0;
+    double tScope = 0;
     unsigned stanceLogs = 0;
     kick::CamKick camKick;
     unsigned shots = 0, shotsFailed = 0, shotLogs = 0;
@@ -1160,6 +1180,9 @@ struct State {
     uintptr_t footBlk = 0;
     bool air = false, airFar = false, spacePrev = false;
     double tAir = 0, tLand = -1, tWallCheck = 0;
+    bool jumping = false;
+    double tJump = -1;
+    unsigned jumpEdgeLogs = 0, jumpArchLogs = 0;
     unsigned jumps = 0, drops = 0, lands = 0, blocks = 0, wallLogs = 0;
     bool dropActive = false;
     float dropP0[2] = {0, 0}, dropDir[2] = {0, 0}, dropS = 0, dropTarget = 0, dropSpeed = 0;
@@ -1586,6 +1609,9 @@ void Enter(uintptr_t mgr) {
     S.baseFov = S.lastFov = (std::isfinite(fov) && fov > 0.2f && fov < 2.8f) ? fov : 0.f;
     S.sprint = S.tac = S.ads = false;
     S.shiftPrev = true;
+    S.crouch = S.crouchLatch = false;
+    S.ctrlPrev = true;
+    S.crouchT = 0;
     S.adsT = 0;
     S.fireBlock = 0;
     S.adsKind = 0;
@@ -3524,6 +3550,63 @@ float FindDropPush(float x0, float z0, float dx, float dz, float foot, float ste
         return s;
     }
     return -1.f;
+}
+float FallTime(float vy, float h, float g) {
+    h = std::fmax(h, 0.1f);
+    return (vy + std::sqrt(vy * vy + 2.f * g * h)) / g;
+}
+int JumpOffEdge(const Surf* s, int n, float footNow, float startY, float stepDown) {
+    const int i = n ? PickSurface(s, n, kNoSurf, footNow, 0.05f) : -1;
+    return i >= 0 && s[i].h < startY - stepDown ? i : -1;
+}
+constexpr float kJumpHeadroom = 2.2f;
+template <class NetPass>
+bool AirCovered(const Surf* s, int n, float foot, float startY, float head, float stepDown, NetPass netPass, int* why) {
+    *why = 0;
+    bool over = false, stand = false;
+    for (int j = 0; j < n; ++j) {
+        if (s[j].h > foot + 0.3f) {
+            if (!s[j].blk || s[j].h <= foot + head) return true;
+            over = true;
+        } else if (s[j].blk && s[j].h >= startY - stepDown) {
+            stand = true;
+        }
+    }
+    if (!over) return false;
+    if (stand) {
+        *why = 1;
+        return false;
+    }
+    if (netPass()) {
+        *why = 2;
+        return false;
+    }
+    return true;
+}
+bool CrouchWant(bool cur, bool key, bool keyPrev, bool toggle, bool standUp, bool* latch) {
+    if (toggle) {
+        *latch = false;
+        if (key && !keyPrev) cur = !cur;
+        return standUp ? false : cur;
+    }
+    if (!key) *latch = false;
+    if (standUp && key) *latch = true;
+    return key && !*latch;
+}
+float CrouchBlend(float t, bool want, float dt, float time) {
+    const float step = time > 1e-3f ? dt / time : 1.f;
+    t += want ? step : -step;
+    return t < 0.f ? 0.f : t > 1.f ? 1.f : t;
+}
+float CrouchEyeScale(float t, float eye) {
+    const float s = t * t * (3.f - 2.f * t);
+    return 1.f - (1.f - eye) * s;
+}
+bool CrouchKeyMsg(WPARAM w) {
+    const unsigned k = cfg.crouchKey;
+    if (w == k) return true;
+    if ((k == VK_LCONTROL || k == VK_RCONTROL) && w == VK_CONTROL) return true;
+    return (k == VK_LSHIFT || k == VK_RSHIFT) && w == VK_SHIFT;
 }
 bool SurfaceNear(float x, float z, float refY, float* h, uintptr_t* blk) {
     Surf s[kMaxSurf];
@@ -5535,6 +5618,24 @@ void Apply(uintptr_t mgr) {
             }
         }
     }
+    {
+        const float sz = vmgame::ScopeCameraZoom();
+        float dtz = S.tScope > 0 ? static_cast<float>(now - S.tScope) : 0.f;
+        S.tScope = now;
+        if (!(dtz > 0.f)) dtz = 0.f;
+        if (dtz > 0.1f) dtz = 0.1f;
+        if (sz > 0.f) {
+            if (zoomCurve <= 0.001f || !(S.scopeZoom > 0.f)) {
+                S.scopeZoom = sz;
+            } else {
+                const float k = 1.f - std::exp(-dtz / 0.033f);
+                S.scopeZoom = std::exp(std::log(S.scopeZoom) + (std::log(sz) - std::log(S.scopeZoom)) * k);
+            }
+            zoomMax = std::fmax(1.f, S.scopeZoom);
+        } else {
+            S.scopeZoom = 0.f;
+        }
+    }
     float zoomNow = 1.f + (zoomMax - 1.f) * shieldZoom * zoomCurve;
     float rad = cfg.sensitivity * kPi / 180.f / zoomNow;
     S.yaw += dx * rad;
@@ -5604,6 +5705,24 @@ void Apply(uintptr_t mgr) {
                 S.tac = true;
         }
         TacStaminaStep(now, dt);
+        {
+            const bool ck = fg && cfg.crouch && !S.flyer && KeyDown(static_cast<int>(cfg.crouchKey));
+            if (ck && !S.ctrlPrev && S.sprint) {
+                S.fireBlock = now + (S.tac ? cfg.tacSprintToFire : cfg.sprintToFire);
+                S.exitTac = S.tac;
+                S.sprint = S.tac = false;
+            }
+            const bool was = S.crouch;
+            S.crouch = cfg.crouch && !S.flyer && CrouchWant(S.crouch, ck, S.ctrlPrev, cfg.crouchToggle, S.sprint && !wasSprint, &S.crouchLatch);
+            S.ctrlPrev = ck;
+            if (S.crouch != was) {
+                vmgame::CrouchImpulse(S.crouch ? 1.f : -1.f);
+                if (S.crouchLogs++ < 60)
+                    Log("stance: %s (%s%s)", S.crouch ? "crouch" : "stand up", cfg.crouchToggle ? "toggle" : "hold",
+                        !S.crouch && S.sprint ? ", sprint" : was && !S.crouch && !ck && !cfg.crouchToggle ? ", key released" : "");
+            }
+            S.crouchT = CrouchBlend(S.crouchT, S.crouch, dt, cfg.crouchTime);
+        }
         S.ads = rmb && !S.sprint && !reloading && !vmgame::MeleeActive();
         if (S.ads && !wasAds) S.adsKind = now < S.fireBlock ? (S.exitTac ? 2 : 1) : 0;
         if (!S.ads) S.adsKind = 0;
@@ -5738,6 +5857,7 @@ void Apply(uintptr_t mgr) {
         float spd = S.tac ? cfg.tacSprintSpeed
                     : S.sprint ? cfg.sprintSpeed : cfg.runSpeed * (1.f - (1.f - cfg.adsMoveScale) * S.adsT);
         spd *= shieldMove;
+        spd *= 1.f - (1.f - cfg.crouchSpeed) * S.crouchT;
         (void)run;
         bool space = fg && KeyDown(VK_SPACE);
         if (space && !S.spacePrev && !S.air && !pinned && !S.stuck && !paused && cfg.jumpHeight > 0.f) {
@@ -5746,6 +5866,15 @@ void Apply(uintptr_t mgr) {
             S.airStartY = S.footY;
             S.airGap = 0;
             S.tAir = now;
+            S.jumping = true;
+            S.tJump = now;
+            S.dropPolyN = 0;
+            if (S.crouch) {
+                S.crouchLatch = !cfg.crouchToggle && KeyDown(static_cast<int>(cfg.crouchKey));
+                S.crouch = false;
+                vmgame::CrouchImpulse(-1.f);
+                if (S.crouchLogs++ < 60) Log("stance: stand up (jump)");
+            }
             ++S.jumps;
             vmgame::MoveImpulse(1.f, 0.f);
             if (S.wallLogs++ < 80)
@@ -6009,20 +6138,33 @@ void Apply(uintptr_t mgr) {
                 }
             }
         }
+        const bool jumpLevel = S.air && S.jumping && S.tJump == S.tAir;
         if (S.air && !S.dropActive && ns) {
-            auto covered = [&](const Surf* s, int n) {
-                for (int j = 0; j < n; ++j)
-                    if (s[j].h > S.footY + 0.3f) return true;
-                return false;
+            RegionNet airNet;
+            int airNetOk = -1;
+            auto covered = [&](const Surf* s, int n, float px, float pz) {
+                bool old = false;
+                for (int j = 0; j < n; ++j) old = old || s[j].h > S.footY + 0.3f;
+                if (!old || !jumpLevel) return old;
+                int why = 0;
+                const bool c = AirCovered(s, n, S.footY, S.airStartY, kJumpHeadroom, cfg.stepDown, [&] {
+                    if (airNetOk < 0) airNetOk = cfg.wallBodyNet && g_netOk && RegionNetNow(&airNet) ? 1 : 0;
+                    uintptr_t hit = 0;
+                    return airNetOk == 1 && NetStep(airNet, prevKin[0], prevKin[1], px, pz, &hit) == 0;
+                }, &why);
+                if (!c && S.jumpArchLogs++ < 20)
+                    Log("wall: jump at %.2f,%.2f (foot %.2f, took off at %.2f) under a walkway / roof - %s, not a wall body", px, pz, S.footY,
+                        S.airStartY, why == 1 ? "the take-off layer goes on under it" : "the game's ground net lets it through (arch / open passage)");
+                return c;
             };
-            if (covered(sf, ns)) {
+            if (covered(sf, ns, S.kinPos[0], S.kinPos[1])) {
                 const float tryPos[2][2] = {{S.kinPos[0], prevKin[1]}, {prevKin[0], S.kinPos[1]}};
                 bool slid = false;
                 for (int k = 0; k < 2 && !slid; ++k) {
                     if (tryPos[k][0] == prevKin[0] && tryPos[k][1] == prevKin[1]) continue;
                     Surf s5[kMaxSurf];
                     int n5 = SurfacesAt(tryPos[k][0], tryPos[k][1], s5);
-                    if (n5 && !covered(s5, n5)) {
+                    if (n5 && !covered(s5, n5, tryPos[k][0], tryPos[k][1])) {
                         S.kinPos[0] = tryPos[k][0];
                         S.kinPos[1] = tryPos[k][1];
                         S.kinVel[k == 0 ? 1 : 0] = 0;
@@ -6039,6 +6181,62 @@ void Apply(uintptr_t mgr) {
                 }
                 if (S.blocks++ < 20) Log("wall: in the air, ran into a structure at %.2f,%.2f (foot %.2f) - %s", prevKin[0], prevKin[1], S.footY,
                                          slid ? "slid along one axis" : "held");
+            }
+        }
+        if (jumpLevel && !S.dropActive && S.footBlk && ns) {
+            const int ci = JumpOffEdge(sf, ns, S.footY, S.airStartY, cfg.stepDown);
+            if (ci >= 0) {
+                float dx = S.kinPos[0] - prevKin[0], dz = S.kinPos[1] - prevKin[1], dl = std::sqrt(dx * dx + dz * dz);
+                if (dl < 1e-4f) dx = S.kinVel[0], dz = S.kinVel[1], dl = std::sqrt(dx * dx + dz * dz);
+                if (dl < 1e-4f) dx = sy, dz = cy, dl = 1.f;
+                dx /= dl;
+                dz /= dl;
+                float drop0 = S.airStartY - sf[ci].h, gap = std::fmin(cfg.dropClearance, 0.5f + 0.3f * drop0), landH = sf[ci].h;
+                float v0 = std::sqrt(S.kinVel[0] * S.kinVel[0] + S.kinVel[1] * S.kinVel[1]);
+                float range = std::fmax(cfg.dropMaxPush, v0 * FallTime(S.vy, S.footY - landH, cfg.gravity));
+                float push = cfg.dropClearance <= 0.f ? 0.f
+                           : FindDropPush(S.kinPos[0], S.kinPos[1], dx, dz, S.airStartY, cfg.stepDown, range,
+                                          [&](float px, float pz) { return BlockNear(S.footBlk, px, pz, gap); },
+                                          [&](float px, float pz, Surf* o) { return SurfacesAt(px, pz, o); }, &landH);
+                bool clear = push >= 0.f;
+                uint32_t t3 = 0;
+                float h3[3] = {};
+                if (clear && cfg.building && g_buildOk && !S.bldInside) {
+                    float ahead = std::fmax(push, 1.5f) + 0.5f;
+                    const float q2[2] = {S.kinPos[0] + dx * ahead, S.kinPos[1] + dz * ahead};
+                    if (TallWallBetween(S.kinPos, q2, S.airStartY, &t3, h3)) clear = false;
+                }
+                if (!clear) {
+                    if (S.jumpEdgeLogs++ < 20)
+                        Log("wall: jumped over the edge at %.2f,%.2f (took off at %.2f, drop %.1f m) but %s - held, back onto the take-off layer",
+                            S.kinPos[0], S.kinPos[1], S.airStartY, drop0, push < 0.f ? "no clear landing within range (wall / tower below)"
+                                                                                      : "a tall building wall is right ahead");
+                    S.kinPos[0] = prevKin[0];
+                    S.kinPos[1] = prevKin[1];
+                    S.kinVel[0] = S.kinVel[1] = 0;
+                    ns = SurfacesAt(S.kinPos[0], S.kinPos[1], sf);
+                } else {
+                    const float tFall = FallTime(S.vy, S.footY - landH, cfg.gravity);
+                    const double tUp = now - S.tJump;
+                    S.jumping = false;
+                    S.tAir = now;
+                    ++S.drops;
+                    S.dropActive = push > 0.01f;
+                    S.dropP0[0] = S.kinPos[0];
+                    S.dropP0[1] = S.kinPos[1];
+                    S.dropDir[0] = dx;
+                    S.dropDir[1] = dz;
+                    S.dropS = 0;
+                    S.dropTarget = push;
+                    S.dropSpeed = std::fmin(20.f, std::fmax(cfg.dropPushSpeed, push / (0.8f * tFall)));
+                    S.dropPolyN = push > 0.01f ? CopyBlockPoly(S.footBlk, S.dropPoly, 16) : 0;
+                    S.dropGap = gap;
+                    S.dropKept = 0;
+                    if (S.jumpEdgeLogs++ < 20)
+                        Log("wall: jumped off the edge at %.2f,%.2f %.2f s after take-off (took off at %.2f, foot %.2f, up %.1f m/s) at %.1f m/s -> "
+                            "clear ground %.2f m out (clearance %.2f, below %.2f), min push %.1f m/s", S.kinPos[0], S.kinPos[1], tUp, S.airStartY,
+                            S.footY, S.vy, v0, push, gap, landH, S.dropSpeed);
+                }
             }
         }
         if (S.air) {
@@ -6256,7 +6454,7 @@ void Apply(uintptr_t mgr) {
     const float* vRight = kv.right;
     const float* vUp = kv.up;
     vmgame::PublishView(S.yaw, S.pitch, (S.flyer || (mode == 0 && S.air)) ? 0.f : S.camSpeed);
-    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : cfg.eyeHeight),
+    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : cfg.eyeHeight * CrouchEyeScale(S.crouchT, cfg.crouchEye)),
                     camPos[2] + cy * cfg.eyeForward};
     float target[3] = {eye[0] + vFwd[0] * 10.f, eye[1] + vFwd[1] * 10.f, eye[2] + vFwd[2] * 10.f};
     float up[3] = {0.f, 1.f, 0.f};
@@ -6629,6 +6827,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D')) return 0;
         if (S.active && cfg.wallUp && w == cfg.wallUpKey) return 0;
         if (S.active && w == VK_SPACE && cfg.jumpHeight > 0.f) return 0;
+        if (S.active && cfg.crouch && CrouchKeyMsg(w)) return 0;
         break;
     case WM_KEYUP:
     case WM_SYSKEYUP:
@@ -6644,6 +6843,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D' || w == 'R' || (w >= '1' && w <= '9'))) return 0;
         if (S.active && w == VK_SPACE && cfg.jumpHeight > 0.f) return 0;
+        if (S.active && cfg.crouch && CrouchKeyMsg(w)) return 0;
         if (S.active && ((vmgame::ShieldKey() && w == vmgame::ShieldKey()) || (vmgame::ShieldHitKey() && w == vmgame::ShieldHitKey()))) return 0;
         if (S.active && g_heroLauncher && vmgame::LauncherConfigured() &&
             (w == vmgame::LauncherFireKey() || w == vmgame::LauncherSwitchKey() || w == vmgame::LauncherFlameKey()))
@@ -6654,7 +6854,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         break;
     case WM_MOUSEWHEEL:
         if (S.active) {
-            vmgame::CycleWeapon(GET_WHEEL_DELTA_WPARAM(w) < 0 ? 1 : -1);
+            if (!vmgame::ScopeWheel(GET_WHEEL_DELTA_WPARAM(w))) vmgame::CycleWeapon(GET_WHEEL_DELTA_WPARAM(w) < 0 ? 1 : -1);
             return 0;
         }
         break;
@@ -6706,7 +6906,7 @@ LRESULT CALLBACK HfpsChildWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         break;
     case WM_MOUSEWHEEL:
         if (S.active) {
-            vmgame::CycleWeapon(GET_WHEEL_DELTA_WPARAM(w) < 0 ? 1 : -1);
+            if (!vmgame::ScopeWheel(GET_WHEEL_DELTA_WPARAM(w))) vmgame::CycleWeapon(GET_WHEEL_DELTA_WPARAM(w) < 0 ? 1 : -1);
             return 0;
         }
         break;

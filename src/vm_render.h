@@ -36,6 +36,9 @@ struct Settings {
     int scopeBone = -1;
     float scopeLensRadius = 0.0178f;
     float scopeReticle = 1.0f;
+    float scopeLevels[8] = {};
+    int scopeLevelCount = 0;
+    int scopeLevelDefault = 0;
     bool handIk = true;
     float ikGripRi[3] = {0.0f, 0.0f, 0.0f};
     float ikGripLe[3] = {0.0f, 0.0f, 0.0f};
@@ -54,6 +57,7 @@ struct Settings {
     wchar_t fireTail[512] = L"";
     float fireTailVolume = 0.7f;
     float fireTailGap = 0.15f;
+    bool fireSync = false;
     wchar_t fireLastSound[512] = L"";
     float fireLastVolume = -1.f;
     wchar_t fireCasing[512] = L"";

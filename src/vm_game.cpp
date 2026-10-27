@@ -43,6 +43,18 @@ int g_modelIdx = 0;
 volatile bool g_testLayer = false, g_fp = false, g_failed = false;
 volatile LONG g_reload = 0, g_reqModelNext = 0, g_reqAnimNext = 0, g_reqFire = 0, g_reqDraw = 0;
 volatile LONG g_reqFireLast = 0;
+struct ShotQ {
+    struct E {
+        LONG burst, k;
+        double t;
+    } e[16];
+    volatile LONG w = 0;
+    LONG r = 0;
+} g_shotQ;
+struct ShotChain {
+    double lastIdeal = 0, lastT = 0;
+    LONG burst = 0, k = 0;
+} g_chain;
 struct MagState {
     volatile LONG size = 0;
     volatile LONG ammo = 0;
@@ -72,6 +84,7 @@ SRWLOCK g_kickLock = SRWLOCK_INIT;
 volatile LONG g_kickShots = 0;
 kick::GunSpring g_gunKick;
 volatile LONG g_jlJumpMilli = 0, g_jlLandMilli = 0;
+volatile LONG g_jlCrouchMilli = 0;
 float g_jlX[2] = {}, g_jlV[2] = {};
 kick::Sustain g_sustain;
 kick::Jitter g_jitter;
@@ -323,6 +336,7 @@ struct Weapon {
     bool fxDirty = true;
     double lastShotAt = 0;
     bool tailPending = false;
+    long long lastSyncTarget = -1;
 };
 Weapon g_w[kMaxModels];
 inline Weapon& Wp() { return g_w[g_modelIdx]; }
@@ -899,6 +913,7 @@ vm::Look ComputeLook() {
     {
         static const float kJlSpring[2] = {6.f, 0.45f};
         float jump = InterlockedExchange(&g_jlJumpMilli, 0) * 1e-3f, land = InterlockedExchange(&g_jlLandMilli, 0) * 1e-3f;
+        float crouch = InterlockedExchange(&g_jlCrouchMilli, 0) * 1e-3f;
         if (!g_fp) {
             g_jlX[0] = g_jlX[1] = g_jlV[0] = g_jlV[1] = 0.f;
         } else {
@@ -912,6 +927,10 @@ vm::Look ComputeLook() {
                 g_jlV[0] += kick::Impulse(-(0.012f + 0.030f * land) * k, kJlSpring[0], kJlSpring[1]);
                 g_jlV[1] += kick::Impulse(-(0.8f + 3.0f * land) * k, kJlSpring[0], kJlSpring[1]);
                 Wp().stepFoot.Play(Wp().set.stepFootVolume * (0.8f + 0.7f * land));
+            }
+            if (crouch != 0.f) {
+                g_jlV[0] += kick::Impulse(-0.008f * k * crouch, kJlSpring[0], kJlSpring[1]);
+                g_jlV[1] += kick::Impulse(-0.5f * k * crouch, kJlSpring[0], kJlSpring[1]);
             }
             kick::StepSprings(g_jlX, g_jlV, 2, kJlSpring, dt);
             l.kickPos[1] += g_jlX[0];
@@ -1002,34 +1021,117 @@ int FindLastClip() {
 #include "melee.inc"
 #include "ui_layer.inc"
 #include "launcher.inc"
+struct SyncState {
+    LONG burst = -1;
+    long long base = 0;
+    double emaDt = 1.0 / 60.0, lastNow = 0;
+    double extra = 0;
+    int late = 0, shots = 0;
+} g_sync;
+int SyncTargets(long long* out, int cap, bool use, double interval) {
+    LONG w = g_shotQ.w;
+    MemoryBarrier();
+    if (w - g_shotQ.r > 16) g_shotQ.r = w - 16;
+    long long clk = use ? vm::GunSound::ClockSamples() : -1;
+    unsigned rate = vm::GunSound::ClockRate();
+    if (clk < 0 || !rate || !(interval > 0.0)) {
+        g_shotQ.r = w;
+        return 0;
+    }
+    double lat = 1.25 * g_sync.emaDt + 0.012;
+    lat = (lat < 0.015 ? 0.015 : (lat > 0.06 ? 0.06 : lat)) + g_sync.extra;
+    const long long ivs = llround(interval * rate);
+    const double now = Now();
+    int n = 0;
+    while (g_shotQ.r != w) {
+        ShotQ::E e = g_shotQ.e[g_shotQ.r & 15];
+        ++g_shotQ.r;
+        if (now - e.t > 0.25) continue;
+        if (e.burst != g_sync.burst) {
+            g_sync.burst = e.burst;
+            g_sync.base = clk + llround(lat * rate) - static_cast<long long>(e.k) * ivs;
+        }
+        long long t = g_sync.base + static_cast<long long>(e.k) * ivs;
+        long long minT = clk + llround(0.002 * rate);
+        if (t < minT) {
+            double by = static_cast<double>(minT - t) / rate + 0.002;
+            g_sync.extra = g_sync.extra + by > 0.03 ? 0.03 : g_sync.extra + by;
+            g_sync.base += minT - t;
+            t = minT;
+            ++g_sync.late;
+        }
+        g_sync.extra *= 0.99;
+        ++g_sync.shots;
+        if (n < cap) out[n++] = t;
+    }
+    return n;
+}
+void QueueShot() {
+    double iv = FireInterval(), t = Now();
+    if (iv > 0.0 && g_chain.lastT > 0.0 && t - (g_chain.lastIdeal + iv) < iv && t - g_chain.lastT < 4.0 * iv) {
+        g_chain.lastIdeal += iv;
+        ++g_chain.k;
+    } else {
+        g_chain.lastIdeal = t;
+        ++g_chain.burst;
+        g_chain.k = 0;
+    }
+    g_chain.lastT = t;
+    LONG w = g_shotQ.w;
+    g_shotQ.e[w & 15] = {g_chain.burst, g_chain.k, t};
+    MemoryBarrier();
+    InterlockedExchange(&g_shotQ.w, w + 1);
+}
 void AnimStep(vm::Look& l, double now) {
+    {
+        double dt = g_sync.lastNow > 0 ? now - g_sync.lastNow : 0.0;
+        if (dt > 0.0 && dt < 0.2) g_sync.emaDt = g_sync.emaDt * 0.9 + dt * 0.1;
+        g_sync.lastNow = now;
+    }
     bool fired = InterlockedExchange(&g_reqFire, 0) != 0;
     const bool lastFired = fired && InterlockedExchange(&g_reqFireLast, 0) != 0;
     if (fired) {
         bool ads = (g_stance & 1) != 0;
         const vm::Settings& fs = Wp().set;
-        if (lastFired && Wp().lastShot.Loaded()) {
-            Wp().lastShot.Play(fs.fireLastVolume < 0.f ? fs.fireVolume : fs.fireLastVolume);
-            ++g_fxStat.lastShots;
-        } else if (ads && Wp().gunAds.Loaded()) {
-            Wp().gunAds.Play(fs.fireVolume);
-        } else {
-            Wp().gun.Play(fs.fireVolume);
+        long long tg[8];
+        int nq = SyncTargets(tg, 8, fs.fireSync, FireInterval());
+        if (nq <= 0) {
+            nq = 1;
+            tg[0] = -1;
         }
-        if (ads && Wp().casingAds.Loaded()) {
-            Wp().casingAds.Play(fs.fireCasingVolume);
-            ++g_fxStat.casingAds;
-        } else if (Wp().casing.Loaded()) {
-            Wp().casing.Play(fs.fireCasingVolume);
-            ++g_fxStat.casings;
+        for (int q = 0; q < nq; ++q) {
+            const long long t = tg[q];
+            auto play = [t](vm::GunSound& g, float v) {
+                if (t >= 0)
+                    g.PlayAt(v, t);
+                else
+                    g.Play(v);
+            };
+            const bool lastQ = lastFired && q == nq - 1;
+            if (lastQ && Wp().lastShot.Loaded()) {
+                play(Wp().lastShot, fs.fireLastVolume < 0.f ? fs.fireVolume : fs.fireLastVolume);
+                ++g_fxStat.lastShots;
+            } else if (ads && Wp().gunAds.Loaded()) {
+                play(Wp().gunAds, fs.fireVolume);
+            } else {
+                play(Wp().gun, fs.fireVolume);
+            }
+            if (ads && Wp().casingAds.Loaded()) {
+                play(Wp().casingAds, fs.fireCasingVolume);
+                ++g_fxStat.casingAds;
+            } else if (Wp().casing.Loaded()) {
+                play(Wp().casing, fs.fireCasingVolume);
+                ++g_fxStat.casings;
+            }
+            if (ads && Wp().mechAds.Loaded())
+                play(Wp().mechAds, Wp().set.fireMechVolume);
+            else
+                play(Wp().mech, Wp().set.fireMechVolume);
+            play(Wp().lfe, Wp().set.fireLfeVolume);
+            play(Wp().atmo, Wp().set.fireAtmoVolume);
+            Wp().lastSyncTarget = t;
         }
         if (lastFired) ++g_fxStat.lastFired;
-        if (ads && Wp().mechAds.Loaded())
-            Wp().mechAds.Play(Wp().set.fireMechVolume);
-        else
-            Wp().mech.Play(Wp().set.fireMechVolume);
-        Wp().lfe.Play(Wp().set.fireLfeVolume);
-        Wp().atmo.Play(Wp().set.fireAtmoVolume);
         Wp().lastShotAt = now;
         Wp().tailPending = Wp().tail.Loaded();
         Wp().flash.Trigger(g_mo.adsW);
@@ -1039,7 +1141,11 @@ void AnimStep(vm::Look& l, double now) {
     }
     if (Wp().tailPending && now - Wp().lastShotAt >= Wp().set.fireTailGap) {
         Wp().tailPending = false;
-        Wp().tail.Play(Wp().set.fireTailVolume);
+        unsigned rate = vm::GunSound::ClockRate();
+        if (Wp().set.fireSync && Wp().lastSyncTarget >= 0 && rate)
+            Wp().tail.PlayAt(Wp().set.fireTailVolume, Wp().lastSyncTarget + llround(Wp().set.fireTailGap * rate));
+        else
+            Wp().tail.Play(Wp().set.fireTailVolume);
     }
     for (int i = 0; i < g_modelCount; ++i) {
         Weapon& w = g_w[i];
@@ -2758,6 +2864,7 @@ void Fire() {
     if (!Enabled() || !g_fp) return;
     bool empty = g_mag.size > 0 && !(g_infAmmo && g_mag.disposable) && InterlockedDecrement(&g_mag.ammo) <= 0;
     if (empty) InterlockedExchange(&g_reqFireLast, 1);
+    QueueShot();
     InterlockedExchange(&g_reqFire, 1);
     InterlockedIncrement(&g_kickShots);
     if (empty) {
@@ -2844,7 +2951,24 @@ void AmmoRefillStep() {
     }
     g_log("weapon: ability ammo refill %.3f of total -> %d weapon(s) topped up", m / 1000.0, done);
 }
+volatile LONG g_scopeLvlP1[kMaxModels] = {};
+int g_scopeWheelAcc = 0;
+int ScopeLevelIdx(int i) {
+    if (i < 0 || i >= g_modelCount || i >= kMaxModels) return -1;
+    const auto& s = g_w[i].set;
+    if (s.scopeLevelCount < 1) return -1;
+    const LONG v = g_scopeLvlP1[i];
+    const int k = v > 0 ? static_cast<int>(v) - 1 : s.scopeLevelDefault;
+    return k < 0 ? 0 : k >= s.scopeLevelCount ? s.scopeLevelCount - 1 : k;
+}
 void RefillForNewBattle() {
+    for (int i = 0; i < kMaxModels; ++i) InterlockedExchange(&g_scopeLvlP1[i], 0);
+    for (int i = 0; i < g_modelCount && i < kMaxModels; ++i) {
+        const auto& s = g_w[i].set;
+        if (s.scopeLevelCount > 0)
+            g_log("scope: %ls zoom levels %d (%.1fx - %.1fx), default %.1fx, wheel while aiming", s.weaponId, s.scopeLevelCount, s.scopeLevels[0],
+                  s.scopeLevels[s.scopeLevelCount - 1], s.scopeLevels[s.scopeLevelDefault]);
+    }
     InterlockedExchange(&g_refillMilli, 0);
     for (int i = 0; i < g_modelCount && i < kMaxModels; ++i) {
         const auto& s = g_w[i].set;
@@ -3147,6 +3271,9 @@ void ShieldGame(float* weight, float* moveScale, float* zoomKeep) {
     *zoomKeep = 1.f - (1.f - g_sh.zoomMilli * 1e-3f) * w;
 }
 float ShieldCamKick() { return InterlockedExchange(&g_sh.camKickMdeg, 0) * 1e-3f; }
+void CrouchImpulse(float s) {
+    InterlockedExchangeAdd(&g_jlCrouchMilli, static_cast<LONG>(s * 1000.f + (s < 0.f ? -0.5f : 0.5f)));
+}
 void MoveImpulse(float jump, float land) {
     if (jump > 0.f) InterlockedExchangeAdd(&g_jlJumpMilli, static_cast<LONG>(jump * 1000.f + 0.5f));
     if (land > 0.f) InterlockedExchangeAdd(&g_jlLandMilli, static_cast<LONG>(land * 1000.f + 0.5f));
@@ -3199,6 +3326,34 @@ void MeleeHitFeedback(int hits) {
 }
 const char* WeaponProjectile(int idx) { return idx >= 0 && idx < g_modelCount ? g_w[idx].set.projectile : ""; }
 float WeaponFireRange(int idx) { return idx >= 0 && idx < g_modelCount ? g_w[idx].set.fireRange : 0.f; }
+bool ScopeWheel(int delta) {
+    const int i = g_modelIdx;
+    const int k = ScopeLevelIdx(i);
+    if (!Enabled() || !g_fp || !(g_stance & 1) || k < 0) {
+        g_scopeWheelAcc = 0;
+        return false;
+    }
+    g_scopeWheelAcc += delta;
+    int n = k;
+    while (g_scopeWheelAcc >= 120) g_scopeWheelAcc -= 120, ++n;
+    while (g_scopeWheelAcc <= -120) g_scopeWheelAcc += 120, --n;
+    const auto& s = g_w[i].set;
+    if (n < 0) n = 0;
+    if (n >= s.scopeLevelCount) n = s.scopeLevelCount - 1;
+    if (n != k) {
+        InterlockedExchange(&g_scopeLvlP1[i], n + 1);
+        g_log("scope: %ls zoom %.1fx -> %.1fx (wheel)", s.weaponId, s.scopeLevels[k], s.scopeLevels[n]);
+    }
+    return true;
+}
+float ScopeCameraZoom() {
+    const int i = g_modelIdx;
+    const int k = ScopeLevelIdx(i);
+    if (k < 0) return 0.f;
+    const auto& s = g_w[i].set;
+    const float mag = s.scopeLevels[k];
+    return s.scopeZoom > 1.f ? mag / s.scopeZoom : mag;
+}
 float CurrentAdsTime(int kind) {
     LONG us = kind >= 0 && kind < 3 ? g_curAdsUs[kind] : 0;
     return us > 0 ? us * 1e-6f : 0.f;
