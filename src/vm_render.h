@@ -36,6 +36,9 @@ struct Settings {
     int scopeBone = -1;
     float scopeLensRadius = 0.0178f;
     float scopeReticle = 1.0f;
+    float scopeLevels[8] = {};
+    int scopeLevelCount = 0;
+    int scopeLevelDefault = 0;
     bool handIk = true;
     float ikGripRi[3] = {0.0f, 0.0f, 0.0f};
     float ikGripLe[3] = {0.0f, 0.0f, 0.0f};

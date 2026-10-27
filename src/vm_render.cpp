@@ -924,6 +924,31 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.scopeLensRadius = IniFloat(ini, L"scope_lens_radius", s.scopeLensRadius);
     if (!(s.scopeLensRadius > 0.001f && s.scopeLensRadius < 0.2f)) s.scopeLensRadius = 0.0178f;
     s.scopeReticle = IniFloat(ini, L"scope_reticle", s.scopeReticle);
+    {
+        wchar_t buf[128];
+        GetPrivateProfileStringW(L"viewmodel", L"scope_levels", L"", buf, 128, ini);
+        float lv[8] = {};
+        int n = 0;
+        bool ok = buf[0] != 0;
+        for (wchar_t* p = buf; ok && *p;) {
+            wchar_t* end = nullptr;
+            double x = wcstod(p, &end);
+            if (end == p || !std::isfinite(x) || x < 1.0 || x > 40.0 || n >= 8 || (n > 0 && x <= lv[n - 1])) {
+                ok = false;
+                break;
+            }
+            lv[n++] = static_cast<float>(x);
+            p = end;
+            while (*p == L' ' || *p == L',' || *p == L'\t') ++p;
+        }
+        s.scopeLevelCount = ok ? n : 0;
+        for (int k = 0; k < 8; ++k) s.scopeLevels[k] = k < s.scopeLevelCount ? lv[k] : 0.f;
+        const float def = IniFloat(ini, L"scope_level_default", 0.f);
+        int di = 0;
+        for (int k = 1; k < s.scopeLevelCount; ++k)
+            if (std::fabs(s.scopeLevels[k] - def) < std::fabs(s.scopeLevels[di] - def)) di = k;
+        s.scopeLevelDefault = di;
+    }
     s.handIk =IniFloat(ini, L"hand_ik", s.handIk ? 1.f : 0.f) != 0.f;
     IniVec3(ini, L"ik_grip_ri", s.ikGripRi);
     IniVec3(ini, L"ik_grip_le", s.ikGripLe);
