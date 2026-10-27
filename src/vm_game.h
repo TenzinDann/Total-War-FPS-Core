@@ -41,13 +41,7 @@ struct RenderAddrs {
     uintptr_t insHelperCallDraw;
 };
 bool VerifyStatic(uintptr_t exeBase, LogFn log, const RenderAddrs& addrs);
-void SetPayloads(const wchar_t* mainIni, bool fullMod, const wchar_t* addonIds);
 void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log);
-const char* UnitKeys();
-bool UnitAllowed(const char* unitKey);
-void SetHeroKey(const char* unitKey);
-float EyeHeightFor(const char* unitKey, float def);
-void NoteNewBattle();
 bool Enabled();
 bool LayerActive();
 UINT TestKey();
@@ -110,6 +104,11 @@ enum MeleeStrikeKind { kStrikeStab, kStrikeSweep, kStrikeHeavySweep, kStrikeHeav
 enum MeleeCatId { kMeleeCatShieldSpear, kMeleeCatSword, kMeleeCatHammer, kMeleeCatHalberd, kMeleeCats };
 int CurrentMeleeCat();
 const wchar_t* MeleeCatSection(int cat);
+int WeaponDamagePct(int idx);
+int WeaponPenetration(int idx);
+float MeleeCatDamageMul(int cat);
+float MeleeCatReachAdd(int cat);
+void SetMpBattle(bool mp);
 bool MeleeActive();
 void MeleeInput(bool attack, bool block);
 int TakeMeleeStrike(int* cat = nullptr);
