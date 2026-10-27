@@ -4992,7 +4992,7 @@ void EdgeCollect(uintptr_t uic, int depth) {
 }
 constexpr uintptr_t oSelMarkMode = 0x544;
 void SelMarkStep() {
-    bool want = S.active && cfg.hideSelMarkers && g_selMarkOk;
+    bool want = S.active && cfg.hideSelMarkers && !vmgame::ShowSelMarkers() && g_selMarkOk;
     if (want) {
         uintptr_t mgr = PathMgr(S.battle);
         int32_t m = -1;

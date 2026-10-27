@@ -57,6 +57,7 @@ bool Reloading();
 void AmmoInfo(int* ammo, int* size, bool* reloading, int* reserve);
 void RefillAmmo(float frac);
 bool InfTacStamina();
+bool ShowSelMarkers();
 bool StartMagReload();
 void SelectWeapon(int n);
 void CycleWeapon(int dir);

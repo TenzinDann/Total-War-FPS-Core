@@ -353,6 +353,7 @@ volatile LONG g_spent[kMaxModels] = {};
 LONG g_ammoLevel[kMaxModels] = {};
 volatile LONG g_infAmmo = 0;
 volatile LONG g_infTac = 0;
+volatile LONG g_showSelMark = 0;
 volatile LONG g_wpOn = 0;
 volatile LONG g_wDmgPct[kMaxModels] = {};
 volatile LONG g_wPenSet[kMaxModels] = {};
@@ -2228,6 +2229,7 @@ void RosterStep(ID3D11Device* dev) {
     char infAmmo[16] = "";
     char infTac[16] = "";
     char wparams[16] = "";
+    char selMark[16] = "";
     if (FILE* f = _wfopen(path, L"r")) {
         static char line[kMaxModels * 64 + 64];
         while (fgets(line, sizeof line, f)) {
@@ -2240,6 +2242,7 @@ void RosterStep(ID3D11Device* dev) {
             if (!strncmp(line, "inf_ammo=", 9)) snprintf(infAmmo, sizeof infAmmo, "%s", line + 9);
             if (!strncmp(line, "inf_tac=", 8)) snprintf(infTac, sizeof infTac, "%s", line + 8);
             if (!strncmp(line, "wparams=", 8)) snprintf(wparams, sizeof wparams, "%s", line + 8);
+            if (!strncmp(line, "sel_marker=", 11)) snprintf(selMark, sizeof selMark, "%s", line + 11);
         }
         fclose(f);
     }
@@ -2269,6 +2272,11 @@ void RosterStep(ID3D11Device* dev) {
             g_log("move: infinite tactical sprint stamina (MCT) %s ('%s', %s)", tac ? "ON" : "off", infTac, camp ? "campaign" : "not campaign");
     }
     LoadWeaponParams(path, wparams);
+    {
+        LONG sm = !strcmp(selMark, "1") ? 1 : 0;
+        if (InterlockedExchange(&g_showSelMark, sm) != sm || sm)
+            g_log("ui: selection markers in first person %s (MCT sel_marker='%s')", sm ? "SHOWN" : "hidden", selMark);
+    }
     RefreshFireRate();
     WIN32_FILE_ATTRIBUTE_DATA fa;
     if (GetFileAttributesExW(path, GetFileExInfoStandard, &fa) &&
@@ -3177,6 +3185,7 @@ bool Reloading() {
     return g_mag.reload != 0;
 }
 bool InfTacStamina() { return g_infTac != 0; }
+bool ShowSelMarkers() { return g_showSelMark != 0; }
 void AmmoInfo(int* ammo, int* size, bool* reloading, int* reserve) {
     LONG s = g_mag.size, a = g_mag.ammo, r = g_mag.reserve;
     *size = s > 0 ? static_cast<int>(s) : 0;
