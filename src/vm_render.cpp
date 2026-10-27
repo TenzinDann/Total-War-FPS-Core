@@ -9,6 +9,7 @@
 #include <cstring>
 #include <cwchar>
 #include <initializer_list>
+#include <vector>
 namespace vm {
 namespace {
 template <class T>
@@ -446,6 +447,8 @@ cbuffer CMat : register(b2) {
     float4 uEmStop;
     float4 uEmC1, uEmC2, uEmC3, uEmC4;
     float4 uIrA, uIrB;
+    float4 uGlow;
+    float4 uCnt0, uCnt1, uCnt2, uCnt3;
 };
 Texture2D tAlbedo : register(t0);
 Texture2D tNormal : register(t1);
@@ -454,6 +457,7 @@ Texture2D tScene : register(t3);
 Texture2D tEmMask : register(t4);
 Texture2D tEmTex : register(t5);
 Texture2D tEmDist : register(t6);
+Texture2D tCounter : register(t7);
 SamplerState sLinear : register(s0);
 struct VSIn {
     float3 pos : POSITION; float3 nrm : NORMAL; float4 tan : TANGENT; float2 uv : TEXCOORD0;
@@ -526,6 +530,16 @@ float Reticle(float2 d, float R) {
 float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
     float4 alb = tAlbedo.Sample(sLinear, i.uv);
     if (uMat3.y > 0.5 && alb.a < 0.5) discard;
+    float2 cntF = (i.uv - uCnt1.xy) / (abs(uCnt1.zw) > 1e-8 ? uCnt1.zw : 1);
+    float2 cntDx = ddx(cntF) * float2(0.1, 1), cntDy = ddy(cntF) * float2(0.1, 1);
+    if (uCnt0.x > 0.5 && cntF.x >= 0 && cntF.x < uCnt0.x && cntF.y >= 0 && cntF.y < 1) {
+        int cj = (int)cntF.x;
+        float cd = cj == 0 ? uCnt2.x : cj == 1 ? uCnt2.y : cj == 2 ? uCnt2.z : uCnt2.w;
+        if (cd >= 0) {
+            float cov = tCounter.SampleGrad(sLinear, float2((cd + frac(cntF.x)) * 0.1, cntF.y), cntDx, cntDy).r;
+            alb.rgb = lerp(alb.rgb, uCnt3.rgb, saturate(cov));
+        }
+    }
     float3 N = normalize(i.n);
     float3 V = normalize(-i.vpos);
     if (dot(N, V) < 0) N = -N;
@@ -587,6 +601,7 @@ float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
             else g = uEmC4.rgb;
             e = g * uEm0.y * uEm1.rgb;
         }
+        if (uMat3.y > 0.5) e *= alb.a;
         float d = max(max(max(e.r, e.g), e.b), 1);
         float el = dot(e, float3(0.2126, 0.7152, 0.0722));
         alb.rgb = 1 - (1 - alb.rgb) * (1 - e / d);
@@ -621,7 +636,7 @@ float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
     float3 spec = D * G * F / (4 * NdL * NdV + 1e-4);
     float3 diff = (1 - F) * (1 - metal) * alb.rgb / 3.14159265;
     float3 direct = (diff + spec) * lightCol * NdL;
-    if (uFlashCol.w > 0) {
+    if (uFlashCol.w > 0 && uEm0.x < 0.5) {
         float3 Lp = uFlashPos.xyz - i.vpos;
         float dist = length(Lp);
         float3 Lf = Lp / max(dist, 1e-4);
@@ -659,6 +674,54 @@ float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
         c = lerp(c, sc, saturate(uLens1.z));
     }
     return float4(c, 1);
+}
+float4 PS_GlowSrc(PSIn i) : SV_Target {
+    float4 alb = tAlbedo.Sample(sLinear, i.uv);
+    if (uMat3.y > 0.5 && alb.a < 0.5) discard;
+    float3 N = normalize(i.n);
+    float3 V = normalize(-i.vpos);
+    float fr = 1 - saturate(abs(dot(N, V)));
+    fr *= fr;
+    float maskA = tEmMask.Sample(sLinear, i.uv).a;
+    float2 dn = tEmDist.Sample(sLinear, i.uv).rb;
+    float2 euv = (i.uv + dn * uEm0.w + uEm2.xy) * uEm2.zw;
+    float et = tEmTex.Sample(sLinear, euv).r;
+    float3 e;
+    if (uEm0.x > 1.5) {
+        e = uEm1.rgb * ((uEm0.y * et + uEm1.w + uEm0.z * fr) * maskA);
+    } else {
+        float v = (et + uEm1.w + uEm0.z * fr) * maskA;
+        float3 g;
+        if (v <= uEmStop.x) g = uEmC1.rgb;
+        else if (v <= uEmStop.y) g = lerp(uEmC1.rgb, uEmC2.rgb, (v - uEmStop.x) / (uEmStop.y - uEmStop.x + 0.001));
+        else if (v <= uEmStop.z) g = lerp(uEmC2.rgb, uEmC3.rgb, (v - uEmStop.y) / (uEmStop.z - uEmStop.y + 0.001));
+        else if (v <= uEmStop.w) g = lerp(uEmC3.rgb, uEmC4.rgb, (v - uEmStop.z) / (uEmStop.w - uEmStop.z + 0.001));
+        else g = uEmC4.rgb;
+        e = g * uEm0.y * uEm1.rgb;
+    }
+    if (uMat3.y > 0.5) e *= alb.a;
+    return float4(max(e, 0), 1);
+}
+struct FsOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+FsOut VS_Full(uint id : SV_VertexID) {
+    FsOut o;
+    float2 p = float2((id << 1) & 2, id & 2);
+    o.uv = p;
+    o.pos = float4(p * float2(2, -2) + float2(-1, 1), 0, 1);
+    return o;
+}
+float4 PS_Blur(FsOut i) : SV_Target {
+    const float w[5] = {0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216};
+    float3 c = tScene.Sample(sLinear, i.uv).rgb * w[0];
+    [unroll] for (int k = 1; k < 5; ++k)
+        c += (tScene.Sample(sLinear, i.uv + uGlow.xy * k).rgb + tScene.Sample(sLinear, i.uv - uGlow.xy * k).rgb) * w[k];
+    return float4(c, 1);
+}
+float4 PS_Comp(FsOut i) : SV_Target {
+    float inside = tEmMask.Sample(sLinear, i.uv).a;
+    float3 c = tScene.Sample(sLinear, i.uv).rgb * uGlow.z * uParams.x * lerp(1, uGlow.w, inside);
+    if (uParams.y > 0.5) c = SrgbEncode(c);
+    return float4(c, 0);
 }
 )HLSL";
 typedef HRESULT(WINAPI* FnD3DCompile)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*, LPCSTR, LPCSTR,
@@ -725,7 +788,7 @@ struct StateBackup {
     UINT sampleMask = 0;
     UINT stencilRef = 0;
     ID3D11DepthStencilState* dss = nullptr;
-    ID3D11ShaderResourceView* psSrv[7] = {};
+    ID3D11ShaderResourceView* psSrv[8] = {};
     ID3D11SamplerState* psSampler = nullptr;
     ID3D11PixelShader* ps = nullptr;
     ID3D11VertexShader* vs = nullptr;
@@ -750,7 +813,7 @@ struct StateBackup {
         c->OMGetBlendState(&bs, blendFactor, &sampleMask);
         c->OMGetDepthStencilState(&dss, &stencilRef);
         c->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, &dsv);
-        c->PSGetShaderResources(0, 7, psSrv);
+        c->PSGetShaderResources(0, 8, psSrv);
         c->PSGetSamplers(0, 1, &psSampler);
         psInstCount = vsInstCount = gsInstCount = hsInstCount = dsInstCount = 256;
         c->PSGetShader(&ps, psInst, &psInstCount);
@@ -777,7 +840,7 @@ struct StateBackup {
         c->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, dsv);
         for (auto*& r : rtv) SafeRelease(r);
         SafeRelease(dsv);
-        c->PSSetShaderResources(0, 7, psSrv);
+        c->PSSetShaderResources(0, 8, psSrv);
         for (auto*& s : psSrv) SafeRelease(s);
         c->PSSetSamplers(0, 1, &psSampler);
         SafeRelease(psSampler);
@@ -891,6 +954,17 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (GetFileAttributesW(ini) == INVALID_FILE_ATTRIBUTES) return false;
     s.fovDeg = IniFloat(ini, L"fov", s.fovDeg);
     IniVec3(ini, L"offset", s.offset);
+    GetPrivateProfileStringW(L"viewmodel", L"counter_part", s.counterPart, s.counterPart, 64, ini);
+    GetPrivateProfileStringW(L"viewmodel", L"counter_glyphs", s.counterGlyphs, s.counterGlyphs, 260, ini);
+    {
+        float r[4];
+        if (IniFloatList(ini, L"counter_rect", r, 4) == 4) memcpy(s.counterRect, r, sizeof r);
+    }
+    IniVec3(ini, L"counter_colour", s.counterColour);
+    s.counterDigits = static_cast<int>(IniFloat(ini, L"counter_digits", static_cast<float>(s.counterDigits)));
+    if (s.counterDigits < 1) s.counterDigits = 1;
+    if (s.counterDigits > 4) s.counterDigits = 4;
+    s.counterLeadZero = IniFloat(ini, L"counter_lead_zero", s.counterLeadZero ? 1.f : 0.f) > 0.5f;
     IniVec3(ini, L"rotation", s.rotDeg);
     IniVec3(ini, L"tilt", s.tiltDeg);
     s.scale = IniFloat(ini, L"scale", s.scale);
@@ -1038,6 +1112,16 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
         s.emissiveScale = IniFloat(ini, L"emissive_scale", s.emissiveScale);
         if (!(s.emissiveScale >= 0.f && s.emissiveScale <= 100.f)) s.emissiveScale = 1.f;
         s.emissiveSoft = IniFloat(ini, L"emissive_soft", s.emissiveSoft ? 1.f : 0.f) != 0.f;
+        s.emissiveGlow = IniFloat(ini, L"emissive_glow", s.emissiveGlow);
+        if (!(s.emissiveGlow >= 0.f && s.emissiveGlow <= 20.f)) s.emissiveGlow = 0.f;
+        s.emissiveGlowRadius = IniFloat(ini, L"emissive_glow_radius", s.emissiveGlowRadius);
+        if (!(s.emissiveGlowRadius >= 2.f && s.emissiveGlowRadius <= 200.f)) s.emissiveGlowRadius = 30.f;
+        s.emissiveGlowInner = IniFloat(ini, L"emissive_glow_inner", s.emissiveGlowInner);
+        if (!(s.emissiveGlowInner >= 0.f && s.emissiveGlowInner <= 1.f)) s.emissiveGlowInner = 0.3f;
+        s.emissiveLight = IniFloat(ini, L"emissive_light", s.emissiveLight);
+        if (!(s.emissiveLight >= 0.f && s.emissiveLight <= 20.f)) s.emissiveLight = 0.f;
+        s.emissiveLightRadius = IniFloat(ini, L"emissive_light_radius", s.emissiveLightRadius);
+        if (!(s.emissiveLightRadius > 0.01f && s.emissiveLightRadius <= 5.f)) s.emissiveLightRadius = 0.6f;
     }
     for (int i = 0; i < kMeleeSfx; ++i) {
         wchar_t key[64];
@@ -1058,6 +1142,8 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (!(s.meleeSfxSwingPre <= 1.f)) s.meleeSfxSwingPre = -1.f;
     s.fireRpm = IniFloat(ini, L"fire_rpm", s.fireRpm);
     s.magSize = static_cast<int>(IniFloat(ini, L"mag_size", static_cast<float>(s.magSize)));
+    s.ammoPerShot = static_cast<int>(IniFloat(ini, L"ammo_per_shot", static_cast<float>(s.ammoPerShot)));
+    if (s.ammoPerShot < 1 || s.ammoPerShot > 100) s.ammoPerShot = 1;
     s.magDisposable = IniFloat(ini, L"mag_disposable", s.magDisposable ? 1.f : 0.f) != 0.f;
     s.ammoTotal = static_cast<int>(IniFloat(ini, L"ammo_total", static_cast<float>(s.ammoTotal)));
     s.ammoUpgrade = static_cast<int>(IniFloat(ini, L"ammo_upgrade", static_cast<float>(s.ammoUpgrade)));
@@ -1065,6 +1151,8 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.reloadRefill = IniFloat(ini, L"reload_refill", s.reloadRefill);
     s.reloadEmptyRefill = IniFloat(ini, L"reload_empty_refill", s.reloadEmptyRefill);
     GetPrivateProfileStringW(L"viewmodel", L"weapon_id", s.weaponId, s.weaponId, 64, ini);
+    GetPrivateProfileStringW(L"viewmodel", L"weapon_owner", s.weaponOwner, s.weaponOwner, 160, ini);
+    GetPrivateProfileStringW(L"viewmodel", L"weapon_guest", s.weaponGuest, s.weaponGuest, 160, ini);
     GetPrivateProfileStringW(L"viewmodel", L"anim_sounds", s.animSounds, s.animSounds, 128, ini);
     s.animSoundVolume = IniFloat(ini, L"anim_sound_volume", s.animSoundVolume);
     GetPrivateProfileStringW(L"viewmodel", L"step_foot", s.stepFoot, s.stepFoot, 512, ini);
@@ -1353,10 +1441,15 @@ bool ReadHvmV1(const wchar_t* path, unsigned char** out, size_t* outLen, char* e
     return true;
 }
 }
+#include "arms_override.inc"
 bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
     unsigned char* data = nullptr;
     size_t len = 0;
     if (!TakePrefetched(path, true, &data, &len) && !ReadHvmV1(path, &data, &len, err, errLen)) return false;
+    {
+        char note[200];
+        if (ApplyArmsOverride(&data, &len, note, sizeof note) || note[0]) ArmsLogAppend(path, note);
+    }
     bool ok = false;
     ID3D11Buffer* vb = nullptr;
     ID3D11Buffer* ib = nullptr;
@@ -1501,6 +1594,24 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
         }
         off += static_cast<size_t>(h.indexCount) * 4;
         indexCount_ = h.indexCount;
+        for (uint32_t s = 0; s < h.submeshCount; ++s) {
+            double acc[3] = {0, 0, 0};
+            unsigned cnt = 0, votes[256] = {};
+            for (uint32_t k = subs_[s].firstIndex; k + 2 < subs_[s].firstIndex + subs_[s].indexCount; k += 3) {
+                const unsigned char* vp = verts + static_cast<size_t>(idx[k]) * kVertexStride;
+                float p[3];
+                memcpy(p, vp, sizeof p);
+                for (int a = 0; a < 3; ++a) acc[a] += p[a];
+                ++votes[vp[48]];
+                ++cnt;
+            }
+            if (!cnt) continue;
+            for (int a = 0; a < 3; ++a) subs_[s].ctr[a] = static_cast<float>(acc[a] / cnt);
+            unsigned best = 0;
+            for (unsigned b = 1; b < 256; ++b)
+                if (votes[b] > votes[best]) best = b;
+            subs_[s].ctrBone = best < h.boneCount ? static_cast<int>(best) : -1;
+        }
         if (h.clipCount) {
             size_t totalFloats = 0;
             size_t scan = off;
@@ -1620,7 +1731,7 @@ bool Renderer::CreatePipeline(char* err, size_t errLen) {
     ok = SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbFrame_));
     bd.ByteWidth = kMaxBones * 3 * 16;
     ok = ok && SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbBones_));
-    bd.ByteWidth = 48 + 11 * 16;
+    bd.ByteWidth = 48 + 12 * 16 + 4 * 16;
     ok = ok && SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbMat_));
     D3D11_RASTERIZER_DESC rd = {};
     rd.FillMode = D3D11_FILL_SOLID;
@@ -1637,6 +1748,41 @@ bool Renderer::CreatePipeline(char* err, size_t errLen) {
     bld.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN |
                                                 D3D11_COLOR_WRITE_ENABLE_BLUE;
     ok = ok && SUCCEEDED(dev_->CreateBlendState(&bld, &bs_));
+    {
+        static const char* const kEntry[4][2] = {{"PS_GlowSrc", "ps_5_0"}, {"VS_Full", "vs_5_0"}, {"PS_Blur", "ps_5_0"}, {"PS_Comp", "ps_5_0"}};
+        for (int k = 0; k < 4; ++k) {
+            ID3DBlob *gb = nullptr, *gm = nullptr;
+            if (SUCCEEDED(compile(kShader, sizeof kShader - 1, "tenzin_fps_vm", nullptr, nullptr, kEntry[k][0], kEntry[k][1], D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &gb, &gm))) {
+                if (k == 1) dev_->CreateVertexShader(gb->GetBufferPointer(), gb->GetBufferSize(), nullptr, &vsFull_);
+                else dev_->CreatePixelShader(gb->GetBufferPointer(), gb->GetBufferSize(), nullptr, k == 0 ? &psGlowSrc_ : (k == 2 ? &psBlur_ : &psComp_));
+            }
+            SafeRelease(gb);
+            SafeRelease(gm);
+        }
+        D3D11_BLEND_DESC ab = {};
+        ab.RenderTarget[0].BlendEnable = TRUE;
+        ab.RenderTarget[0].SrcBlend = ab.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        ab.RenderTarget[0].DestBlend = ab.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+        ab.RenderTarget[0].BlendOp = ab.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        ab.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
+        dev_->CreateBlendState(&ab, &bsAdd_);
+        D3D11_BLEND_DESC sb = {};
+        sb.RenderTarget[0].BlendEnable = FALSE;
+        sb.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        dev_->CreateBlendState(&sb, &bsSrc_);
+        D3D11_DEPTH_STENCIL_DESC gd = {};
+        gd.DepthEnable = TRUE;
+        gd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+        gd.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+        dev_->CreateDepthStencilState(&gd, &dssRead_);
+        gd.DepthEnable = FALSE;
+        dev_->CreateDepthStencilState(&gd, &dssOff_);
+        D3D11_SAMPLER_DESC cs = {};
+        cs.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        cs.AddressU = cs.AddressV = cs.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        cs.MaxLOD = D3D11_FLOAT32_MAX;
+        dev_->CreateSamplerState(&cs, &sampClamp_);
+    }
     D3D11_SAMPLER_DESC sm = {};
     sm.Filter = D3D11_FILTER_ANISOTROPIC;
     sm.MaxAnisotropy = 8;
@@ -1709,6 +1855,29 @@ ScreenBufs& Renderer::Sb() {
     return b;
 }
 const ScreenBufs& Renderer::Sb() const { return shareScreen_ ? g_sharedScreen : own_; }
+bool Renderer::EnsureGlow(UINT w, UINT h) {
+    if (glowTex_[0] && w == glowW_ && h == glowH_) return true;
+    for (int k = 0; k < 3; ++k) SafeRelease(glowSrv_[k]), SafeRelease(glowRtv_[k]), SafeRelease(glowTex_[k]);
+    glowW_ = glowH_ = 0;
+    for (int k = 0; k < 3; ++k) {
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = k ? std::max(1u, w / 2) : w;
+        td.Height = k ? std::max(1u, h / 2) : h;
+        td.MipLevels = td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(dev_->CreateTexture2D(&td, nullptr, &glowTex_[k])) || FAILED(dev_->CreateRenderTargetView(glowTex_[k], nullptr, &glowRtv_[k])) ||
+            FAILED(dev_->CreateShaderResourceView(glowTex_[k], nullptr, &glowSrv_[k]))) {
+            for (int j = 0; j < 3; ++j) SafeRelease(glowSrv_[j]), SafeRelease(glowRtv_[j]), SafeRelease(glowTex_[j]);
+            return false;
+        }
+    }
+    glowW_ = w;
+    glowH_ = h;
+    return true;
+}
 bool Renderer::EnsureDepth(UINT w, UINT h) {
     ScreenBufs& b = Sb();
     ID3D11DepthStencilView*& dsv_ = b.dsv;
@@ -2611,6 +2780,25 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
         for (int k = 0; k < 3; ++k) cf.flashColor[k] = c[k] * 2.5f * s.flashLight * look.flashLight;
         cf.flashColor[3] = 1.f;
     }
+    if (cf.flashColor[3] <= 0.f && s.emissiveLight > 0.f && s.wh3Emissive) {
+        SetupWh3Material(s);
+        for (unsigned si = 0; wh3On_ && si < subCount_; ++si) {
+            const Submesh& gs = subs_[si];
+            if (!gs.wh3 || gs.ctrBone < 0 || gs.ctrBone >= static_cast<int>(boneCount_)) continue;
+            Aff ib;
+            memcpy(ib.m, bones_[gs.ctrBone].invBind, sizeof ib.m);
+            Aff pv = AffMul(model, AffMul(g_world[gs.ctrBone], ib));
+            for (int r = 0; r < 3; ++r)
+                cf.flashPos[r] = pv.m[r * 4] * gs.ctr[0] + pv.m[r * 4 + 1] * gs.ctr[1] + pv.m[r * 4 + 2] * gs.ctr[2] + pv.m[r * 4 + 3];
+            cf.flashPos[3] = s.emissiveLightRadius;
+            const float* g = s.emissiveGradientColour[3];
+            float gc[3] = {g[0] * s.emissiveTint[0], g[1] * s.emissiveTint[1], g[2] * s.emissiveTint[2]};
+            float mx = std::max(std::max(gc[0], gc[1]), std::max(gc[2], 1e-3f));
+            for (int k = 0; k < 3; ++k) cf.flashColor[k] = gc[k] / mx * s.emissiveLight;
+            cf.flashColor[3] = 1.f;
+            break;
+        }
+    }
     bool lensOn = false;
     const int lensBone = s.scopeBone >= 0 ? s.scopeBone : s.adsSightBone;
     if (s.scopeZoom > 1.f && aw > 0.f && lensSubs_ && lensBone >= 0 && lensBone < static_cast<int>(boneCount_)) {
@@ -2703,6 +2891,28 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
     const double tProfWh3 = ProfNow();
     SetupWh3Material(s);
     g_drawProf.wh3 = (ProfNow() - tProfWh3) * 1000.0;
+    SetupCounter(s);
+    float cnt[16] = {};
+    if (counterOn_) {
+        int v = counterValue_ >= 0 ? counterValue_ : (s.magSize > 0 ? s.magSize : 0);
+        int top = 1;
+        for (int k = 0; k < s.counterDigits; ++k) top *= 10;
+        if (v > top - 1) v = top - 1;
+        cnt[0] = static_cast<float>(s.counterDigits);
+        float cw = (s.counterRect[2] - s.counterRect[0]) / s.counterDigits;
+        cnt[4] = s.counterRect[0], cnt[5] = s.counterRect[1], cnt[6] = cw, cnt[7] = s.counterRect[3] - s.counterRect[1];
+        for (int k = 0; k < 4; ++k) cnt[8 + k] = -1.f;
+        int div = top / 10;
+        bool lead = true;
+        for (int k = 0; k < s.counterDigits; ++k, div /= 10) {
+            int d = (v / div) % 10;
+            lead = lead && d == 0 && k < s.counterDigits - 1;
+            cnt[8 + k] = (lead && !s.counterLeadZero) ? -1.f : static_cast<float>(d);
+        }
+        for (int j = 0; j < 3; ++j) cnt[12 + j] = s.counterColour[j];
+    }
+    ID3D11ShaderResourceView* t7 = counterOn_ ? counterSrv_ : white_;
+    ctx->PSSetShaderResources(7, 1, &t7);
     float em[44] = {};
     if (wh3On_) {
         if (s.wh3Emissive) {
@@ -2746,12 +2956,80 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
             memcpy(mp.pData, mat, sizeof mat);
             if (wh3On_ && sm.wh3) memcpy(static_cast<char*>(mp.pData) + sizeof mat, em, sizeof em);
             else memset(static_cast<char*>(mp.pData) + sizeof mat, 0, sizeof em);
+            memset(static_cast<char*>(mp.pData) + sizeof mat + sizeof em, 0, 16);
+            if (counterOn_ && sm.counter) memcpy(static_cast<char*>(mp.pData) + sizeof mat + sizeof em + 16, cnt, sizeof cnt);
+            else memset(static_cast<char*>(mp.pData) + sizeof mat + sizeof em + 16, 0, sizeof cnt);
             ctx->Unmap(cbMat_, 0);
         }
         ID3D11ShaderResourceView* srv[3];
         for (int k = 0; k < 3; ++k) srv[k] = sm.tex[k] >= 0 ? srv_[sm.tex[k]] : white_;
         ctx->PSSetShaderResources(0, 3, srv);
         ctx->DrawIndexed(sm.indexCount, sm.firstIndex, 0);
+    }
+    if (wh3On_ && s.wh3Emissive && s.emissiveGlow > 0.f && psGlowSrc_ && vsFull_ && psBlur_ && psComp_ && bsAdd_ && bsSrc_ && dssRead_ && dssOff_ &&
+        sampClamp_ && EnsureGlow(w, h)) {
+        ID3D11ShaderResourceView* const nul = nullptr;
+        const float zero[4] = {0, 0, 0, 0};
+        ctx->ClearRenderTargetView(glowRtv_[0], zero);
+        ctx->OMSetRenderTargets(1, &glowRtv_[0], dsv_);
+        ctx->OMSetBlendState(bsSrc_, bf, 0xffffffffu);
+        ctx->OMSetDepthStencilState(dssRead_, 0);
+        ctx->PSSetShader(psGlowSrc_, nullptr, 0);
+        for (unsigned i = 0; i < subCount_; ++i) {
+            const Submesh& sm = subs_[i];
+            if (!sm.wh3) continue;
+            float mat[12] = {static_cast<float>(sm.normalMode), sm.tex[1] >= 0 ? 1.f : 0.f, sm.tex[2] >= 0 ? 1.f : 0.f,
+                             static_cast<float>(sm.materialMode), 0.55f, 0.f, 0.f, 0.f, 0.f, ((sm.flags >> 20) & 1) ? 1.f : 0.f, 0.f, 0.f};
+            if (SUCCEEDED(ctx->Map(cbMat_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mp))) {
+                memcpy(mp.pData, mat, sizeof mat);
+                memcpy(static_cast<char*>(mp.pData) + sizeof mat, em, sizeof em);
+                memset(static_cast<char*>(mp.pData) + sizeof mat + sizeof em, 0, 16);
+                memset(static_cast<char*>(mp.pData) + sizeof mat + sizeof em + 16, 0, 64);
+                ctx->Unmap(cbMat_, 0);
+            }
+            ID3D11ShaderResourceView* srv[3];
+            for (int k = 0; k < 3; ++k) srv[k] = sm.tex[k] >= 0 ? srv_[sm.tex[k]] : white_;
+            ctx->PSSetShaderResources(0, 3, srv);
+            ctx->DrawIndexed(sm.indexCount, sm.firstIndex, 0);
+        }
+        UINT hw = std::max(1u, w / 2), hh = std::max(1u, h / 2);
+        D3D11_VIEWPORT hvp = {0, 0, static_cast<float>(hw), static_cast<float>(hh), 0, 1};
+        ctx->RSSetViewports(1, &hvp);
+        ctx->OMSetDepthStencilState(dssOff_, 0);
+        ctx->IASetInputLayout(nullptr);
+        ctx->VSSetShader(vsFull_, nullptr, 0);
+        ctx->PSSetShader(psBlur_, nullptr, 0);
+        ctx->PSSetSamplers(0, 1, &sampClamp_);
+        const float stepPx = s.emissiveGlowRadius * static_cast<float>(h) / 1080.f / 12.f;
+        const struct { int src, dst; float dx, dy; } pass[4] = {{0, 1, stepPx / w, 0}, {1, 2, 0, stepPx / h}, {2, 1, 2 * stepPx / w, 0}, {1, 2, 0, 2 * stepPx / h}};
+        for (const auto& ps : pass) {
+            ctx->PSSetShaderResources(3, 1, &nul);
+            ctx->OMSetRenderTargets(1, &glowRtv_[ps.dst], nullptr);
+            const float g[4] = {ps.dx, ps.dy, 0.f, 0.f};
+            if (SUCCEEDED(ctx->Map(cbMat_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mp))) {
+                memset(mp.pData, 0, 48 + 11 * 16);
+                memcpy(static_cast<char*>(mp.pData) + 48 + 11 * 16, g, sizeof g);
+                ctx->Unmap(cbMat_, 0);
+            }
+            ctx->PSSetShaderResources(3, 1, &glowSrv_[ps.src]);
+            ctx->Draw(3, 0);
+        }
+        ctx->PSSetShaderResources(3, 1, &nul);
+        ctx->RSSetViewports(1, &vp);
+        ctx->OMSetRenderTargets(1, &rtv, nullptr);
+        ctx->OMSetBlendState(bsAdd_, bf, 0xffffffffu);
+        ctx->PSSetShader(psComp_, nullptr, 0);
+        const float g[4] = {0.f, 0.f, s.emissiveGlow, s.emissiveGlowInner};
+        if (SUCCEEDED(ctx->Map(cbMat_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mp))) {
+            memset(mp.pData, 0, 48 + 11 * 16);
+            memcpy(static_cast<char*>(mp.pData) + 48 + 11 * 16, g, sizeof g);
+            ctx->Unmap(cbMat_, 0);
+        }
+        ctx->PSSetShaderResources(3, 1, &glowSrv_[2]);
+        ctx->PSSetShaderResources(4, 1, &glowSrv_[0]);
+        ctx->Draw(3, 0);
+        ctx->PSSetShaderResources(3, 1, &nul);
+        ctx->PSSetShaderResources(4, 1, &nul);
     }
     bk.Restore(ctx);
     g_drawProf.total = (ProfNow() - tProf0) * 1000.0;
@@ -2803,9 +3081,38 @@ void Renderer::SetupWh3Material(const Settings& s) {
     }
     wh3On_ = true;
 }
+void Renderer::SetupCounter(const Settings& s) {
+    bool any = s.counterPart[0] && s.counterGlyphs[0] && s.counterRect[2] != s.counterRect[0] && s.counterRect[3] != s.counterRect[1];
+    uint64_t key = any ? Fnv64(s.counterPart, sizeof s.counterPart) ^ Fnv64(s.counterGlyphs, sizeof s.counterGlyphs) * 3 : 0;
+    if (key == counterKey_) return;
+    counterKey_ = key;
+    counterOn_ = false;
+    SafeRelease(counterSrv_);
+    for (unsigned i = 0; i < subCount_; ++i) subs_[i].counter = false;
+    if (!any || !dev_) return;
+    wchar_t part[64];
+    wcsncpy(part, s.counterPart, 63);
+    part[63] = 0;
+    _wcslwr(part);
+    unsigned hit = 0;
+    for (unsigned i = 0; i < subCount_; ++i) {
+        int a = subs_[i].tex[0];
+        if (a < 0 || a >= static_cast<int>(kMaxTextures) || !texName_[a][0]) continue;
+        if (!wcscmp(part, texName_[a])) subs_[i].counter = true, ++hit;
+    }
+    if (!hit) return;
+    wchar_t full[MAX_PATH * 2];
+    swprintf(full, MAX_PATH * 2, L"%ls%ls", hvmDir_, s.counterGlyphs);
+    char err[256];
+    if (!LoadDds(dev_, full, false, &counterSrv_, err, sizeof err)) return;
+    counterOn_ = true;
+}
 void Renderer::Release() {
     ready_ = false;
     for (auto*& v : wh3Srv_) SafeRelease(v);
+    SafeRelease(counterSrv_);
+    counterKey_ = 0;
+    counterOn_ = false;
     wh3Key_ = 0;
     wh3On_ = false;
     SafeRelease(vb_);
@@ -2815,6 +3122,17 @@ void Renderer::Release() {
     SafeRelease(cbMat_);
     SafeRelease(vs_);
     SafeRelease(ps_);
+    SafeRelease(vsFull_);
+    SafeRelease(psGlowSrc_);
+    SafeRelease(psBlur_);
+    SafeRelease(psComp_);
+    SafeRelease(bsAdd_);
+    SafeRelease(bsSrc_);
+    SafeRelease(dssRead_);
+    SafeRelease(dssOff_);
+    SafeRelease(sampClamp_);
+    for (int k = 0; k < 3; ++k) SafeRelease(glowSrv_[k]), SafeRelease(glowRtv_[k]), SafeRelease(glowTex_[k]);
+    glowW_ = glowH_ = 0;
     SafeRelease(layout_);
     SafeRelease(rs_);
     SafeRelease(dss_);
