@@ -104,11 +104,6 @@ enum MeleeStrikeKind { kStrikeStab, kStrikeSweep, kStrikeHeavySweep, kStrikeHeav
 enum MeleeCatId { kMeleeCatShieldSpear, kMeleeCatSword, kMeleeCatHammer, kMeleeCatHalberd, kMeleeCats };
 int CurrentMeleeCat();
 const wchar_t* MeleeCatSection(int cat);
-int WeaponDamagePct(int idx);
-int WeaponPenetration(int idx);
-float MeleeCatDamageMul(int cat);
-float MeleeCatReachAdd(int cat);
-void SetMpBattle(bool mp);
 bool MeleeActive();
 void MeleeInput(bool attack, bool block);
 int TakeMeleeStrike(int* cat = nullptr);

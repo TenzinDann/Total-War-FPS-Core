@@ -103,7 +103,6 @@ constexpr uintptr_t kRegUnitHalt904 = 0x4af1a0, kFnUnitHaltFactory904 = 0x2ed5da
 const CodePrint kUnitHaltPrints904[] = {{0x2ed5da4, 0x36, 0xf2992bea123bdfd1ull},
                                        {0x2eaf754, 0x90, 0x2e660c50610378f1ull},
                                        {0x2eeedd8, 0x38, 0x1e40299fca8b7e54ull}};
-const CodePrint kMpFlagPrints904[] = {{0x2eea97c, 0x57, 0xeb6c5089a78dfbc0ull}};
 const CodePrint kTpPrints904[] = {{0x2ecfbd4, 0xb3, 0x1987684e822436bdull},
                                  {0x2f64f54, 0x5a, 0xe98dc842affae2a9ull},
                                  {0x2f78b30, 0x167, 0xf7ff13396414fd5bull},
@@ -409,7 +408,6 @@ float EyeFromHeight(float h, float def) {
     return def;
 }
 constexpr uintptr_t oScriptBattle = 0x468, oBattleCmdQueue = 0x644e8, oBattleNoCmd1 = 0x3b0, oBattleNoCmd2 = 0x3b1;
-constexpr uintptr_t oBattleIsMp = 0x645c8;
 constexpr uintptr_t oUnitProjectile = 0x3d50;
 constexpr uintptr_t oEntId = 0x258;
 struct FireCmd {
@@ -447,7 +445,6 @@ struct alignas(16) HaltCmdBuf {
 bool g_tpOk = false;
 bool g_ovrOk = false, g_haltOk = false;
 bool g_unitHaltOk = false;
-bool g_mpFlagOk = false;
 constexpr uintptr_t oEntActivity = 0x324;
 struct EnableCmd {
     uintptr_t vt;
@@ -1716,10 +1713,6 @@ void Enter(uintptr_t mgr) {
         if (cfg.fastFire && g_shotOk) FastFireInstall(sbf ? Ptr(sbf + oScriptBattle) : 0);
         if (cfg.earlyFlight && g_shotOk && cfg.fireShooter) EarlyFlightInstall(sbf ? Ptr(sbf + oScriptBattle) : 0, entity);
         if (sbf && Ptr(sbf + oScriptBattle)) LogUnitLists(Ptr(sbf + oScriptBattle));
-        uint64_t mp = 1;
-        uintptr_t btm = sbf ? Ptr(sbf + oScriptBattle) : 0;
-        if (!(g_mpFlagOk && btm && Rd(btm + oBattleIsMp, mp))) mp = 1;
-        vmgame::SetMpBattle(mp != 0);
     }
     S.fpProj = 0;
     S.fpProjId = -1;
@@ -2202,18 +2195,6 @@ struct MeleeCatCfg {
     float blockAngle;
 };
 MeleeCatCfg g_meleeCat[vmgame::kMeleeCats];
-float g_meleeDmgMul[vmgame::kMeleeCats] = {1.f, 1.f, 1.f, 1.f};
-float g_meleeReachAdd[vmgame::kMeleeCats] = {};
-static_assert(vmgame::kMeleeCats == 4, "g_meleeDmgMul 的初值按 4 类写的");
-MeleeCatCfg MeleeCatEff(int cat) {
-    MeleeCatCfg m = g_meleeCat[cat];
-    m.damageScale *= g_meleeDmgMul[cat];
-    for (MeleeKindCfg& k : m.k) {
-        k.reach += g_meleeReachAdd[cat];
-        if (k.reach < 0.3f) k.reach = 0.3f;
-    }
-    return m;
-}
 const wchar_t* const kMeleeKindKey[vmgame::kStrikeKinds] = {L"stab", L"sweep", L"heavy_sweep", L"heavy", L"bash"};
 void LoadMeleeCats(const wchar_t* ini) {
     for (int c = 0; c < vmgame::kMeleeCats; ++c) {
@@ -2536,7 +2517,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         const MeleeReq& rq = reqs[ri];
         if (rq.hero != hero || Now() - rq.t > 0.6) continue;
         const int cat = rq.cat >= 0 && rq.cat < vmgame::kMeleeCats ? rq.cat : vmgame::kMeleeCatSword;
-        const MeleeKindCfg arc = MeleeCatEff(cat).k[rq.kind];
+        const MeleeKindCfg& arc = g_meleeCat[cat].k[rq.kind];
         org[no][0] = rq.ox, org[no][1] = rq.oz;
         org[no][2] = arc.reach + (arc.splashR > 0.f && arc.splashMax > 0 ? arc.splashR : 0.f) + MeleeBigSlack();
         ++no;
@@ -2552,7 +2533,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
             continue;
         }
         const int cat = rq.cat >= 0 && rq.cat < vmgame::kMeleeCats ? rq.cat : vmgame::kMeleeCatSword;
-        const MeleeCatCfg cc = MeleeCatEff(cat);
+        const MeleeCatCfg& cc = g_meleeCat[cat];
         const MeleeKindCfg& arc = cc.k[rq.kind];
         const bool heavy = rq.kind == vmgame::kStrikeHeavySweep || rq.kind == vmgame::kStrikeHeavy;
         const float splashR = arc.splashR, splashDmg = arc.splashDmg;
@@ -2721,161 +2702,6 @@ void HitFeedback(const AimHit& hit, const float eye[3], const float fwd[3]) {
         Log("hit-fx: shot on enemy %p at %.1f m, hp %u vs damage %d + ap %d -> %s (so far %u hits / %u kills of %u shots)", (void*)hit.ent,
             hit.dist, hp, dmg, ap, kill ? "kill (bigger blood)" : "hit", g_hfx.hits, g_hfx.kills, g_hfx.shots);
 }
-struct ShotDmgRec {
-    uintptr_t rec;
-    int32_t orig[2], set[2];
-};
-struct ShotDmgState {
-    ShotDmgRec r[32];
-    int n = 0;
-    int logs = 0;
-} g_sdmg;
-void ShotDamageApply(uintptr_t rec) {
-    if (!rec || rec != S.fpProj) return;
-    const char* key = vmgame::WeaponProjectile(S.projFor)[0] ? vmgame::WeaponProjectile(S.projFor) : cfg.fireProjectile;
-    if (!strstr(key, "fps")) return;
-    const int pct = vmgame::WeaponDamagePct(S.projFor);
-    int32_t cur[2] = {0, 0};
-    if (!Rd(rec + 0x70, cur[0]) || !Rd(rec + 0x74, cur[1])) return;
-    ShotDmgRec* d = nullptr;
-    for (int i = 0; i < g_sdmg.n && !d; ++i)
-        if (g_sdmg.r[i].rec == rec) d = &g_sdmg.r[i];
-    if (!d) {
-        if (pct == 100 || g_sdmg.n >= 32) return;
-        d = &g_sdmg.r[g_sdmg.n++];
-        d->rec = rec;
-        for (int k = 0; k < 2; ++k) d->orig[k] = d->set[k] = cur[k];
-    } else if (cur[0] != d->set[0] || cur[1] != d->set[1]) {
-        for (int k = 0; k < 2; ++k) d->orig[k] = d->set[k] = cur[k];
-    }
-    int32_t want[2];
-    for (int k = 0; k < 2; ++k) {
-        want[k] = d->orig[k];
-        if (d->orig[k] > 0 && pct != 100) {
-            int64_t v = (static_cast<int64_t>(d->orig[k]) * pct + 50) / 100;
-            want[k] = v < 1 ? 1 : v > 100000 ? 100000 : static_cast<int32_t>(v);
-        }
-    }
-    if (want[0] != cur[0]) Wr(rec + 0x70, want[0]);
-    if (want[1] != cur[1]) Wr(rec + 0x74, want[1]);
-    if ((want[0] != cur[0] || want[1] != cur[1]) && g_sdmg.logs++ < 16)
-        Log("fire: custom weapon stats - weapon %d damage %d%%: projectile %p damage %d -> %d, ap %d -> %d (original %d / %d)", S.projFor, pct, (void*)rec,
-            cur[0], want[0], cur[1], want[1], d->orig[0], d->orig[1]);
-    d->set[0] = want[0];
-    d->set[1] = want[1];
-}
-void ShotDamageRestore(const char* why) {
-    int n = 0;
-    for (int i = 0; i < g_sdmg.n; ++i) {
-        ShotDmgRec& d = g_sdmg.r[i];
-        if (d.set[0] == d.orig[0] && d.set[1] == d.orig[1]) continue;
-        int32_t cur[2] = {0, 0};
-        if (Rd(d.rec + 0x70, cur[0]) && Rd(d.rec + 0x74, cur[1]) && cur[0] == d.set[0] && cur[1] == d.set[1]) {
-            Wr(d.rec + 0x70, d.orig[0]);
-            Wr(d.rec + 0x74, d.orig[1]);
-            ++n;
-        }
-        d.set[0] = d.orig[0];
-        d.set[1] = d.orig[1];
-    }
-    if (n) Log("fire: custom weapon stats - damage restored on %d projectile record(s) (%s)", n, why);
-}
-void WeaponParamsSync() {
-    for (int c = 0; c < vmgame::kMeleeCats; ++c) {
-        g_meleeDmgMul[c] = vmgame::MeleeCatDamageMul(c);
-        g_meleeReachAdd[c] = vmgame::MeleeCatReachAdd(c);
-    }
-}
-constexpr size_t kPenRowBytes = 0x80;
-constexpr size_t kPenRowMin = 0x38;
-struct PenRow {
-    unsigned char b[kPenRowBytes];
-};
-struct ShotPenRec {
-    uintptr_t rec;
-    uintptr_t orig, set;
-    uintptr_t copyOf;
-    int32_t origCap, origN;
-    alignas(16) PenRow copy;
-};
-struct ShotPenState {
-    ShotPenRec r[32];
-    int n = 0;
-    int logs = 0;
-} g_spen;
-bool PenRowCopy(uintptr_t row, PenRow* out, int32_t* cap, int32_t* n) {
-    memset(out, 0, sizeof *out);
-    size_t got = 0;
-    for (; got < kPenRowBytes; got += 8) {
-        uint64_t q = 0;
-        if (!Rd(row + got, q)) break;
-        memcpy(out->b + got, &q, 8);
-    }
-    if (got < kPenRowMin) return false;
-    memcpy(cap, out->b + 0x08, 4);
-    memcpy(n, out->b + 0x30, 4);
-    return *cap >= 0 && *cap <= 5 && *n >= -1 && *n <= 1000;
-}
-void ShotPenApply(uintptr_t rec) {
-    if (!rec || rec != S.fpProj) return;
-    const char* key = vmgame::WeaponProjectile(S.projFor)[0] ? vmgame::WeaponProjectile(S.projFor) : cfg.fireProjectile;
-    if (!strstr(key, "fps")) return;
-    const int want = vmgame::WeaponPenetration(S.projFor);
-    uintptr_t cur = 0;
-    if (!Rd(rec + 0xe8, cur)) return;
-    ShotPenRec* d = nullptr;
-    for (int i = 0; i < g_spen.n && !d; ++i)
-        if (g_spen.r[i].rec == rec) d = &g_spen.r[i];
-    if (!d) {
-        if (want < 0 || !cur || g_spen.n >= 32) return;
-        d = &g_spen.r[g_spen.n++];
-        d->rec = rec;
-        d->orig = d->set = cur;
-        d->copyOf = 0;
-    } else if (cur != d->set && cur != reinterpret_cast<uintptr_t>(&d->copy)) {
-        d->orig = d->set = cur;
-    }
-    uintptr_t to = d->orig;
-    if (want >= 0 && d->orig) {
-        if (d->copyOf != d->orig) {
-            PenRow row;
-            int32_t cap = 0, n = 0;
-            if (PenRowCopy(d->orig, &row, &cap, &n)) {
-                memcpy(&d->copy, &row, sizeof row);
-                d->copyOf = d->orig;
-                d->origCap = cap, d->origN = n;
-            } else if (g_spen.logs++ < 16) {
-                Log("fire: custom penetration - weapon %d: projectile %p penetration row %p does not look like one (size cap %d, max %d) - left alone",
-                    S.projFor, (void*)rec, (void*)d->orig, cap, n);
-            }
-        }
-        if (d->copyOf == d->orig && want != d->origN) {
-            InterlockedExchange(reinterpret_cast<volatile LONG*>(d->copy.b + 0x30), want);
-            to = reinterpret_cast<uintptr_t>(&d->copy);
-        }
-    }
-    if (to != cur) {
-        Wr(rec + 0xe8, to);
-        if (g_spen.logs++ < 16)
-            Log("fire: custom penetration - weapon %d: projectile %p passes through %d (original %d, size cap %d, row %p%s)", S.projFor, (void*)rec,
-                to == d->orig ? d->origN : want, d->origN, d->origCap, (void*)d->orig, to == d->orig ? "" : " -> our copy");
-    }
-    d->set = to;
-}
-void ShotPenRestore(const char* why) {
-    int n = 0;
-    for (int i = 0; i < g_spen.n; ++i) {
-        ShotPenRec& d = g_spen.r[i];
-        if (d.set == d.orig) continue;
-        uintptr_t cur = 0;
-        if (Rd(d.rec + 0xe8, cur) && cur == d.set) {
-            Wr(d.rec + 0xe8, d.orig);
-            ++n;
-        }
-        d.set = d.orig;
-    }
-    if (n) Log("fire: custom penetration - %d projectile record(s) pointed back to their own penetration row (%s)", n, why);
-}
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
               int nBodies, float clearance) {
     uintptr_t sb = Ptr(g_base + kGlobalScript);
@@ -2899,8 +2725,6 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
                 (void*)S.battle, (void*)queue, no1, no2, (void*)proj, projId, entId);
         return false;
     }
-    ShotDamageApply(proj);
-    ShotPenApply(proj);
     if (!S.loggedProj && proj) {
         S.loggedProj = true;
         float f[48] = {};
@@ -5051,9 +4875,6 @@ void ShotStep() {
     bool active = S.active && g_shotOk && g_fireOk && cfg.fireEnabled;
     uintptr_t rec = active && cfg.bulletSpeed > 0.f && S.unit ? (S.fpProj ? S.fpProj : Ptr(S.unit + oUnitProjectile)) : 0;
     if (S.speedApplied && rec != S.speedRec) ShotRestoreSpeed(rec ? "weapon changed" : "first person ended");
-    if (!active) ShotDamageRestore("first person ended");
-    if (!active) ShotPenRestore("first person ended");
-    WeaponParamsSync();
     if (rec && !S.speedApplied) {
         float sp = 0, m = 0;
         if (Rd(rec + oProjSpeed, sp) && Rd(rec + oProjMass, m) && std::fabs(sp - cfg.bulletSpeed) < 1.f) {
@@ -7290,8 +7111,6 @@ bool VerifyGame() {
                        PrintsMatch(Prints(kUnitHaltPrints904), "silent unit halt");
         Log("move: silent unit halt when entering / leaving first person (BCQ_UNIT_ISSUE_HALT_COMMAND) %s (silent_halt=%d)",
             g_unitHaltOk ? "ok" : "OFF - falls back to the selection halt (the hero says STOP / Halt)", cfg.silentHalt);
-        g_mpFlagOk = PrintsMatch(Prints(kMpFlagPrints904), "multiplayer flag");
-        Log("custom weapon stats: multiplayer flag [battle+0x645c8] %s", g_mpFlagOk ? "ok" : "NOT verified - custom weapon stats stay off");
         g_ovrOk = o;
         g_tpOk = t;
         g_ghostOk = f && Ptr(g_base + kVtUnitEnableCmd) == g_base + kFnUnitEnableWrite && PrintsMatch(game->ghost, "ghost (unit enable)");
