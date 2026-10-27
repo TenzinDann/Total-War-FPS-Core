@@ -12,6 +12,7 @@
 #include "vm_audio.h"
 #ifdef HFPS_PACK_ASSETS
 #include "pack_extract.h"
+#include "foreign_hook.h"
 #endif
 extern "C" {
 void* p_GetFileVersionInfoA;
@@ -171,6 +172,13 @@ const CodePrint kShotPrints904[] = {
     {0x3253204, 0x390, 0x963dcd7a776dc208ull},
     {0x305947c, 0x40, 0x3723d2b3015e36c0ull},
     {0x8d3ca0, 0x3, 0x58389c18233078ffull},
+    {0x2f1ad84, 0x172, 0x00629d11bc269ca9ull},
+    {0x15186c4, 0x2d, 0x568d96aaf3eb0794ull},
+    {0x500c6c, 0xc4, 0x1f11cb2d47ce53e1ull},
+    {0x500294, 0x13, 0xa18aa5532e26f9aeull},
+    {0x4d7960, 0x39, 0xdf066808b9520cc0ull},
+    {0x4d8580, 0x59, 0x78aac2ac213eed1cull}};
+const CodePrint kProjLookupPrints904[] = {
     {0x2f1ad84, 0x172, 0x00629d11bc269ca9ull},
     {0x15186c4, 0x2d, 0x568d96aaf3eb0794ull},
     {0x500c6c, 0xc4, 0x1f11cb2d47ce53e1ull},
@@ -475,6 +483,7 @@ bool g_meleeOk = false;
 constexpr int32_t kAttrUnbreakable = 0x15;
 bool g_moraleLockOk = false;
 bool g_shotOk = false;
+bool g_projLookupOk = false;
 bool g_meleeHitOk = false;
 bool g_noKnockOk = false;
 bool g_shieldGameOk = false;
@@ -1410,6 +1419,7 @@ bool StopMoving();
 int MoveMode();
 void HookRenderChild();
 void ShotRestoreSpeed(const char* why);
+bool FireOwner() { return cfg.fireShooter && g_shotOk; }
 uintptr_t FindProjectile(const char* key, int32_t* idOut);
 void ProbeInit();
 float StepPeriod();
@@ -1698,7 +1708,7 @@ void Enter(uintptr_t mgr) {
     S.aimSpeedSum = S.aimSpeedMax = S.aimLeadSum = S.aimSelfSpeedSum = 0;
     S.tAimStat = Now();
     const char* wantProj = vmgame::WeaponProjectile(S.projFor)[0] ? vmgame::WeaponProjectile(S.projFor) : cfg.fireProjectile;
-    if (g_shotOk && wantProj[0]) {
+    if (g_projLookupOk && wantProj[0]) {
         S.fpProj = FindProjectile(wantProj, &S.fpProjId);
         if (S.fpProj && S.fpProjId >= 0) {
             float sp = 0;
@@ -1725,11 +1735,11 @@ void Enter(uintptr_t mgr) {
         Log("probe: launch-event receiver obj=%p (vt +%llx) member +0x3d8 vt +%llx, [+0x10] = +%llx, [+0x18] = +%llx, [+0x8] = +%llx",
             (void*)yf0, rva(yvt), rva(lvt), rva(l10), rva(lvt ? Ptr(lvt + 0x18) : 0), rva(lvt ? Ptr(lvt + 0x8) : 0));
     }
-    if (cfg.fireShooter && entity) {
+    if (FireOwner() && entity) {
         uintptr_t sb3 = Ptr(g_base + kGlobalScript);
         herofx::Install(sb3 ? Ptr(sb3 + oScriptBattle) : 0, entity, S.fpProj);
     }
-    if (cfg.fireShooter && entity) {
+    if (FireOwner() && entity) {
         uintptr_t evt = Ptr(entity), f48 = evt ? Ptr(evt + 0x48) : 0;
         Log("fire: shooter = hero entity (kills counted, own bullets pass through it); muzzle launch point %s "
             "(entity vt +%llx, [+0x48] = +%llx)",
@@ -2769,7 +2779,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
         Rd(battle + oBattleNoCmd1, no1);
         Rd(battle + oBattleNoCmd2, no2);
     }
-    if (!battle || !queue || no1 || no2 || projId < 0 || (cfg.fireShooter && !entId)) {
+    if (!battle || !queue || no1 || no2 || projId < 0 || (FireOwner() && !entId)) {
         if (S.shotLogs++ < 5)
             Log("fire refused: battle=%p (camera's %p) queue=%p blocked=%u/%u projectile=%p id=%d entityId=%d", (void*)battle,
                 (void*)S.battle, (void*)queue, no1, no2, (void*)proj, projId, entId);
@@ -2803,7 +2813,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     const float wRange = vmgame::WeaponFireRange(vmgame::CurrentWeapon()), range = wRange > 0.f ? wRange : cfg.fireRange;
     for (int i = 0; i < 3; ++i) c.target[i] = eye[i] + fwd[i] * range;
     float d = muzzle ? cfg.muzzleDepth : cfg.fireForward, minGap = 0;
-    bool clear = cfg.fireShooter != 0 || nBodies == 0;
+    bool clear = FireOwner() || nBodies == 0;
     for (; !clear && d <= 6.0f; d += 0.1f) {
         float a[3], b[3], dir[3], len2 = 0;
         for (int i = 0; i < 3; ++i) {
@@ -2833,7 +2843,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
         c.launch[1] = gh + 0.25f;
     }
     c.tgtIsPos = 1;
-    c.shooter = cfg.fireShooter ? S.entity : 0;
+    c.shooter = FireOwner() ? S.entity : 0;
     double now = Now();
     float period = StepPeriod();
     float toNext = LastStepTime() > 0 ? static_cast<float>(LastStepTime() + period - now) : period * 0.5f;
@@ -6237,7 +6247,7 @@ void Apply(uintptr_t mgr) {
         if (haveDest && !S.airFar && !S.castHold && (tx * tx + tz * tz > 0.02f * 0.02f || S.castRepin) && now - S.tLastTp >= cfg.tpInterval) {
             float gx = S.leadPos[0], gz = S.leadPos[1];
             bool skipTp = false;
-            if (cfg.tpShotGuard > 0.f && !S.ghost && !cfg.fireShooter) {
+            if (cfg.tpShotGuard > 0.f && !S.ghost && !FireOwner()) {
                 float gap0 = ShotGap(gx, gz, now);
                 if (gap0 < cfg.tpShotGuard) {
                     bool found = false;
@@ -6519,7 +6529,7 @@ void Apply(uintptr_t mgr) {
             bodies[nb][2] = raw[2] + S.entVel[1] * cfg.fireLookahead;
             ++nb;
         }
-        if (vmgame::CurrentWeapon() != S.projFor && g_shotOk) {
+        if (vmgame::CurrentWeapon() != S.projFor && g_projLookupOk) {
             S.projFor = vmgame::CurrentWeapon();
             const char* want = vmgame::WeaponProjectile(S.projFor)[0] ? vmgame::WeaponProjectile(S.projFor) : cfg.fireProjectile;
             int32_t id = -1;
@@ -6901,9 +6911,61 @@ bool HostIsWh3() {
     name = name ? name + 1 : path;
     return _wcsicmp(name, L"Warhammer3.exe") == 0;
 }
+bool ExeFileBytes(uintptr_t rva, size_t n, unsigned char* out) {
+    wchar_t path[1024];
+    DWORD pl = GetModuleFileNameW(nullptr, path, 1024);
+    if (!pl || pl >= 1024) return false;
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(g_base);
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(g_base + dos->e_lfanew);
+    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (WORD k = 0; k < nt->FileHeader.NumberOfSections; ++k, ++sec) {
+        uintptr_t va = sec->VirtualAddress, sz = sec->SizeOfRawData < sec->Misc.VirtualSize ? sec->SizeOfRawData : sec->Misc.VirtualSize;
+        if (rva < va || rva + n > va + sz) continue;
+        HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (f == INVALID_HANDLE_VALUE) return false;
+        LARGE_INTEGER at;
+        at.QuadPart = static_cast<LONGLONG>(sec->PointerToRawData) + static_cast<LONGLONG>(rva - va);
+        DWORD got = 0;
+        bool ok = SetFilePointerEx(f, at, nullptr, FILE_BEGIN) && ReadFile(f, out, static_cast<DWORD>(n), &got, nullptr) && got == n;
+        CloseHandle(f);
+        return ok;
+    }
+    return false;
+}
+bool ForeignHooksOnly(const CodePrint& cp, const char* what, size_t idx, size_t total) {
+    if (!g_base || !g_imageSize || cp.len == 0 || cp.len > 0x10000) return false;
+    uintptr_t lo = cp.rva >= fhook::kPad ? cp.rva - fhook::kPad : 0, n = cp.rva + cp.len + fhook::kPad - lo;
+    unsigned char* mem = new unsigned char[2 * n];
+    unsigned char* disk = mem + n;
+    bool ok = ExeFileBytes(lo, n, disk);
+    if (!ok) {
+        lo = cp.rva, n = cp.len;
+        ok = ExeFileBytes(lo, n, disk);
+    }
+    for (uintptr_t i = 0; ok && i < n; ++i) ok = Rd(g_base + lo + i, mem[i]);
+    unsigned long long h = 0xcbf29ce484222325ull;
+    for (uintptr_t i = 0; ok && i < cp.len; ++i) h = (h ^ disk[cp.rva - lo + i]) * 0x100000001b3ull;
+    fhook::Hook hk[fhook::kMaxHooks];
+    int k = -1;
+    if (ok && h == cp.fnv)
+        k = fhook::Classify(mem, disk, n, g_base + lo, cp.rva - lo, cp.rva - lo + cp.len, g_base, g_base + g_imageSize, hk);
+    for (int i = 0; i < k; ++i) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (!VirtualQuery(reinterpret_cast<void*>(static_cast<uintptr_t>(hk[i].target)), &mbi, sizeof mbi) || mbi.State != MEM_COMMIT ||
+            !(mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
+            k = -1;
+    }
+    for (int i = 0; i < k; ++i)
+        Log("%s: code fingerprint %zu/%zu (+0x%llx) differs from the game file only by another program's jump hook at +0x%llx "
+            "(%zu bytes -> %p; trainer / mod) - treated as the original code",
+            what, idx, total, (unsigned long long)cp.rva, (unsigned long long)(lo + hk[i].at), hk[i].len,
+            reinterpret_cast<void*>(static_cast<uintptr_t>(hk[i].target)));
+    delete[] mem;
+    return k > 0;
+}
 bool PrintsMatch(const PrintSet& s, const char* what) {
     for (size_t i = 0; i < s.n; ++i)
-        if (!CodeMatches(s.p[i])) {
+        if (!CodeMatches(s.p[i]) && !ForeignHooksOnly(s.p[i], what, i + 1, s.n)) {
             Log("%s: code fingerprint %zu/%zu mismatch at +0x%llx (len 0x%llx)", what, i + 1, s.n,
                 (unsigned long long)s.p[i].rva, (unsigned long long)s.p[i].len);
             return false;
@@ -6971,8 +7033,13 @@ bool VerifyGame() {
         Log("hero: morale lock in first person (unbreakable) %s", g_moraleLockOk ? "ok" : "OFF - morale can still break in first person");
         g_uiOk = PrintsMatch(game->ui, "battle hud hide");
         Log("ui: battle hud hiding %s", g_uiOk ? "ok" : "OFF");
+        g_projLookupOk = PrintsMatch(Prints(kProjLookupPrints904), "first-person projectile lookup");
+        Log("fire: first-person projectile lookup %s", g_projLookupOk ? "ok" : "OFF - the guns fall back to the hero's own weapon");
         g_shotOk = PrintsMatch(game->shot, "fire owner / bullet speed");
         Log("fire: owner + unlimited ammo + bullet speed %s", g_shotOk ? "ok" : "OFF");
+        if (!g_shotOk && g_projLookupOk && cfg.fireShooter)
+            Log("fire: owner checks failed - first-person bullets fly without an owner (kills not credited to the hero, the hero is kept "
+                "out of the line of fire, the hero unit's own ammo is not used)");
         g_meleeHitOk = g_shotOk && PrintsMatch(Prints(kMeleeHitPrints904), "engine melee hit");
         Log("melee: engine melee hit %s", g_meleeHitOk ? "ok" : "OFF (melee weapon falls back to splash explosions)");
         g_noKnockOk = PrintsMatch(Prints(kNoKnockPrints904), "hero no knockdown");
