@@ -8,9 +8,6 @@ class GunSound {
 public:
     bool Load(const wchar_t* dir, const wchar_t* list, int maxVoices, char* err, size_t errLen);
     void Play(float volume, bool loop = false, float pitch = 1.f);
-    long long PlayAt(float volume, long long targetSample);
-    static long long ClockSamples();
-    static unsigned ClockRate();
     void FadeAll();
     void Update();
     void Release();
