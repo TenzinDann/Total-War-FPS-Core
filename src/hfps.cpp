@@ -2786,6 +2786,96 @@ void WeaponParamsSync() {
         g_meleeReachAdd[c] = vmgame::MeleeCatReachAdd(c);
     }
 }
+constexpr size_t kPenRowBytes = 0x80;
+constexpr size_t kPenRowMin = 0x38;
+struct PenRow {
+    unsigned char b[kPenRowBytes];
+};
+struct ShotPenRec {
+    uintptr_t rec;
+    uintptr_t orig, set;
+    uintptr_t copyOf;
+    int32_t origCap, origN;
+    alignas(16) PenRow copy;
+};
+struct ShotPenState {
+    ShotPenRec r[32];
+    int n = 0;
+    int logs = 0;
+} g_spen;
+bool PenRowCopy(uintptr_t row, PenRow* out, int32_t* cap, int32_t* n) {
+    memset(out, 0, sizeof *out);
+    size_t got = 0;
+    for (; got < kPenRowBytes; got += 8) {
+        uint64_t q = 0;
+        if (!Rd(row + got, q)) break;
+        memcpy(out->b + got, &q, 8);
+    }
+    if (got < kPenRowMin) return false;
+    memcpy(cap, out->b + 0x08, 4);
+    memcpy(n, out->b + 0x30, 4);
+    return *cap >= 0 && *cap <= 5 && *n >= -1 && *n <= 1000;
+}
+void ShotPenApply(uintptr_t rec) {
+    if (!rec || rec != S.fpProj) return;
+    const char* key = vmgame::WeaponProjectile(S.projFor)[0] ? vmgame::WeaponProjectile(S.projFor) : cfg.fireProjectile;
+    if (!strstr(key, "fps")) return;
+    const int want = vmgame::WeaponPenetration(S.projFor);
+    uintptr_t cur = 0;
+    if (!Rd(rec + 0xe8, cur)) return;
+    ShotPenRec* d = nullptr;
+    for (int i = 0; i < g_spen.n && !d; ++i)
+        if (g_spen.r[i].rec == rec) d = &g_spen.r[i];
+    if (!d) {
+        if (want < 0 || !cur || g_spen.n >= 32) return;
+        d = &g_spen.r[g_spen.n++];
+        d->rec = rec;
+        d->orig = d->set = cur;
+        d->copyOf = 0;
+    } else if (cur != d->set && cur != reinterpret_cast<uintptr_t>(&d->copy)) {
+        d->orig = d->set = cur;
+    }
+    uintptr_t to = d->orig;
+    if (want >= 0 && d->orig) {
+        if (d->copyOf != d->orig) {
+            PenRow row;
+            int32_t cap = 0, n = 0;
+            if (PenRowCopy(d->orig, &row, &cap, &n)) {
+                memcpy(&d->copy, &row, sizeof row);
+                d->copyOf = d->orig;
+                d->origCap = cap, d->origN = n;
+            } else if (g_spen.logs++ < 16) {
+                Log("fire: custom penetration - weapon %d: projectile %p penetration row %p does not look like one (size cap %d, max %d) - left alone",
+                    S.projFor, (void*)rec, (void*)d->orig, cap, n);
+            }
+        }
+        if (d->copyOf == d->orig && want != d->origN) {
+            InterlockedExchange(reinterpret_cast<volatile LONG*>(d->copy.b + 0x30), want);
+            to = reinterpret_cast<uintptr_t>(&d->copy);
+        }
+    }
+    if (to != cur) {
+        Wr(rec + 0xe8, to);
+        if (g_spen.logs++ < 16)
+            Log("fire: custom penetration - weapon %d: projectile %p passes through %d (original %d, size cap %d, row %p%s)", S.projFor, (void*)rec,
+                to == d->orig ? d->origN : want, d->origN, d->origCap, (void*)d->orig, to == d->orig ? "" : " -> our copy");
+    }
+    d->set = to;
+}
+void ShotPenRestore(const char* why) {
+    int n = 0;
+    for (int i = 0; i < g_spen.n; ++i) {
+        ShotPenRec& d = g_spen.r[i];
+        if (d.set == d.orig) continue;
+        uintptr_t cur = 0;
+        if (Rd(d.rec + 0xe8, cur) && cur == d.set) {
+            Wr(d.rec + 0xe8, d.orig);
+            ++n;
+        }
+        d.set = d.orig;
+    }
+    if (n) Log("fire: custom penetration - %d projectile record(s) pointed back to their own penetration row (%s)", n, why);
+}
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
               int nBodies, float clearance) {
     uintptr_t sb = Ptr(g_base + kGlobalScript);
@@ -2810,6 +2900,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
         return false;
     }
     ShotDamageApply(proj);
+    ShotPenApply(proj);
     if (!S.loggedProj && proj) {
         S.loggedProj = true;
         float f[48] = {};
@@ -4961,6 +5052,7 @@ void ShotStep() {
     uintptr_t rec = active && cfg.bulletSpeed > 0.f && S.unit ? (S.fpProj ? S.fpProj : Ptr(S.unit + oUnitProjectile)) : 0;
     if (S.speedApplied && rec != S.speedRec) ShotRestoreSpeed(rec ? "weapon changed" : "first person ended");
     if (!active) ShotDamageRestore("first person ended");
+    if (!active) ShotPenRestore("first person ended");
     WeaponParamsSync();
     if (rec && !S.speedApplied) {
         float sp = 0, m = 0;

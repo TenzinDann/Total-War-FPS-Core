@@ -105,6 +105,7 @@ enum MeleeCatId { kMeleeCatShieldSpear, kMeleeCatSword, kMeleeCatHammer, kMeleeC
 int CurrentMeleeCat();
 const wchar_t* MeleeCatSection(int cat);
 int WeaponDamagePct(int idx);
+int WeaponPenetration(int idx);
 float MeleeCatDamageMul(int cat);
 float MeleeCatReachAdd(int cat);
 void SetMpBattle(bool mp);
