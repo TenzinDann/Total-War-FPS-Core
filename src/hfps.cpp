@@ -103,7 +103,6 @@ constexpr uintptr_t kRegUnitHalt904 = 0x4af1a0, kFnUnitHaltFactory904 = 0x2ed5da
 const CodePrint kUnitHaltPrints904[] = {{0x2ed5da4, 0x36, 0xf2992bea123bdfd1ull},
                                        {0x2eaf754, 0x90, 0x2e660c50610378f1ull},
                                        {0x2eeedd8, 0x38, 0x1e40299fca8b7e54ull}};
-const CodePrint kMpFlagPrints904[] = {{0x2eea97c, 0x57, 0xeb6c5089a78dfbc0ull}};
 const CodePrint kTpPrints904[] = {{0x2ecfbd4, 0xb3, 0x1987684e822436bdull},
                                  {0x2f64f54, 0x5a, 0xe98dc842affae2a9ull},
                                  {0x2f78b30, 0x167, 0xf7ff13396414fd5bull},
@@ -409,7 +408,6 @@ float EyeFromHeight(float h, float def) {
     return def;
 }
 constexpr uintptr_t oScriptBattle = 0x468, oBattleCmdQueue = 0x644e8, oBattleNoCmd1 = 0x3b0, oBattleNoCmd2 = 0x3b1;
-constexpr uintptr_t oBattleIsMp = 0x645c8;
 constexpr uintptr_t oUnitProjectile = 0x3d50;
 constexpr uintptr_t oEntId = 0x258;
 struct FireCmd {
@@ -447,7 +445,6 @@ struct alignas(16) HaltCmdBuf {
 bool g_tpOk = false;
 bool g_ovrOk = false, g_haltOk = false;
 bool g_unitHaltOk = false;
-bool g_mpFlagOk = false;
 constexpr uintptr_t oEntActivity = 0x324;
 struct EnableCmd {
     uintptr_t vt;
@@ -1121,8 +1118,6 @@ struct State {
     int adsKind = 0;
     bool exitTac = false;
     float baseFov = 0, lastFov = 0;
-    float scopeZoom = 0;
-    double tScope = 0;
     unsigned stanceLogs = 0;
     kick::CamKick camKick;
     unsigned shots = 0, shotsFailed = 0, shotLogs = 0;
@@ -1165,9 +1160,6 @@ struct State {
     uintptr_t footBlk = 0;
     bool air = false, airFar = false, spacePrev = false;
     double tAir = 0, tLand = -1, tWallCheck = 0;
-    bool jumping = false;
-    double tJump = -1;
-    unsigned jumpEdgeLogs = 0, jumpArchLogs = 0;
     unsigned jumps = 0, drops = 0, lands = 0, blocks = 0, wallLogs = 0;
     bool dropActive = false;
     float dropP0[2] = {0, 0}, dropDir[2] = {0, 0}, dropS = 0, dropTarget = 0, dropSpeed = 0;
@@ -1695,10 +1687,6 @@ void Enter(uintptr_t mgr) {
         if (cfg.fastFire && g_shotOk) FastFireInstall(sbf ? Ptr(sbf + oScriptBattle) : 0);
         if (cfg.earlyFlight && g_shotOk && cfg.fireShooter) EarlyFlightInstall(sbf ? Ptr(sbf + oScriptBattle) : 0, entity);
         if (sbf && Ptr(sbf + oScriptBattle)) LogUnitLists(Ptr(sbf + oScriptBattle));
-        uint64_t mp = 1;
-        uintptr_t btm = sbf ? Ptr(sbf + oScriptBattle) : 0;
-        if (!(g_mpFlagOk && btm && Rd(btm + oBattleIsMp, mp))) mp = 1;
-        vmgame::SetMpBattle(mp != 0);
     }
     S.fpProj = 0;
     S.fpProjId = -1;
@@ -2181,18 +2169,6 @@ struct MeleeCatCfg {
     float blockAngle;
 };
 MeleeCatCfg g_meleeCat[vmgame::kMeleeCats];
-float g_meleeDmgMul[vmgame::kMeleeCats] = {1.f, 1.f, 1.f, 1.f};
-float g_meleeReachAdd[vmgame::kMeleeCats] = {};
-static_assert(vmgame::kMeleeCats == 4, "g_meleeDmgMul 的初值按 4 类写的");
-MeleeCatCfg MeleeCatEff(int cat) {
-    MeleeCatCfg m = g_meleeCat[cat];
-    m.damageScale *= g_meleeDmgMul[cat];
-    for (MeleeKindCfg& k : m.k) {
-        k.reach += g_meleeReachAdd[cat];
-        if (k.reach < 0.3f) k.reach = 0.3f;
-    }
-    return m;
-}
 const wchar_t* const kMeleeKindKey[vmgame::kStrikeKinds] = {L"stab", L"sweep", L"heavy_sweep", L"heavy", L"bash"};
 void LoadMeleeCats(const wchar_t* ini) {
     for (int c = 0; c < vmgame::kMeleeCats; ++c) {
@@ -2515,7 +2491,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         const MeleeReq& rq = reqs[ri];
         if (rq.hero != hero || Now() - rq.t > 0.6) continue;
         const int cat = rq.cat >= 0 && rq.cat < vmgame::kMeleeCats ? rq.cat : vmgame::kMeleeCatSword;
-        const MeleeKindCfg arc = MeleeCatEff(cat).k[rq.kind];
+        const MeleeKindCfg& arc = g_meleeCat[cat].k[rq.kind];
         org[no][0] = rq.ox, org[no][1] = rq.oz;
         org[no][2] = arc.reach + (arc.splashR > 0.f && arc.splashMax > 0 ? arc.splashR : 0.f) + MeleeBigSlack();
         ++no;
@@ -2531,7 +2507,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
             continue;
         }
         const int cat = rq.cat >= 0 && rq.cat < vmgame::kMeleeCats ? rq.cat : vmgame::kMeleeCatSword;
-        const MeleeCatCfg cc = MeleeCatEff(cat);
+        const MeleeCatCfg& cc = g_meleeCat[cat];
         const MeleeKindCfg& arc = cc.k[rq.kind];
         const bool heavy = rq.kind == vmgame::kStrikeHeavySweep || rq.kind == vmgame::kStrikeHeavy;
         const float splashR = arc.splashR, splashDmg = arc.splashDmg;
@@ -2700,71 +2676,6 @@ void HitFeedback(const AimHit& hit, const float eye[3], const float fwd[3]) {
         Log("hit-fx: shot on enemy %p at %.1f m, hp %u vs damage %d + ap %d -> %s (so far %u hits / %u kills of %u shots)", (void*)hit.ent,
             hit.dist, hp, dmg, ap, kill ? "kill (bigger blood)" : "hit", g_hfx.hits, g_hfx.kills, g_hfx.shots);
 }
-struct ShotDmgRec {
-    uintptr_t rec;
-    int32_t orig[2], set[2];
-};
-struct ShotDmgState {
-    ShotDmgRec r[32];
-    int n = 0;
-    int logs = 0;
-} g_sdmg;
-void ShotDamageApply(uintptr_t rec) {
-    if (!rec || rec != S.fpProj) return;
-    const char* key = vmgame::WeaponProjectile(S.projFor)[0] ? vmgame::WeaponProjectile(S.projFor) : cfg.fireProjectile;
-    if (!strstr(key, "fps")) return;
-    const int pct = vmgame::WeaponDamagePct(S.projFor);
-    int32_t cur[2] = {0, 0};
-    if (!Rd(rec + 0x70, cur[0]) || !Rd(rec + 0x74, cur[1])) return;
-    ShotDmgRec* d = nullptr;
-    for (int i = 0; i < g_sdmg.n && !d; ++i)
-        if (g_sdmg.r[i].rec == rec) d = &g_sdmg.r[i];
-    if (!d) {
-        if (pct == 100 || g_sdmg.n >= 32) return;
-        d = &g_sdmg.r[g_sdmg.n++];
-        d->rec = rec;
-        for (int k = 0; k < 2; ++k) d->orig[k] = d->set[k] = cur[k];
-    } else if (cur[0] != d->set[0] || cur[1] != d->set[1]) {
-        for (int k = 0; k < 2; ++k) d->orig[k] = d->set[k] = cur[k];
-    }
-    int32_t want[2];
-    for (int k = 0; k < 2; ++k) {
-        want[k] = d->orig[k];
-        if (d->orig[k] > 0 && pct != 100) {
-            int64_t v = (static_cast<int64_t>(d->orig[k]) * pct + 50) / 100;
-            want[k] = v < 1 ? 1 : v > 100000 ? 100000 : static_cast<int32_t>(v);
-        }
-    }
-    if (want[0] != cur[0]) Wr(rec + 0x70, want[0]);
-    if (want[1] != cur[1]) Wr(rec + 0x74, want[1]);
-    if ((want[0] != cur[0] || want[1] != cur[1]) && g_sdmg.logs++ < 16)
-        Log("fire: custom weapon stats - weapon %d damage %d%%: projectile %p damage %d -> %d, ap %d -> %d (original %d / %d)", S.projFor, pct, (void*)rec,
-            cur[0], want[0], cur[1], want[1], d->orig[0], d->orig[1]);
-    d->set[0] = want[0];
-    d->set[1] = want[1];
-}
-void ShotDamageRestore(const char* why) {
-    int n = 0;
-    for (int i = 0; i < g_sdmg.n; ++i) {
-        ShotDmgRec& d = g_sdmg.r[i];
-        if (d.set[0] == d.orig[0] && d.set[1] == d.orig[1]) continue;
-        int32_t cur[2] = {0, 0};
-        if (Rd(d.rec + 0x70, cur[0]) && Rd(d.rec + 0x74, cur[1]) && cur[0] == d.set[0] && cur[1] == d.set[1]) {
-            Wr(d.rec + 0x70, d.orig[0]);
-            Wr(d.rec + 0x74, d.orig[1]);
-            ++n;
-        }
-        d.set[0] = d.orig[0];
-        d.set[1] = d.orig[1];
-    }
-    if (n) Log("fire: custom weapon stats - damage restored on %d projectile record(s) (%s)", n, why);
-}
-void WeaponParamsSync() {
-    for (int c = 0; c < vmgame::kMeleeCats; ++c) {
-        g_meleeDmgMul[c] = vmgame::MeleeCatDamageMul(c);
-        g_meleeReachAdd[c] = vmgame::MeleeCatReachAdd(c);
-    }
-}
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
               int nBodies, float clearance) {
     uintptr_t sb = Ptr(g_base + kGlobalScript);
@@ -2788,7 +2699,6 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
                 (void*)S.battle, (void*)queue, no1, no2, (void*)proj, projId, entId);
         return false;
     }
-    ShotDamageApply(proj);
     if (!S.loggedProj && proj) {
         S.loggedProj = true;
         float f[48] = {};
@@ -3614,38 +3524,6 @@ float FindDropPush(float x0, float z0, float dx, float dz, float foot, float ste
         return s;
     }
     return -1.f;
-}
-float FallTime(float vy, float h, float g) {
-    h = std::fmax(h, 0.1f);
-    return (vy + std::sqrt(vy * vy + 2.f * g * h)) / g;
-}
-int JumpOffEdge(const Surf* s, int n, float footNow, float startY, float stepDown) {
-    const int i = n ? PickSurface(s, n, kNoSurf, footNow, 0.05f) : -1;
-    return i >= 0 && s[i].h < startY - stepDown ? i : -1;
-}
-constexpr float kJumpHeadroom = 2.2f;
-template <class NetPass>
-bool AirCovered(const Surf* s, int n, float foot, float startY, float head, float stepDown, NetPass netPass, int* why) {
-    *why = 0;
-    bool over = false, stand = false;
-    for (int j = 0; j < n; ++j) {
-        if (s[j].h > foot + 0.3f) {
-            if (!s[j].blk || s[j].h <= foot + head) return true;
-            over = true;
-        } else if (s[j].blk && s[j].h >= startY - stepDown) {
-            stand = true;
-        }
-    }
-    if (!over) return false;
-    if (stand) {
-        *why = 1;
-        return false;
-    }
-    if (netPass()) {
-        *why = 2;
-        return false;
-    }
-    return true;
 }
 bool SurfaceNear(float x, float z, float refY, float* h, uintptr_t* blk) {
     Surf s[kMaxSurf];
@@ -4914,8 +4792,6 @@ void ShotStep() {
     bool active = S.active && g_shotOk && g_fireOk && cfg.fireEnabled;
     uintptr_t rec = active && cfg.bulletSpeed > 0.f && S.unit ? (S.fpProj ? S.fpProj : Ptr(S.unit + oUnitProjectile)) : 0;
     if (S.speedApplied && rec != S.speedRec) ShotRestoreSpeed(rec ? "weapon changed" : "first person ended");
-    if (!active) ShotDamageRestore("first person ended");
-    WeaponParamsSync();
     if (rec && !S.speedApplied) {
         float sp = 0, m = 0;
         if (Rd(rec + oProjSpeed, sp) && Rd(rec + oProjMass, m) && std::fabs(sp - cfg.bulletSpeed) < 1.f) {
@@ -5659,24 +5535,6 @@ void Apply(uintptr_t mgr) {
             }
         }
     }
-    {
-        const float sz = vmgame::ScopeCameraZoom();
-        float dtz = S.tScope > 0 ? static_cast<float>(now - S.tScope) : 0.f;
-        S.tScope = now;
-        if (!(dtz > 0.f)) dtz = 0.f;
-        if (dtz > 0.1f) dtz = 0.1f;
-        if (sz > 0.f) {
-            if (zoomCurve <= 0.001f || !(S.scopeZoom > 0.f)) {
-                S.scopeZoom = sz;
-            } else {
-                const float k = 1.f - std::exp(-dtz / 0.033f);
-                S.scopeZoom = std::exp(std::log(S.scopeZoom) + (std::log(sz) - std::log(S.scopeZoom)) * k);
-            }
-            zoomMax = std::fmax(1.f, S.scopeZoom);
-        } else {
-            S.scopeZoom = 0.f;
-        }
-    }
     float zoomNow = 1.f + (zoomMax - 1.f) * shieldZoom * zoomCurve;
     float rad = cfg.sensitivity * kPi / 180.f / zoomNow;
     S.yaw += dx * rad;
@@ -5888,9 +5746,6 @@ void Apply(uintptr_t mgr) {
             S.airStartY = S.footY;
             S.airGap = 0;
             S.tAir = now;
-            S.jumping = true;
-            S.tJump = now;
-            S.dropPolyN = 0;
             ++S.jumps;
             vmgame::MoveImpulse(1.f, 0.f);
             if (S.wallLogs++ < 80)
@@ -6154,33 +6009,20 @@ void Apply(uintptr_t mgr) {
                 }
             }
         }
-        const bool jumpLevel = S.air && S.jumping && S.tJump == S.tAir;
         if (S.air && !S.dropActive && ns) {
-            RegionNet airNet;
-            int airNetOk = -1;
-            auto covered = [&](const Surf* s, int n, float px, float pz) {
-                bool old = false;
-                for (int j = 0; j < n; ++j) old = old || s[j].h > S.footY + 0.3f;
-                if (!old || !jumpLevel) return old;
-                int why = 0;
-                const bool c = AirCovered(s, n, S.footY, S.airStartY, kJumpHeadroom, cfg.stepDown, [&] {
-                    if (airNetOk < 0) airNetOk = cfg.wallBodyNet && g_netOk && RegionNetNow(&airNet) ? 1 : 0;
-                    uintptr_t hit = 0;
-                    return airNetOk == 1 && NetStep(airNet, prevKin[0], prevKin[1], px, pz, &hit) == 0;
-                }, &why);
-                if (!c && S.jumpArchLogs++ < 20)
-                    Log("wall: jump at %.2f,%.2f (foot %.2f, took off at %.2f) under a walkway / roof - %s, not a wall body", px, pz, S.footY,
-                        S.airStartY, why == 1 ? "the take-off layer goes on under it" : "the game's ground net lets it through (arch / open passage)");
-                return c;
+            auto covered = [&](const Surf* s, int n) {
+                for (int j = 0; j < n; ++j)
+                    if (s[j].h > S.footY + 0.3f) return true;
+                return false;
             };
-            if (covered(sf, ns, S.kinPos[0], S.kinPos[1])) {
+            if (covered(sf, ns)) {
                 const float tryPos[2][2] = {{S.kinPos[0], prevKin[1]}, {prevKin[0], S.kinPos[1]}};
                 bool slid = false;
                 for (int k = 0; k < 2 && !slid; ++k) {
                     if (tryPos[k][0] == prevKin[0] && tryPos[k][1] == prevKin[1]) continue;
                     Surf s5[kMaxSurf];
                     int n5 = SurfacesAt(tryPos[k][0], tryPos[k][1], s5);
-                    if (n5 && !covered(s5, n5, tryPos[k][0], tryPos[k][1])) {
+                    if (n5 && !covered(s5, n5)) {
                         S.kinPos[0] = tryPos[k][0];
                         S.kinPos[1] = tryPos[k][1];
                         S.kinVel[k == 0 ? 1 : 0] = 0;
@@ -6197,62 +6039,6 @@ void Apply(uintptr_t mgr) {
                 }
                 if (S.blocks++ < 20) Log("wall: in the air, ran into a structure at %.2f,%.2f (foot %.2f) - %s", prevKin[0], prevKin[1], S.footY,
                                          slid ? "slid along one axis" : "held");
-            }
-        }
-        if (jumpLevel && !S.dropActive && S.footBlk && ns) {
-            const int ci = JumpOffEdge(sf, ns, S.footY, S.airStartY, cfg.stepDown);
-            if (ci >= 0) {
-                float dx = S.kinPos[0] - prevKin[0], dz = S.kinPos[1] - prevKin[1], dl = std::sqrt(dx * dx + dz * dz);
-                if (dl < 1e-4f) dx = S.kinVel[0], dz = S.kinVel[1], dl = std::sqrt(dx * dx + dz * dz);
-                if (dl < 1e-4f) dx = sy, dz = cy, dl = 1.f;
-                dx /= dl;
-                dz /= dl;
-                float drop0 = S.airStartY - sf[ci].h, gap = std::fmin(cfg.dropClearance, 0.5f + 0.3f * drop0), landH = sf[ci].h;
-                float v0 = std::sqrt(S.kinVel[0] * S.kinVel[0] + S.kinVel[1] * S.kinVel[1]);
-                float range = std::fmax(cfg.dropMaxPush, v0 * FallTime(S.vy, S.footY - landH, cfg.gravity));
-                float push = cfg.dropClearance <= 0.f ? 0.f
-                           : FindDropPush(S.kinPos[0], S.kinPos[1], dx, dz, S.airStartY, cfg.stepDown, range,
-                                          [&](float px, float pz) { return BlockNear(S.footBlk, px, pz, gap); },
-                                          [&](float px, float pz, Surf* o) { return SurfacesAt(px, pz, o); }, &landH);
-                bool clear = push >= 0.f;
-                uint32_t t3 = 0;
-                float h3[3] = {};
-                if (clear && cfg.building && g_buildOk && !S.bldInside) {
-                    float ahead = std::fmax(push, 1.5f) + 0.5f;
-                    const float q2[2] = {S.kinPos[0] + dx * ahead, S.kinPos[1] + dz * ahead};
-                    if (TallWallBetween(S.kinPos, q2, S.airStartY, &t3, h3)) clear = false;
-                }
-                if (!clear) {
-                    if (S.jumpEdgeLogs++ < 20)
-                        Log("wall: jumped over the edge at %.2f,%.2f (took off at %.2f, drop %.1f m) but %s - held, back onto the take-off layer",
-                            S.kinPos[0], S.kinPos[1], S.airStartY, drop0, push < 0.f ? "no clear landing within range (wall / tower below)"
-                                                                                      : "a tall building wall is right ahead");
-                    S.kinPos[0] = prevKin[0];
-                    S.kinPos[1] = prevKin[1];
-                    S.kinVel[0] = S.kinVel[1] = 0;
-                    ns = SurfacesAt(S.kinPos[0], S.kinPos[1], sf);
-                } else {
-                    const float tFall = FallTime(S.vy, S.footY - landH, cfg.gravity);
-                    const double tUp = now - S.tJump;
-                    S.jumping = false;
-                    S.tAir = now;
-                    ++S.drops;
-                    S.dropActive = push > 0.01f;
-                    S.dropP0[0] = S.kinPos[0];
-                    S.dropP0[1] = S.kinPos[1];
-                    S.dropDir[0] = dx;
-                    S.dropDir[1] = dz;
-                    S.dropS = 0;
-                    S.dropTarget = push;
-                    S.dropSpeed = std::fmin(20.f, std::fmax(cfg.dropPushSpeed, push / (0.8f * tFall)));
-                    S.dropPolyN = push > 0.01f ? CopyBlockPoly(S.footBlk, S.dropPoly, 16) : 0;
-                    S.dropGap = gap;
-                    S.dropKept = 0;
-                    if (S.jumpEdgeLogs++ < 20)
-                        Log("wall: jumped off the edge at %.2f,%.2f %.2f s after take-off (took off at %.2f, foot %.2f, up %.1f m/s) at %.1f m/s -> "
-                            "clear ground %.2f m out (clearance %.2f, below %.2f), min push %.1f m/s", S.kinPos[0], S.kinPos[1], tUp, S.airStartY,
-                            S.footY, S.vy, v0, push, gap, landH, S.dropSpeed);
-                }
             }
         }
         if (S.air) {
@@ -6868,7 +6654,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         break;
     case WM_MOUSEWHEEL:
         if (S.active) {
-            if (!vmgame::ScopeWheel(GET_WHEEL_DELTA_WPARAM(w))) vmgame::CycleWeapon(GET_WHEEL_DELTA_WPARAM(w) < 0 ? 1 : -1);
+            vmgame::CycleWeapon(GET_WHEEL_DELTA_WPARAM(w) < 0 ? 1 : -1);
             return 0;
         }
         break;
@@ -6920,7 +6706,7 @@ LRESULT CALLBACK HfpsChildWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         break;
     case WM_MOUSEWHEEL:
         if (S.active) {
-            if (!vmgame::ScopeWheel(GET_WHEEL_DELTA_WPARAM(w))) vmgame::CycleWeapon(GET_WHEEL_DELTA_WPARAM(w) < 0 ? 1 : -1);
+            vmgame::CycleWeapon(GET_WHEEL_DELTA_WPARAM(w) < 0 ? 1 : -1);
             return 0;
         }
         break;
@@ -7125,8 +6911,6 @@ bool VerifyGame() {
                        PrintsMatch(Prints(kUnitHaltPrints904), "silent unit halt");
         Log("move: silent unit halt when entering / leaving first person (BCQ_UNIT_ISSUE_HALT_COMMAND) %s (silent_halt=%d)",
             g_unitHaltOk ? "ok" : "OFF - falls back to the selection halt (the hero says STOP / Halt)", cfg.silentHalt);
-        g_mpFlagOk = PrintsMatch(Prints(kMpFlagPrints904), "multiplayer flag");
-        Log("custom weapon stats: multiplayer flag [battle+0x645c8] %s", g_mpFlagOk ? "ok" : "NOT verified - custom weapon stats stay off");
         g_ovrOk = o;
         g_tpOk = t;
         g_ghostOk = f && Ptr(g_base + kVtUnitEnableCmd) == g_base + kFnUnitEnableWrite && PrintsMatch(game->ghost, "ghost (unit enable)");
