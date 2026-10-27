@@ -373,6 +373,34 @@ void RefreshFireRate() {
 }
 FILETIME g_armoryTime = {};
 volatile LONG g_reqRoster = 0;
+struct CharCfg {
+    char units[256];
+    wchar_t arms[MAX_PATH * 6];
+};
+constexpr int kMaxChars = 8;
+CharCfg g_chars[kMaxChars];
+int g_charN = 0;
+char g_charUnits[2048] = "";
+volatile LONG g_armsWant = -1;
+int g_armsApplied = -1;
+size_t g_armsLogShown = 0;
+bool CsvHas(const char* csv, const char* key) {
+    const size_t kl = strlen(key);
+    for (const char* p = csv; *p;) {
+        const char* e = strchr(p, ',');
+        const size_t l = e ? static_cast<size_t>(e - p) : strlen(p);
+        if (l == kl && !strncmp(p, key, kl)) return true;
+        if (!e) break;
+        p = e + 1;
+    }
+    return false;
+}
+int CharFor(const char* unitKey) {
+    if (!unitKey || !unitKey[0]) return -1;
+    for (int i = 0; i < g_charN; ++i)
+        if (CsvHas(g_chars[i].units, unitKey)) return i;
+    return -1;
+}
 volatile LONG g_reqWeapon = 0;
 volatile LONG g_wantIdx = 0;
 volatile LONG g_switching = 0;
@@ -2001,6 +2029,18 @@ bool PrefetchReady(int i) {
 bool g_initOnly = false;
 bool g_shieldPreDone = false;
 bool g_rosterNoLoad = false;
+void ArmsLogFlush() {
+    const char* s = vm::ArmsOverrideLog();
+    size_t n = strlen(s);
+    if (n < g_armsLogShown) g_armsLogShown = 0;
+    for (const char* p = s + g_armsLogShown; *p;) {
+        const char* e = strchr(p, '\n');
+        size_t l = e ? static_cast<size_t>(e - p) : strlen(p);
+        g_log("arms: %.*s", static_cast<int>(l), p);
+        p += l + (e ? 1 : 0);
+    }
+    g_armsLogShown = n;
+}
 bool EnsureWeapon(int idx, ID3D11Device* dev) {
     if (idx < 0 || idx >= g_modelCount) return false;
     Weapon& w = g_w[idx];
@@ -2016,6 +2056,7 @@ bool EnsureWeapon(int idx, ID3D11Device* dev) {
         }
         g_log("viewmodel: [%d] ready on device %p: %u triangles, %u bones, %u clips, model %ls (init %.1f ms)", idx, (void*)dev,
               w.rend.Triangles(), w.rend.Bones(), w.rend.Clips(), g_models[idx], (Now() - t0) * 1000.0);
+        ArmsLogFlush();
         w.fxDirty = true;
         if (idx == g_modelIdx) {
             AnimReset(Now());
@@ -2213,6 +2254,20 @@ void LoadWeaponParams(const wchar_t* armoryPath, const char* flag) {
     if (want || was)
         g_log("weapon-params: custom weapon stats %s (wparams='%s', file %s, %d entries: %d weapons, %d melee classes%s)%s", on ? "ON" : "off", flag,
               read ? "read" : "missing", nEnt, nW, nC, g_mpBattle ? "; multiplayer / not verified - ignored this battle" : "", line);
+}
+void ArmsSync() {
+    const int want = static_cast<int>(g_armsWant);
+    if (want == g_armsApplied) return;
+    g_armsApplied = want;
+    vm::SetArmsOverride(want >= 0 ? g_chars[want].arms : L"");
+    g_armsLogShown = 0;
+    int n = 0;
+    for (int i = 0; i < g_modelCount; ++i)
+        if (g_w[i].rend.Ready()) UnloadWeapon(i), ++n;
+    g_log("arms: %s -> %d arms kits loaded, %d loaded weapons reload with them", want >= 0 ? g_chars[want].units : "weapon's own arms",
+          vm::ArmsOverrideCount(), n);
+    ArmsLogFlush();
+    InterlockedExchange(&g_reqRoster, 1);
 }
 void RosterStep(ID3D11Device* dev) {
     if (!InterlockedExchange(&g_reqRoster, 0)) return;
@@ -2639,6 +2694,7 @@ void WarmStep(IDXGISwapChain* sc) {
     FrameProf wp;
     wp.Start(Now());
     CheckDevice(dev);
+    ArmsSync();
     wp.Mark("device");
     bool ok = EnsureWeapon(g_modelIdx, dev);
     wp.Mark("current");
@@ -2730,6 +2786,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
     PrefetchDevice(dev);
     if (part != kPartCross) {
         CheckDevice(dev);
+        ArmsSync();
         g_fprof.Mark("device");
         if (!EnsureWeapon(g_modelIdx, dev)) {
             g_failed = true;
@@ -2969,6 +3026,12 @@ bool VerifyStatic(uintptr_t exeBase, LogFn log, const RenderAddrs& addrs) {
         g_viewRouteOk ? "ok" : "does not match this exe - with anti-aliasing off the gun stays at Present (drawn over the UI)");
     return ok;
 }
+void SetHeroKey(const char* unitKey) {
+    const int ci = CharFor(unitKey);
+    const LONG was = InterlockedExchange(&g_armsWant, ci);
+    if (was != ci) g_log("arms: hero unit key '%s' -> %s", unitKey ? unitKey : "", ci >= 0 ? g_chars[ci].units : "weapon's own arms");
+}
+const char* UnitKeys() { return g_charUnits; }
 void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
     g_base = exeBase;
     g_log = log;
@@ -2996,6 +3059,37 @@ void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
         if (*tok) swprintf(g_models[g_modelCount++], MAX_PATH * 2, L"%ls\\%ls", dllDir, tok);
         if (!end) break;
         tok = end + 1;
+    }
+    {
+        g_charN = 0;
+        g_charUnits[0] = 0;
+        for (int ci = 1; ci <= kMaxChars; ++ci) {
+            wchar_t sec[16], cu[256], ca[MAX_PATH * 2];
+            if (ci == 1)
+                wcscpy(sec, L"character");
+            else
+                swprintf(sec, 16, L"character%d", ci);
+            GetPrivateProfileStringW(sec, L"units", L"", cu, 256, g_ini);
+            GetPrivateProfileStringW(sec, L"arms", L"", ca, MAX_PATH * 2, g_ini);
+            if (!cu[0] || !ca[0]) continue;
+            CharCfg& c = g_chars[g_charN++];
+            char u8[256];
+            WideCharToMultiByte(CP_UTF8, 0, cu, -1, u8, sizeof u8, nullptr, nullptr);
+            size_t n = 0;
+            for (const char* p = u8; *p && n + 1 < sizeof c.units; ++p)
+                if (*p != ' ' && *p != '\t') c.units[n++] = *p;
+            c.units[n] = 0;
+            c.arms[0] = 0;
+            wchar_t* actx = nullptr;
+            for (wchar_t* tok = wcstok(ca, L";", &actx); tok; tok = wcstok(nullptr, L";", &actx)) {
+                while (*tok == L' ') ++tok;
+                const size_t m = wcslen(c.arms);
+                if (*tok) swprintf(c.arms + m, MAX_PATH * 6 - m, L"%ls%ls\\%ls", m ? L";" : L"", dllDir, tok);
+            }
+            const size_t ul = strlen(g_charUnits);
+            snprintf(g_charUnits + ul, sizeof g_charUnits - ul, "%s%s", ul ? "," : "", c.units);
+            log("viewmodel: character %d [%ls]: units '%s', arms %ls", g_charN, sec, c.units, c.arms);
+        }
     }
     if (!g_modelCount) swprintf(g_models[g_modelCount++], MAX_PATH * 2, L"%ls\\tenzin_fps_vm\\m7\\m7.hvm", dllDir);
     for (int i = 0; i < g_modelCount; ++i) LoadAllSettings(i, g_w[i].set);
