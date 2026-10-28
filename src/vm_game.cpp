@@ -14,6 +14,42 @@ namespace vmgame {
 void MagApply();
 void RefillForNewBattle();
 void AmmoRefillStep();
+bool CsvHas(const char* list, const char* key) {
+    size_t lk = strlen(key);
+    for (const char* p = list; lk && *p;) {
+        const char* e = p;
+        while (*e && *e != ',' && *e != ';') ++e;
+        const char* a = p;
+        while (a < e && *a == ' ') ++a;
+        const char* b = e;
+        while (b > a && b[-1] == ' ') --b;
+        if (static_cast<size_t>(b - a) == lk && !strncmp(a, key, lk)) return true;
+        p = *e ? e + 1 : e;
+    }
+    return false;
+}
+bool CsvHasW(const wchar_t* list, const char* key) {
+    char a[512];
+    snprintf(a, sizeof a, "%ls", list);
+    return CsvHas(a, key);
+}
+void CsvAppend(char* list, size_t cap, const wchar_t* add) {
+    char a[512];
+    snprintf(a, sizeof a, "%ls", add);
+    for (char* p = a; *p;) {
+        char* e = p;
+        while (*e && *e != ',' && *e != ';') ++e;
+        char c = *e;
+        *e = 0;
+        while (*p == ' ') ++p;
+        for (char* t = p + strlen(p); t > p && t[-1] == ' ';) *--t = 0;
+        if (*p && !CsvHas(list, p) && strlen(list) + strlen(p) + 2 < cap) {
+            if (list[0]) strcat(list, ",");
+            strcat(list, p);
+        }
+        p = c ? e + 1 : e;
+    }
+}
 namespace {
 RenderAddrs g_ra = {};
 const unsigned char kScCreateBytes[] = {0x4C, 0x8D, 0x83, 0x50, 0x13, 0x00, 0x00};
@@ -63,6 +99,7 @@ struct MagState {
     volatile LONG64 t0Us = 0;
     volatile LONG refillUs[3] = {};
     volatile LONG fireUs = 0;
+    volatile LONG perShot = 1;
     volatile LONG disposable = 0;
     volatile LONG reserve = -1;
     LONG ammoByModel[kMaxModels];
@@ -353,54 +390,28 @@ volatile LONG g_spent[kMaxModels] = {};
 LONG g_ammoLevel[kMaxModels] = {};
 volatile LONG g_infAmmo = 0;
 volatile LONG g_infTac = 0;
-volatile LONG g_showSelMark = 0;
-volatile LONG g_wpOn = 0;
-volatile LONG g_wDmgPct[kMaxModels] = {};
-volatile LONG g_wPenSet[kMaxModels] = {};
-volatile LONG g_catDmgPct[kMeleeCats] = {};
-volatile LONG g_catReachCm[kMeleeCats] = {};
-volatile LONG g_mpBattle = 1;
-inline bool WpLive() { return g_wpOn && !g_mpBattle; }
-float EffRpm(int i) {
-    if (i < 0 || i >= kMaxModels) return 0.f;
-    return g_w[i].set.fireRpm;
-}
-void RefreshFireRate() {
-    int m = g_mag.loadedModel;
-    if (m < 0 || m != g_modelIdx) return;
-    float rpm = EffRpm(m);
-    InterlockedExchange(&g_mag.fireUs, rpm >= 10.f && rpm <= 2000.f ? static_cast<LONG>(60e6 / rpm) : 0);
-}
 FILETIME g_armoryTime = {};
 volatile LONG g_reqRoster = 0;
+wchar_t g_mainIniName[64] = L"tenzin_fps.ini";
+bool g_fullMod = true;
+wchar_t g_addonIds[1024] = L"";
+char g_allowKeys[2048] = "";
+char g_unitKeys[4096] = "";
+char g_heroKey[64] = "";
+SRWLOCK g_heroKeyLock = SRWLOCK_INIT;
 struct CharCfg {
     char units[256];
     wchar_t arms[MAX_PATH * 6];
+    float eyeHeight;
 };
 constexpr int kMaxChars = 8;
 CharCfg g_chars[kMaxChars];
 int g_charN = 0;
-char g_charUnits[2048] = "";
+wchar_t g_mainCharUnits[512] = L"";
 volatile LONG g_armsWant = -1;
 int g_armsApplied = -1;
 size_t g_armsLogShown = 0;
-bool CsvHas(const char* csv, const char* key) {
-    const size_t kl = strlen(key);
-    for (const char* p = csv; *p;) {
-        const char* e = strchr(p, ',');
-        const size_t l = e ? static_cast<size_t>(e - p) : strlen(p);
-        if (l == kl && !strncmp(p, key, kl)) return true;
-        if (!e) break;
-        p = e + 1;
-    }
-    return false;
-}
-int CharFor(const char* unitKey) {
-    if (!unitKey || !unitKey[0]) return -1;
-    for (int i = 0; i < g_charN; ++i)
-        if (CsvHas(g_chars[i].units, unitKey)) return i;
-    return -1;
-}
+volatile LONG g_newBattle = 0;
 volatile LONG g_reqWeapon = 0;
 volatile LONG g_wantIdx = 0;
 volatile LONG g_switching = 0;
@@ -885,8 +896,7 @@ vm::Look ComputeLook() {
         if (bone >= 0) {
             const float kTwoPi = 6.2831853f;
             float pitch = kTwoPi / s.spinBarrels;
-            const float er = EffRpm(g_modelIdx);
-            float full = (er > 0 ? er : 1200.f) / 60.f / s.spinBarrels * kTwoPi;
+            float full = (s.fireRpm > 0 ? s.fireRpm : 1200.f) / 60.f / s.spinBarrels * kTwoPi;
             float a = g_mo.barrelAngle, w = g_mo.barrelSpeed, maxStep = 0.4f * pitch;
             LONG st = g_fp ? g_spin.state : 0;
             if (st == 1 || st == 2) {
@@ -2092,171 +2102,8 @@ void UnloadWeapon(int i) {
     PrefetchDiscard(i);
     if (had) g_log("weapon: unloaded model %d %ls (not carried)", i, w.set.weaponId);
 }
-struct WpEntry {
-    char id[64];
-    float dmg, pen, reach;
-    bool hasDmg, hasPen, hasReach;
-};
-const char* WpNum(const char* p, double* v) {
-    bool neg = *p == '-';
-    if (*p == '-' || *p == '+') ++p;
-    double x = 0, scale = 1;
-    bool digit = false, dot = false;
-    for (;; ++p) {
-        if (*p >= '0' && *p <= '9') {
-            digit = true;
-            if (dot) {
-                scale /= 10;
-                x += (*p - '0') * scale;
-            } else {
-                x = x * 10 + (*p - '0');
-            }
-        } else if (*p == '.' && !dot) {
-            dot = true;
-        } else {
-            break;
-        }
-    }
-    if (!digit) return nullptr;
-    *v = neg ? -x : x;
-    return p;
-}
-int ParseWeaponParams(const char* s, WpEntry* out, int cap) {
-    int n = 0;
-    const char* p = s;
-    while (*p && n < cap) {
-        if (p[0] == '-' && p[1] == '-') {
-            while (*p && *p != '\n') ++p;
-            continue;
-        }
-        if (p[0] != '[' || p[1] != '"') {
-            ++p;
-            continue;
-        }
-        p += 2;
-        WpEntry e = {};
-        size_t k = 0;
-        while (*p && *p != '"' && *p != '\n' && k + 1 < sizeof e.id) e.id[k++] = *p++;
-        e.id[k] = 0;
-        if (!k || p[0] != '"' || p[1] != ']') continue;
-        p += 2;
-        while (*p == ' ' || *p == '\t') ++p;
-        if (*p != '=') continue;
-        ++p;
-        while (*p == ' ' || *p == '\t') ++p;
-        if (*p != '{') continue;
-        ++p;
-        while (*p && *p != '}' && *p != '\n') {
-            while (*p == ' ' || *p == '\t' || *p == ',' || *p == '\r') ++p;
-            char key[16];
-            size_t kl = 0;
-            while (((*p >= 'a' && *p <= 'z') || *p == '_') && kl + 1 < sizeof key) key[kl++] = *p++;
-            key[kl] = 0;
-            while (*p == ' ' || *p == '\t') ++p;
-            double v = 0;
-            const char* end = nullptr;
-            if (kl && *p == '=') {
-                const char* q = p + 1;
-                while (*q == ' ' || *q == '\t') ++q;
-                end = WpNum(q, &v);
-            }
-            if (!end) {
-                while (*p && *p != ',' && *p != '}' && *p != '\n') ++p;
-                continue;
-            }
-            p = end;
-            if (!strcmp(key, "damage"))
-                e.dmg = static_cast<float>(v), e.hasDmg = true;
-            else if (!strcmp(key, "pen"))
-                e.pen = static_cast<float>(v), e.hasPen = true;
-            else if (!strcmp(key, "reach"))
-                e.reach = static_cast<float>(v), e.hasReach = true;
-        }
-        if (*p == '}') {
-            ++p;
-            out[n++] = e;
-        }
-    }
-    return n;
-}
-float WpClamp(float v, float lo, float hi) {
-    if (!(v >= lo)) v = lo;
-    if (!(v <= hi)) v = hi;
-    return v;
-}
-void LoadWeaponParams(const wchar_t* armoryPath, const char* flag) {
-    static WpEntry ent[kMaxModels + kMeleeCats + 32];
-    LONG dmg[kMaxModels] = {}, pen[kMaxModels] = {}, cdmg[kMeleeCats] = {}, creach[kMeleeCats] = {};
-    const bool want = !strcmp(flag, "1");
-    bool read = false;
-    int nEnt = 0, nW = 0, nC = 0;
-    if (want) {
-        wchar_t path[MAX_PATH * 2];
-        wcsncpy(path, armoryPath, MAX_PATH * 2 - 1);
-        path[MAX_PATH * 2 - 1] = 0;
-        wchar_t* slash = wcsrchr(path, L'\\');
-        wcscpy(slash ? slash + 1 : path, L"tenzin_fps_weapon_params.txt");
-        if (FILE* f = _wfopen(path, L"rb")) {
-            static char buf[256 * 1024];
-            size_t len = fread(buf, 1, sizeof buf - 1, f);
-            fclose(f);
-            buf[len] = 0;
-            nEnt = ParseWeaponParams(buf, ent, static_cast<int>(sizeof ent / sizeof ent[0]));
-            read = true;
-        }
-    }
-    char line[720];
-    int ln = 0;
-    line[0] = 0;
-    for (int e = 0; e < nEnt; ++e) {
-        const WpEntry& w = ent[e];
-        int cat = -1;
-        for (int c = 0; c < kMeleeCats && cat < 0; ++c) {
-            char sec[48];
-            snprintf(sec, sizeof sec, "%ls", kMeleeCatSec[c]);
-            if (!strcmp(sec, w.id)) cat = c;
-        }
-        if (cat >= 0) {
-            if (w.hasDmg) cdmg[cat] = lround(WpClamp(w.dmg, 10.f, 300.f));
-            if (w.hasReach) creach[cat] = lround(WpClamp(w.reach, -1.f, 2.f) * 100.f);
-            ++nC;
-            if (ln >= 0 && ln < static_cast<int>(sizeof line))
-                ln += snprintf(line + ln, sizeof line - ln, " | %s dmg %ld%% reach %+.2fm", w.id, cdmg[cat] ? cdmg[cat] : 100L, creach[cat] / 100.0);
-            continue;
-        }
-        for (int i = 0; i < g_modelCount && i < kMaxModels; ++i) {
-            char a[64];
-            snprintf(a, sizeof a, "%ls", g_w[i].set.weaponId);
-            if (!a[0] || strcmp(a, w.id)) continue;
-            if (w.hasDmg) dmg[i] = lround(WpClamp(w.dmg, 10.f, 300.f));
-            if (w.hasPen) pen[i] = lround(WpClamp(w.pen, 0.f, 20.f)) + 1;
-            ++nW;
-            if (ln >= 0 && ln < static_cast<int>(sizeof line)) {
-                char pn[16];
-                if (pen[i])
-                    snprintf(pn, sizeof pn, "%ld", pen[i] - 1);
-                else
-                    snprintf(pn, sizeof pn, "default");
-                ln += snprintf(line + ln, sizeof line - ln, " | %s dmg %ld%% pen %s", w.id, dmg[i] ? dmg[i] : 100L, pn);
-            }
-        }
-    }
-    for (int i = 0; i < kMaxModels; ++i) {
-        InterlockedExchange(&g_wDmgPct[i], dmg[i]);
-        InterlockedExchange(&g_wPenSet[i], pen[i]);
-    }
-    for (int c = 0; c < kMeleeCats; ++c) {
-        InterlockedExchange(&g_catDmgPct[c], cdmg[c]);
-        InterlockedExchange(&g_catReachCm[c], creach[c]);
-    }
-    LONG on = want && read ? 1 : 0;
-    LONG was = InterlockedExchange(&g_wpOn, on);
-    if (want || was)
-        g_log("weapon-params: custom weapon stats %s (wparams='%s', file %s, %d entries: %d weapons, %d melee classes%s)%s", on ? "ON" : "off", flag,
-              read ? "read" : "missing", nEnt, nW, nC, g_mpBattle ? "; multiplayer / not verified - ignored this battle" : "", line);
-}
 void ArmsSync() {
-    const int want = static_cast<int>(g_armsWant);
+    int want = static_cast<int>(g_armsWant);
     if (want == g_armsApplied) return;
     g_armsApplied = want;
     vm::SetArmsOverride(want >= 0 ? g_chars[want].arms : L"");
@@ -2283,8 +2130,6 @@ void RosterStep(ID3D11Device* dev) {
     ammoUp[0] = 0;
     char infAmmo[16] = "";
     char infTac[16] = "";
-    char wparams[16] = "";
-    char selMark[16] = "";
     if (FILE* f = _wfopen(path, L"r")) {
         static char line[kMaxModels * 64 + 64];
         while (fgets(line, sizeof line, f)) {
@@ -2296,13 +2141,11 @@ void RosterStep(ID3D11Device* dev) {
             if (!strncmp(line, "ammo_up=", 8)) snprintf(ammoUp, sizeof ammoUp, "%s", line + 8);
             if (!strncmp(line, "inf_ammo=", 9)) snprintf(infAmmo, sizeof infAmmo, "%s", line + 9);
             if (!strncmp(line, "inf_tac=", 8)) snprintf(infTac, sizeof infTac, "%s", line + 8);
-            if (!strncmp(line, "wparams=", 8)) snprintf(wparams, sizeof wparams, "%s", line + 8);
-            if (!strncmp(line, "sel_marker=", 11)) snprintf(selMark, sizeof selMark, "%s", line + 11);
         }
         fclose(f);
     }
     {
-        bool camp = !strcmp(mode, "campaign");
+        bool camp = g_fullMod && !strcmp(mode, "campaign");
         int nUp = 0;
         for (int i = 0; i < g_modelCount && i < kMaxModels; ++i) {
             LONG lv = 0;
@@ -2326,21 +2169,21 @@ void RosterStep(ID3D11Device* dev) {
         if (InterlockedExchange(&g_infTac, tac) != tac || tac)
             g_log("move: infinite tactical sprint stamina (MCT) %s ('%s', %s)", tac ? "ON" : "off", infTac, camp ? "campaign" : "not campaign");
     }
-    LoadWeaponParams(path, wparams);
-    {
-        LONG sm = !strcmp(selMark, "1") ? 1 : 0;
-        if (InterlockedExchange(&g_showSelMark, sm) != sm || sm)
-            g_log("ui: selection markers in first person %s (MCT sel_marker='%s')", sm ? "SHOWN" : "hidden", selMark);
-    }
-    RefreshFireRate();
     WIN32_FILE_ATTRIBUTE_DATA fa;
+    bool fresh = InterlockedExchange(&g_newBattle, 0) != 0;
     if (GetFileAttributesExW(path, GetFileExInfoStandard, &fa) &&
         CompareFileTime(&fa.ftLastWriteTime, &g_armoryTime) != 0) {
         g_armoryTime = fa.ftLastWriteTime;
-        RefillForNewBattle();
+        fresh = true;
     }
-    bool iniAll = GetPrivateProfileIntW(L"viewmodel", L"loadout_all", 0, g_ini) != 0;
-    bool all = g_loadoutAll || iniAll;
+    if (fresh) RefillForNewBattle();
+    if (!g_fullMod) mode[0] = 0, owned[0] = 0, loadout[0] = 0;
+    char hero[64];
+    AcquireSRWLockShared(&g_heroKeyLock);
+    memcpy(hero, g_heroKey, sizeof hero);
+    ReleaseSRWLockShared(&g_heroKeyLock);
+    bool iniAll = g_fullMod && GetPrivateProfileIntW(L"viewmodel", L"loadout_all", 0, g_ini) != 0;
+    bool all = g_fullMod && (g_loadoutAll || iniAll);
     InterlockedExchange(&g_rosterAll, all ? 1 : 0);
     bool campaign = !strcmp(mode, "campaign") && !iniAll;
     auto ownedHas = [&](const wchar_t* id) {
@@ -2357,12 +2200,31 @@ void RosterStep(ID3D11Device* dev) {
     };
     auto usable = [&](int i) {
         const vm::Settings& s = g_w[i].set;
-        return s.weaponId[0] && (!campaign || s.weaponDefault || ownedHas(s.weaponId));
+        bool own = hero[0] && CsvHasW(s.weaponOwner, hero);
+        return s.weaponId[0] && (own || (g_fullMod && (!campaign || s.weaponDefault || ownedHas(s.weaponId))));
     };
     LONG n = 0;
     LONG slot[kSlots] = {-1, -1, -1, -1};
     const char* from = iniAll ? "ini loadout_all (test: every weapon)" : "all usable";
-    if (all) {
+    auto own = [&](int i) {
+        const vm::Settings& s = g_w[i].set;
+        return hero[0] && s.weaponId[0] && CsvHasW(s.weaponOwner, hero);
+    };
+    auto guest = [&](int i) {
+        const vm::Settings& s = g_w[i].set;
+        return hero[0] && s.weaponId[0] && !CsvHasW(s.weaponOwner, hero) && CsvHasW(s.weaponGuest, hero);
+    };
+    bool ownAll = false;
+    for (int i = 0; i < g_modelCount && !ownAll; ++i) ownAll = own(i);
+    if (ownAll) {
+        InterlockedExchange(&g_rosterAll, 1);
+        from = g_fullMod ? "hero's own weapons + guest weapons (weapon_owner / weapon_guest; armory loadout not used for this hero)"
+                         : "core only: own weapons + guest weapons (weapon_owner / weapon_guest)";
+        for (int i = 0; i < g_modelCount; ++i)
+            if (own(i)) g_roster[n++] = i;
+        for (int i = 0; i < g_modelCount; ++i)
+            if (guest(i)) g_roster[n++] = i;
+    } else if (all) {
         for (int i = 0; i < g_modelCount; ++i)
             if (usable(i)) g_roster[n++] = i;
     } else {
@@ -2412,8 +2274,8 @@ void RosterStep(ID3D11Device* dev) {
     if (!n) g_roster[n++] = g_modelIdx;
     for (int k = 0; k < kSlots; ++k) InterlockedExchange(&g_slot[k], slot[k]);
     InterlockedExchange(&g_rosterN, n);
-    g_log("weapon: roster %ld from %s (armory file %s, mode '%s', owned '%s', loadout '%s')", n, from, mode[0] || owned[0] ? "found" : "missing",
-          mode, owned, loadout);
+    g_log("weapon: roster %ld from %s (armory file %s, mode '%s', owned '%s', loadout '%s'; hero '%s', %s)", n, from,
+          mode[0] || owned[0] ? "found" : "missing", mode, owned, loadout, hero, g_fullMod ? "full mod" : "core only: own weapons");
     bool curOk = false;
     for (LONG k = 0; k < n; ++k) {
         int i = g_roster[k];
@@ -2837,6 +2699,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                         g_fprof.Mark("hud-save");
                         if (g_fp) CastMarkerDraw(ctx, rtv, td.Width, td.Height, hw);
                         g_fprof.Mark("cast-marker");
+                        Wp().rend.SetCounterValue(g_mag.size > 0 ? static_cast<int>(g_mag.ammo) : -1);
                         if (Wp().rend.Draw(ctx, rtv, bb, td.Width, td.Height, hw, Wp().set, look)) ++g_st.draws;
                         g_fprof.Mark("gun");
                         gunProf = vm::g_drawProf;
@@ -3026,12 +2889,36 @@ bool VerifyStatic(uintptr_t exeBase, LogFn log, const RenderAddrs& addrs) {
         g_viewRouteOk ? "ok" : "does not match this exe - with anti-aliasing off the gun stays at Present (drawn over the UI)");
     return ok;
 }
-void SetHeroKey(const char* unitKey) {
-    const int ci = CharFor(unitKey);
-    const LONG was = InterlockedExchange(&g_armsWant, ci);
-    if (was != ci) g_log("arms: hero unit key '%s' -> %s", unitKey ? unitKey : "", ci >= 0 ? g_chars[ci].units : "weapon's own arms");
+void SetPayloads(const wchar_t* mainIni, bool fullMod, const wchar_t* addonIds) {
+    swprintf(g_mainIniName, 64, L"%ls", mainIni && mainIni[0] ? mainIni : L"tenzin_fps.ini");
+    g_fullMod = fullMod;
+    swprintf(g_addonIds, 1024, L"%ls", addonIds ? addonIds : L"");
 }
-const char* UnitKeys() { return g_charUnits; }
+const char* UnitKeys() { return g_unitKeys; }
+bool UnitAllowed(const char* unitKey) { return g_fullMod || (unitKey && unitKey[0] && CsvHas(g_allowKeys, unitKey)); }
+int CharFor(const char* unitKey) {
+    if (!unitKey || !unitKey[0]) return -1;
+    for (int i = 0; i < g_charN; ++i)
+        if (CsvHas(g_chars[i].units, unitKey)) return i;
+    return -1;
+}
+float EyeHeightFor(const char* unitKey, float def) {
+    int ci = CharFor(unitKey);
+    return ci >= 0 && g_chars[ci].eyeHeight > 0.f ? g_chars[ci].eyeHeight : def;
+}
+void SetHeroKey(const char* unitKey) {
+    AcquireSRWLockExclusive(&g_heroKeyLock);
+    bool changed = strncmp(g_heroKey, unitKey ? unitKey : "", sizeof g_heroKey - 1) != 0;
+    snprintf(g_heroKey, sizeof g_heroKey, "%s", unitKey ? unitKey : "");
+    ReleaseSRWLockExclusive(&g_heroKeyLock);
+    int ci = CharFor(unitKey);
+    if (ci >= 0 || g_fullMod) InterlockedExchange(&g_armsWant, ci);
+    if (changed) {
+        InterlockedExchange(&g_reqRoster, 1);
+        g_log("weapon: hero unit key '%s'", g_heroKey);
+    }
+}
+void NoteNewBattle() { InterlockedExchange(&g_newBattle, 1); }
 void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
     g_base = exeBase;
     g_log = log;
@@ -3039,7 +2926,7 @@ void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
     InitializeCriticalSection(&g_hookLock);
     QueryPerformanceFrequency(&g_qpf);
     QueryPerformanceCounter(&g_t0);
-    swprintf(g_ini, MAX_PATH, L"%ls\\tenzin_fps.ini", dllDir);
+    swprintf(g_ini, MAX_PATH, L"%ls\\%ls", dllDir, g_mainIniName);
     g_enabled = GetPrivateProfileIntW(L"viewmodel", L"enabled", 1, g_ini) != 0;
     g_testKey = IniKey(L"test_key", 0);
     g_reloadKey = IniKey(L"reload_key", VK_F8);
@@ -3050,49 +2937,112 @@ void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
     static wchar_t list[kMaxModels * MAX_PATH];
     constexpr DWORD kListLen = kMaxModels * MAX_PATH;
     GetPrivateProfileStringW(L"viewmodel", L"models", L"", list, kListLen, g_ini);
-    if (!list[0]) GetPrivateProfileStringW(L"viewmodel", L"model", L"tenzin_fps_vm\\m7\\m7.hvm", list, kListLen, g_ini);
+    if (!list[0] && !g_addonIds[0]) GetPrivateProfileStringW(L"viewmodel", L"model", L"tenzin_fps_vm\\m7\\m7.hvm", list, kListLen, g_ini);
     g_modelCount = 0;
-    for (wchar_t* tok = list; *tok && g_modelCount < kMaxModels;) {
-        wchar_t* end = wcschr(tok, L';');
+    auto addModels = [&](wchar_t* tok, const wchar_t* from) {
+        int before = g_modelCount;
+        while (*tok && g_modelCount < kMaxModels) {
+            wchar_t* end = wcschr(tok, L';');
+            if (end) *end = 0;
+            while (*tok == L' ') ++tok;
+            if (*tok) swprintf(g_models[g_modelCount++], MAX_PATH * 2, L"%ls\\%ls", dllDir, tok);
+            if (!end) {
+                tok += wcslen(tok);
+                break;
+            }
+            tok = end + 1;
+        }
+        if (*tok && g_modelCount >= kMaxModels) log("viewmodel: weapon limit %d reached - the rest of %ls is ignored", kMaxModels, from);
+        return g_modelCount - before;
+    };
+    addModels(list, g_mainIniName);
+    g_allowKeys[0] = 0;
+    wchar_t ids[1024];
+    wcscpy(ids, g_addonIds);
+    for (wchar_t* id = ids; *id;) {
+        wchar_t* end = wcschr(id, L';');
         if (end) *end = 0;
-        while (*tok == L' ') ++tok;
-        if (*tok) swprintf(g_models[g_modelCount++], MAX_PATH * 2, L"%ls\\%ls", dllDir, tok);
-        if (!end) break;
-        tok = end + 1;
-    }
-    {
-        g_charN = 0;
-        g_charUnits[0] = 0;
-        for (int ci = 1; ci <= kMaxChars; ++ci) {
-            wchar_t sec[16], cu[256], ca[MAX_PATH * 2];
-            if (ci == 1)
-                wcscpy(sec, L"character");
-            else
-                swprintf(sec, 16, L"character%d", ci);
-            GetPrivateProfileStringW(sec, L"units", L"", cu, 256, g_ini);
-            GetPrivateProfileStringW(sec, L"arms", L"", ca, MAX_PATH * 2, g_ini);
-            if (!cu[0] || !ca[0]) continue;
+        wchar_t addonIni[MAX_PATH * 2], units[512];
+        swprintf(addonIni, MAX_PATH * 2, L"%ls\\tenzin_fps_addons\\%ls.ini", dllDir, id);
+        GetPrivateProfileStringW(L"addon", L"models", L"", list, kListLen, addonIni);
+        int got = addModels(list, id);
+        GetPrivateProfileStringW(L"addon", L"units", L"", units, 512, addonIni);
+        CsvAppend(g_allowKeys, sizeof g_allowKeys, units);
+        wchar_t cu[256], ca[MAX_PATH * 2], ce[32];
+        GetPrivateProfileStringW(L"character", L"units", L"", cu, 256, addonIni);
+        if (cu[0] && g_charN < kMaxChars) {
             CharCfg& c = g_chars[g_charN++];
-            char u8[256];
-            WideCharToMultiByte(CP_UTF8, 0, cu, -1, u8, sizeof u8, nullptr, nullptr);
-            size_t n = 0;
-            for (const char* p = u8; *p && n + 1 < sizeof c.units; ++p)
-                if (*p != ' ' && *p != '\t') c.units[n++] = *p;
-            c.units[n] = 0;
+            WideCharToMultiByte(CP_UTF8, 0, cu, -1, c.units, sizeof c.units, nullptr, nullptr);
+            GetPrivateProfileStringW(L"character", L"arms", L"", ca, MAX_PATH * 2, addonIni);
             c.arms[0] = 0;
             wchar_t* actx = nullptr;
             for (wchar_t* tok = wcstok(ca, L";", &actx); tok; tok = wcstok(nullptr, L";", &actx)) {
                 while (*tok == L' ') ++tok;
-                const size_t m = wcslen(c.arms);
-                if (*tok) swprintf(c.arms + m, MAX_PATH * 6 - m, L"%ls%ls\\%ls", m ? L";" : L"", dllDir, tok);
+                size_t n = wcslen(c.arms);
+                if (*tok) swprintf(c.arms + n, MAX_PATH * 6 - n, L"%ls%ls\\%ls", n ? L";" : L"", dllDir, tok);
             }
-            const size_t ul = strlen(g_charUnits);
-            snprintf(g_charUnits + ul, sizeof g_charUnits - ul, "%s%s", ul ? "," : "", c.units);
-            log("viewmodel: character %d [%ls]: units '%s', arms %ls", g_charN, sec, c.units, c.arms);
+            GetPrivateProfileStringW(L"character", L"eye_height", L"", ce, 32, addonIni);
+            c.eyeHeight = ce[0] ? static_cast<float>(_wtof(ce)) : 0.f;
+            if (!(c.eyeHeight >= 0.2f && c.eyeHeight <= 20.f)) c.eyeHeight = 0.f;
+            log("viewmodel: weapon pack %ls: character units '%s', eye height %.3f, arms %ls", id, c.units, c.eyeHeight,
+                c.arms[0] ? c.arms : L"(weapon's own)");
+        }
+        log("viewmodel: weapon pack %ls: %d weapons, units '%ls' (%ls)", id, got, units, addonIni);
+        if (!end) break;
+        id = end + 1;
+    }
+    {
+        g_mainCharUnits[0] = 0;
+        for (int ci = 1; ci <= kMaxChars && g_charN < kMaxChars; ++ci) {
+            wchar_t sec[16], mu[256], ma[MAX_PATH * 2], me[32];
+            if (ci == 1)
+                wcscpy(sec, L"character");
+            else
+                swprintf(sec, 16, L"character%d", ci);
+            GetPrivateProfileStringW(sec, L"units", L"", mu, 256, g_ini);
+            GetPrivateProfileStringW(sec, L"arms", L"", ma, MAX_PATH * 2, g_ini);
+            if (!mu[0] || !ma[0]) continue;
+            CharCfg& c = g_chars[g_charN++];
+            WideCharToMultiByte(CP_UTF8, 0, mu, -1, c.units, sizeof c.units, nullptr, nullptr);
+            c.arms[0] = 0;
+            wchar_t* mctx = nullptr;
+            for (wchar_t* tok = wcstok(ma, L";", &mctx); tok; tok = wcstok(nullptr, L";", &mctx)) {
+                while (*tok == L' ') ++tok;
+                const size_t n = wcslen(c.arms);
+                if (*tok) swprintf(c.arms + n, MAX_PATH * 6 - n, L"%ls%ls\\%ls", n ? L";" : L"", dllDir, tok);
+            }
+            GetPrivateProfileStringW(sec, L"eye_height", L"", me, 32, g_ini);
+            c.eyeHeight = me[0] ? static_cast<float>(_wtof(me)) : 0.f;
+            if (!(c.eyeHeight >= 0.2f && c.eyeHeight <= 20.f)) c.eyeHeight = 0.f;
+            const size_t ul = wcslen(g_mainCharUnits);
+            if (ul + wcslen(mu) + 2 < sizeof g_mainCharUnits / sizeof *g_mainCharUnits)
+                swprintf(g_mainCharUnits + ul, sizeof g_mainCharUnits / sizeof *g_mainCharUnits - ul, L"%ls%ls", ul ? L"," : L"", mu);
+            log("viewmodel: main config [%ls]: character units '%s', eye height %.3f, arms %ls", sec, c.units, c.eyeHeight, c.arms);
+        }
+    }
+    if (!g_fullMod && g_allowKeys[0]) {
+        int only = -1;
+        for (const char* p = g_allowKeys; *p && only != -2;) {
+            const char* e = p;
+            while (*e && *e != ',') ++e;
+            char k[64];
+            snprintf(k, sizeof k, "%.*s", static_cast<int>(e - p), p);
+            int ci = CharFor(k);
+            only = ci < 0 ? -2 : only == -1 || only == ci ? ci : -2;
+            p = *e ? e + 1 : e;
+        }
+        if (only >= 0) {
+            InterlockedExchange(&g_armsWant, only);
+            log("viewmodel: core only, every allowed hero is character '%s' -> its arms from the start", g_chars[only].units);
         }
     }
     if (!g_modelCount) swprintf(g_models[g_modelCount++], MAX_PATH * 2, L"%ls\\tenzin_fps_vm\\m7\\m7.hvm", dllDir);
     for (int i = 0; i < g_modelCount; ++i) LoadAllSettings(i, g_w[i].set);
+    snprintf(g_unitKeys, sizeof g_unitKeys, "%s", g_allowKeys);
+    for (int i = 0; i < g_modelCount; ++i) CsvAppend(g_unitKeys, sizeof g_unitKeys, g_w[i].set.weaponOwner);
+    CsvAppend(g_unitKeys, sizeof g_unitKeys, g_mainCharUnits);
+    log("viewmodel: main config %ls (%s), weapon packs '%ls', allowed units '%s', unit keys '%s'", g_mainIniName,
+        g_fullMod ? "full mod - every hero may enter" : "core only - only the weapon packs' heroes may enter", g_addonIds, g_allowKeys, g_unitKeys);
     log("viewmodel: enabled=%d static=%d keys test=0x%02X reload=0x%02X anim=0x%02X model=0x%02X models=%d first=%ls "
         "fov=%.1f offset=%.3f,%.3f,%.3f rot=%.1f,%.1f,%.1f",
         g_enabled, g_staticOk, g_testKey, g_reloadKey, g_animKey, g_modelKey, g_modelCount, g_models[0], Wp().set.fovDeg,
@@ -3149,7 +3099,8 @@ void SpendCurrent() {
 }
 void Fire() {
     if (!Enabled() || !g_fp) return;
-    bool empty = g_mag.size > 0 && !(g_infAmmo && g_mag.disposable) && InterlockedDecrement(&g_mag.ammo) <= 0;
+    LONG per = g_mag.perShot > 1 ? g_mag.perShot : 1;
+    bool empty = g_mag.size > 0 && !(g_infAmmo && g_mag.disposable) && InterlockedExchangeAdd(&g_mag.ammo, -per) <= per;
     if (empty) InterlockedExchange(&g_reqFireLast, 1);
     QueueShot();
     InterlockedExchange(&g_reqFire, 1);
@@ -3279,7 +3230,6 @@ bool Reloading() {
     return g_mag.reload != 0;
 }
 bool InfTacStamina() { return g_infTac != 0; }
-bool ShowSelMarkers() { return g_showSelMark != 0; }
 void AmmoInfo(int* ammo, int* size, bool* reloading, int* reserve) {
     LONG s = g_mag.size, a = g_mag.ammo, r = g_mag.reserve;
     *size = s > 0 ? static_cast<int>(s) : 0;
@@ -3322,7 +3272,7 @@ void MagApply() {
     InterlockedExchange(&g_spin.upUs, static_cast<LONG>((Wp().set.spinUpTime > 0.f ? Wp().set.spinUpTime : 0.f) * 1e6f));
     InterlockedExchange(&g_spin.keepUs, static_cast<LONG>((Wp().set.spinKeep > 0.f ? Wp().set.spinKeep : 0.f) * 1e6f));
     g_an.spinSeen = 0;
-    float rpm = EffRpm(g_modelIdx);
+    float rpm = Wp().set.fireRpm;
     InterlockedExchange(&g_mag.fireUs, rpm >= 10.f && rpm <= 2000.f ? static_cast<LONG>(60e6 / rpm) : 0);
     LONG size = EffMagSize(g_modelIdx);
     auto refill = [](float sec, int clip) -> LONG {
@@ -3341,6 +3291,8 @@ void MagApply() {
     if (g_modelIdx < kMaxModels && g_spent[g_modelIdx]) ammo = 0;
     InterlockedExchange(&g_mag.size, size);
     InterlockedExchange(&g_mag.ammo, ammo);
+    InterlockedExchange(&g_mag.perShot, Wp().set.ammoPerShot > 1 ? Wp().set.ammoPerShot : 1);
+    if (g_mag.perShot > 1) g_log("viewmodel: %ld rounds per shot (ammo_per_shot)", g_mag.perShot);
     InterlockedExchange(&g_mag.disposable, Wp().set.magDisposable && size > 0 ? 1 : 0);
     {
         LONG total = size > 0 ? EffAmmoTotal(g_modelIdx) : 0;
@@ -3605,28 +3557,6 @@ int TakeMeleeStrike(int* cat) {
 }
 int CurrentMeleeCat() { return static_cast<int>(g_meleeCat); }
 const wchar_t* MeleeCatSection(int cat) { return cat >= 0 && cat < kMeleeCats ? kMeleeCatSec[cat] : L""; }
-int WeaponDamagePct(int idx) {
-    LONG p = (WpLive() && idx >= 0 && idx < kMaxModels) ? g_wDmgPct[idx] : 0;
-    return p > 0 ? static_cast<int>(p) : 100;
-}
-int WeaponPenetration(int idx) {
-    LONG p = (WpLive() && idx >= 0 && idx < kMaxModels) ? g_wPenSet[idx] : 0;
-    return p > 0 ? static_cast<int>(p - 1) : -1;
-}
-float MeleeCatDamageMul(int cat) {
-    LONG p = (WpLive() && cat >= 0 && cat < kMeleeCats) ? g_catDmgPct[cat] : 0;
-    return p > 0 ? static_cast<float>(p) / 100.f : 1.f;
-}
-float MeleeCatReachAdd(int cat) {
-    return (WpLive() && cat >= 0 && cat < kMeleeCats) ? static_cast<float>(g_catReachCm[cat]) / 100.f : 0.f;
-}
-void SetMpBattle(bool mp) {
-    LONG v = mp ? 1 : 0;
-    if (InterlockedExchange(&g_mpBattle, v) != v) {
-        g_log("weapon-params: this battle is %s", mp ? "multiplayer (or the flag is not verified) - custom weapon stats off" : "single player");
-        RefreshFireRate();
-    }
-}
 void MeleeHitFeedback(int hits) {
     LONG t = g_meleeHitQTail;
     if (t - g_meleeHitQHead >= 32) return;
