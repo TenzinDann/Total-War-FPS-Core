@@ -137,6 +137,9 @@ const CodePrint kMeleePrints904[] = {
     {0x301d3b4, 0x45, 0x57523644a9437e11ull},
     {0x146ff40, 0x50, 0x71341f795387a8ffull},
     {0x163d90, 0x6c2, 0x053387320a55e20dull}};
+const CodePrint kSelMarkPrints904[] = {
+    {0x2fda80c, 0x66, 0x6c528d4f91a98bb7ull},
+    {0x2f9ceb7, 0x21, 0x07582d2c7c603e09ull}};
 const CodePrint kUiPrints904[] = {
     {0x22cb2a8, 0x82, 0xa6ed6737bf2e4e83ull},
     {0x1bdfb70, 0x12e, 0xd1548a1dc462c4b2ull},
@@ -493,6 +496,7 @@ constexpr uintptr_t oUiHudRoot = 0x358, oUicChildCount = 0x1cc, oUicChildren = 0
 constexpr int kMaxHideUi = 12;
 constexpr uintptr_t oUicPos = 0x2c0, oUicLayout = 0x2f0, oLayoutW = 0x11c, oLayoutH = 0x120;
 bool g_uiOk = false;
+bool g_selMarkOk = false;
 struct Config {
     bool enabled = true;
     UINT toggleKey = VK_F6;
@@ -580,6 +584,7 @@ struct Config {
     bool hideHud = true;
     bool hideCursor = true;
     bool hidePaths = true;
+    bool hideSelMarkers = true;
     bool hideEdgeArrows = true;
     bool hudEnabled = true;
     bool castKeys = true;
@@ -939,6 +944,7 @@ void LoadConfig() {
     cfg.hideHud = GetPrivateProfileIntW(L"ui", L"hide_hud", 1, ini) != 0;
     cfg.hideCursor = GetPrivateProfileIntW(L"ui", L"hide_cursor", 1, ini) != 0;
     cfg.hidePaths = GetPrivateProfileIntW(L"ui", L"hide_paths", 1, ini) != 0;
+    cfg.hideSelMarkers = GetPrivateProfileIntW(L"ui", L"hide_selection_markers", 1, ini) != 0;
     cfg.hideEdgeArrows = GetPrivateProfileIntW(L"ui", L"hide_edge_arrows", 1, ini) != 0;
     cfg.hudEnabled = GetPrivateProfileIntW(L"hud", L"enabled", 1, ini) != 0;
     cfg.hudCover = GetPrivateProfileIntW(L"hud", L"cover_viewmodel", 1, ini) != 0;
@@ -1274,6 +1280,10 @@ struct State {
     uintptr_t pathMgr = 0;
     int32_t pathOrig[2] = {0, 0};
     unsigned pathRewrites = 0;
+    bool selOff = false, selWarned = false;
+    uintptr_t selMgr = 0;
+    int32_t selOrig = 0;
+    unsigned selRewrites = 0;
     uintptr_t meleeUnit = 0, meleeBattle = 0, meleeSkipUnit = 0;
     unsigned meleeLogs = 0;
     uintptr_t moraleUnit = 0, moraleBattle = 0, moraleSkipUnit = 0;
@@ -4852,6 +4862,46 @@ void EdgeCollect(uintptr_t uic, int depth) {
     if (Rd(uic + oUicChildCount, nc) && kids && nc <= 64)
         for (uint32_t i = 0; i < nc; ++i) EdgeCollect(Ptr(kids + 8 * i), depth - 1);
 }
+constexpr uintptr_t oSelMarkMode = 0x544;
+void SelMarkStep() {
+    bool want = S.active && cfg.hideSelMarkers && !vmgame::ShowSelMarkers() && g_selMarkOk;
+    if (want) {
+        uintptr_t mgr = PathMgr(S.battle);
+        int32_t m = -1;
+        if (mgr) Rd(mgr + oSelMarkMode, m);
+        if (!S.selOff) {
+            if (!mgr || m < 0 || m > 2) {
+                if (!S.selWarned) {
+                    S.selWarned = true;
+                    Log("ui: selection marker manager not verified (battle %p mgr %p mode %d); markers not hidden", (void*)S.battle,
+                        (void*)mgr, m);
+                }
+                return;
+            }
+            S.selMgr = mgr;
+            S.selOrig = m;
+            S.selOff = true;
+            S.selRewrites = 0;
+            const int32_t zero = 0;
+            Wr(mgr + oSelMarkMode, zero);
+            Log("ui: selection markers off (manager %p, mode %d -> 0)", (void*)mgr, m);
+        } else if (mgr == S.selMgr && m != 0) {
+            const int32_t zero = 0;
+            Wr(mgr + oSelMarkMode, zero);
+            if (S.selRewrites++ < 8) Log("ui: selection marker mode changed by the game (%d); set to 0 again", m);
+        }
+        return;
+    }
+    if (S.selOff) {
+        S.selOff = false;
+        if (PathMgr(S.battle) == S.selMgr) {
+            Wr(S.selMgr + oSelMarkMode, S.selOrig);
+            Log("ui: selection markers restored (mode %d)", S.selOrig);
+        } else {
+            Log("ui: selection marker manager gone (battle ended?); nothing to restore");
+        }
+    }
+}
 void EdgeStep() {
     bool want = S.active && cfg.hideEdgeArrows && g_uiOk;
     uintptr_t root = Ptr(g_base + kGlobalUiRoot);
@@ -7172,6 +7222,8 @@ bool VerifyGame() {
         Log("hero: morale lock in first person (unbreakable) %s", g_moraleLockOk ? "ok" : "OFF - morale can still break in first person");
         g_uiOk = PrintsMatch(game->ui, "battle hud hide");
         Log("ui: battle hud hiding %s", g_uiOk ? "ok" : "OFF");
+        g_selMarkOk = g_uiOk && PrintsMatch(Prints(kSelMarkPrints904), "selection markers");
+        Log("ui: hide selection markers in first person %s", g_selMarkOk ? "ok" : "OFF - the marker under the hero stays");
         g_projLookupOk = PrintsMatch(Prints(kProjLookupPrints904), "first-person projectile lookup");
         Log("fire: first-person projectile lookup %s", g_projLookupOk ? "ok" : "OFF - the guns fall back to the hero's own weapon");
         g_shotOk = PrintsMatch(game->shot, "fire owner / bullet speed");
@@ -7805,6 +7857,7 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     UiStep();
     CursorStep();
     PathStep();
+    SelMarkStep();
     EdgeStep();
     ShotStep();
     HideSelfStep();

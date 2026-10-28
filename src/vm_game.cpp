@@ -390,6 +390,7 @@ volatile LONG g_spent[kMaxModels] = {};
 LONG g_ammoLevel[kMaxModels] = {};
 volatile LONG g_infAmmo = 0;
 volatile LONG g_infTac = 0;
+volatile LONG g_showSelMark = 0;
 FILETIME g_armoryTime = {};
 volatile LONG g_reqRoster = 0;
 wchar_t g_mainIniName[64] = L"tenzin_fps.ini";
@@ -2130,6 +2131,7 @@ void RosterStep(ID3D11Device* dev) {
     ammoUp[0] = 0;
     char infAmmo[16] = "";
     char infTac[16] = "";
+    char selMark[16] = "";
     if (FILE* f = _wfopen(path, L"r")) {
         static char line[kMaxModels * 64 + 64];
         while (fgets(line, sizeof line, f)) {
@@ -2141,6 +2143,7 @@ void RosterStep(ID3D11Device* dev) {
             if (!strncmp(line, "ammo_up=", 8)) snprintf(ammoUp, sizeof ammoUp, "%s", line + 8);
             if (!strncmp(line, "inf_ammo=", 9)) snprintf(infAmmo, sizeof infAmmo, "%s", line + 9);
             if (!strncmp(line, "inf_tac=", 8)) snprintf(infTac, sizeof infTac, "%s", line + 8);
+            if (!strncmp(line, "sel_marker=", 11)) snprintf(selMark, sizeof selMark, "%s", line + 11);
         }
         fclose(f);
     }
@@ -2168,6 +2171,10 @@ void RosterStep(ID3D11Device* dev) {
         LONG tac = camp && !strcmp(infTac, "1") ? 1 : 0;
         if (InterlockedExchange(&g_infTac, tac) != tac || tac)
             g_log("move: infinite tactical sprint stamina (MCT) %s ('%s', %s)", tac ? "ON" : "off", infTac, camp ? "campaign" : "not campaign");
+        LONG sm = g_fullMod && !strcmp(selMark, "1") ? 1 : 0;
+        if (InterlockedExchange(&g_showSelMark, sm) != sm || sm)
+            g_log("ui: selection markers in first person %s (MCT sel_marker='%s'%s)", sm ? "SHOWN" : "hidden", selMark,
+                  g_fullMod ? "" : ", core only - not read");
     }
     WIN32_FILE_ATTRIBUTE_DATA fa;
     bool fresh = InterlockedExchange(&g_newBattle, 0) != 0;
@@ -3230,6 +3237,7 @@ bool Reloading() {
     return g_mag.reload != 0;
 }
 bool InfTacStamina() { return g_infTac != 0; }
+bool ShowSelMarkers() { return g_showSelMark != 0; }
 void AmmoInfo(int* ammo, int* size, bool* reloading, int* reserve) {
     LONG s = g_mag.size, a = g_mag.ammo, r = g_mag.reserve;
     *size = s > 0 ? static_cast<int>(s) : 0;
