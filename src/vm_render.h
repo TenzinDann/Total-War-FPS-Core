@@ -154,6 +154,7 @@ struct Settings {
     float hitFxScale = 1.0f;
     float hitFxAlpha = 0.85f;
     float hitFxColor[3] = {0.42f, 0.03f, 0.02f};
+    float tracerTint[3] = {1.f, 1.f, 1.f};
     bool flashGas = false;
     wchar_t flashGasFx[128] = L"";
     float flashGasScale = 1.0f;
@@ -713,8 +714,6 @@ private:
     void EnsureDistDepth(UINT w, UINT h);
     void EvalBones(const Look& look);
     void ArmIk(const Settings& s, const float* k12);
-    void TwistSetup();
-    void TwistBones();
     void ShieldIk(const Look& look, const float* nInv12);
     void FinishBones(float* palette , int muzzleBone, const float* muzzleLocal, float* muzzleModel,
                      const float* axisLocal, const float* upLocal, float* axisModel, float* upModel);
@@ -762,10 +761,6 @@ private:
     float barrelDir_ = -1.f;
     int armBone_[2][3] = {{-1, -1, -1}, {-1, -1, -1}};
     int gunBone_ = -1, handTag_[2] = {-1, -1};
-    static constexpr int kMaxTwist = 16;
-    int twistN_[2] = {0, 0}, twistBone_[2][kMaxTwist] = {}, twistNum_[2][kMaxTwist] = {};
-    float twistFrac_[2][kMaxTwist] = {}, twistAxis_[2][3] = {}, twistBindQ_[2][4] = {}, twistPrev_[2] = {0.f, 0.f};
-    bool twistHave_[2] = {false, false};
     int fingerBone_[19] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
     float ikResidual_[2] = {-1.f, -1.f}, ikShift_[2] = {0.f, 0.f};
     bool shieldViewValid_ = false;
@@ -783,9 +778,6 @@ private:
 };
 void AnimStatePush();
 void AnimStatePop();
-void SetArmsOverride(const wchar_t* list);
-int ArmsOverrideCount();
-const char* ArmsOverrideLog();
 namespace prefetch {
 bool Model(int tag, const wchar_t* hvmPath, int* files, size_t* bytes, char* err, size_t errLen);
 void Drop(int tag);

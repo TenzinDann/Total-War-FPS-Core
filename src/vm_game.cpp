@@ -84,7 +84,6 @@ SRWLOCK g_kickLock = SRWLOCK_INIT;
 volatile LONG g_kickShots = 0;
 kick::GunSpring g_gunKick;
 volatile LONG g_jlJumpMilli = 0, g_jlLandMilli = 0;
-volatile LONG g_jlCrouchMilli = 0;
 float g_jlX[2] = {}, g_jlV[2] = {};
 kick::Sustain g_sustain;
 kick::Jitter g_jitter;
@@ -353,18 +352,23 @@ volatile LONG g_spent[kMaxModels] = {};
 LONG g_ammoLevel[kMaxModels] = {};
 volatile LONG g_infAmmo = 0;
 volatile LONG g_infTac = 0;
-volatile LONG g_showSelMark = 0;
-volatile LONG g_kbAzerty = 0;
 volatile LONG g_wpOn = 0;
 volatile LONG g_wDmgPct[kMaxModels] = {};
-volatile LONG g_wPenSet[kMaxModels] = {};
+volatile LONG g_wRpmPct[kMaxModels] = {};
 volatile LONG g_catDmgPct[kMeleeCats] = {};
 volatile LONG g_catReachCm[kMeleeCats] = {};
 volatile LONG g_mpBattle = 1;
 inline bool WpLive() { return g_wpOn && !g_mpBattle; }
 float EffRpm(int i) {
     if (i < 0 || i >= kMaxModels) return 0.f;
-    return g_w[i].set.fireRpm;
+    float r = g_w[i].set.fireRpm;
+    LONG p = WpLive() ? g_wRpmPct[i] : 0;
+    if (r > 0.f && p > 0 && p != 100) {
+        r = r * static_cast<float>(p) / 100.f;
+        if (r > 2000.f) r = 2000.f;
+        if (r < 10.f) r = 10.f;
+    }
+    return r;
 }
 void RefreshFireRate() {
     int m = g_mag.loadedModel;
@@ -374,34 +378,6 @@ void RefreshFireRate() {
 }
 FILETIME g_armoryTime = {};
 volatile LONG g_reqRoster = 0;
-struct CharCfg {
-    char units[256];
-    wchar_t arms[MAX_PATH * 6];
-};
-constexpr int kMaxChars = 8;
-CharCfg g_chars[kMaxChars];
-int g_charN = 0;
-char g_charUnits[2048] = "";
-volatile LONG g_armsWant = -1;
-int g_armsApplied = -1;
-size_t g_armsLogShown = 0;
-bool CsvHas(const char* csv, const char* key) {
-    const size_t kl = strlen(key);
-    for (const char* p = csv; *p;) {
-        const char* e = strchr(p, ',');
-        const size_t l = e ? static_cast<size_t>(e - p) : strlen(p);
-        if (l == kl && !strncmp(p, key, kl)) return true;
-        if (!e) break;
-        p = e + 1;
-    }
-    return false;
-}
-int CharFor(const char* unitKey) {
-    if (!unitKey || !unitKey[0]) return -1;
-    for (int i = 0; i < g_charN; ++i)
-        if (CsvHas(g_chars[i].units, unitKey)) return i;
-    return -1;
-}
 volatile LONG g_reqWeapon = 0;
 volatile LONG g_wantIdx = 0;
 volatile LONG g_switching = 0;
@@ -961,7 +937,6 @@ vm::Look ComputeLook() {
     {
         static const float kJlSpring[2] = {6.f, 0.45f};
         float jump = InterlockedExchange(&g_jlJumpMilli, 0) * 1e-3f, land = InterlockedExchange(&g_jlLandMilli, 0) * 1e-3f;
-        float crouch = InterlockedExchange(&g_jlCrouchMilli, 0) * 1e-3f;
         if (!g_fp) {
             g_jlX[0] = g_jlX[1] = g_jlV[0] = g_jlV[1] = 0.f;
         } else {
@@ -975,10 +950,6 @@ vm::Look ComputeLook() {
                 g_jlV[0] += kick::Impulse(-(0.012f + 0.030f * land) * k, kJlSpring[0], kJlSpring[1]);
                 g_jlV[1] += kick::Impulse(-(0.8f + 3.0f * land) * k, kJlSpring[0], kJlSpring[1]);
                 Wp().stepFoot.Play(Wp().set.stepFootVolume * (0.8f + 0.7f * land));
-            }
-            if (crouch != 0.f) {
-                g_jlV[0] += kick::Impulse(-0.008f * k * crouch, kJlSpring[0], kJlSpring[1]);
-                g_jlV[1] += kick::Impulse(-0.5f * k * crouch, kJlSpring[0], kJlSpring[1]);
             }
             kick::StepSprings(g_jlX, g_jlV, 2, kJlSpring, dt);
             l.kickPos[1] += g_jlX[0];
@@ -2038,18 +2009,6 @@ bool PrefetchReady(int i) {
 bool g_initOnly = false;
 bool g_shieldPreDone = false;
 bool g_rosterNoLoad = false;
-void ArmsLogFlush() {
-    const char* s = vm::ArmsOverrideLog();
-    size_t n = strlen(s);
-    if (n < g_armsLogShown) g_armsLogShown = 0;
-    for (const char* p = s + g_armsLogShown; *p;) {
-        const char* e = strchr(p, '\n');
-        size_t l = e ? static_cast<size_t>(e - p) : strlen(p);
-        g_log("arms: %.*s", static_cast<int>(l), p);
-        p += l + (e ? 1 : 0);
-    }
-    g_armsLogShown = n;
-}
 bool EnsureWeapon(int idx, ID3D11Device* dev) {
     if (idx < 0 || idx >= g_modelCount) return false;
     Weapon& w = g_w[idx];
@@ -2065,7 +2024,6 @@ bool EnsureWeapon(int idx, ID3D11Device* dev) {
         }
         g_log("viewmodel: [%d] ready on device %p: %u triangles, %u bones, %u clips, model %ls (init %.1f ms)", idx, (void*)dev,
               w.rend.Triangles(), w.rend.Bones(), w.rend.Clips(), g_models[idx], (Now() - t0) * 1000.0);
-        ArmsLogFlush();
         w.fxDirty = true;
         if (idx == g_modelIdx) {
             AnimReset(Now());
@@ -2103,8 +2061,8 @@ void UnloadWeapon(int i) {
 }
 struct WpEntry {
     char id[64];
-    float dmg, pen, reach;
-    bool hasDmg, hasPen, hasReach;
+    float dmg, rpm, reach;
+    bool hasDmg, hasRpm, hasReach;
 };
 const char* WpNum(const char* p, double* v) {
     bool neg = *p == '-';
@@ -2176,8 +2134,8 @@ int ParseWeaponParams(const char* s, WpEntry* out, int cap) {
             p = end;
             if (!strcmp(key, "damage"))
                 e.dmg = static_cast<float>(v), e.hasDmg = true;
-            else if (!strcmp(key, "pen"))
-                e.pen = static_cast<float>(v), e.hasPen = true;
+            else if (!strcmp(key, "rpm"))
+                e.rpm = static_cast<float>(v), e.hasRpm = true;
             else if (!strcmp(key, "reach"))
                 e.reach = static_cast<float>(v), e.hasReach = true;
         }
@@ -2195,7 +2153,7 @@ float WpClamp(float v, float lo, float hi) {
 }
 void LoadWeaponParams(const wchar_t* armoryPath, const char* flag) {
     static WpEntry ent[kMaxModels + kMeleeCats + 32];
-    LONG dmg[kMaxModels] = {}, pen[kMaxModels] = {}, cdmg[kMeleeCats] = {}, creach[kMeleeCats] = {};
+    LONG dmg[kMaxModels] = {}, rpm[kMaxModels] = {}, cdmg[kMeleeCats] = {}, creach[kMeleeCats] = {};
     const bool want = !strcmp(flag, "1");
     bool read = false;
     int nEnt = 0, nW = 0, nC = 0;
@@ -2238,21 +2196,15 @@ void LoadWeaponParams(const wchar_t* armoryPath, const char* flag) {
             snprintf(a, sizeof a, "%ls", g_w[i].set.weaponId);
             if (!a[0] || strcmp(a, w.id)) continue;
             if (w.hasDmg) dmg[i] = lround(WpClamp(w.dmg, 10.f, 300.f));
-            if (w.hasPen) pen[i] = lround(WpClamp(w.pen, 0.f, 20.f)) + 1;
+            if (w.hasRpm) rpm[i] = lround(WpClamp(w.rpm, 50.f, 200.f));
             ++nW;
-            if (ln >= 0 && ln < static_cast<int>(sizeof line)) {
-                char pn[16];
-                if (pen[i])
-                    snprintf(pn, sizeof pn, "%ld", pen[i] - 1);
-                else
-                    snprintf(pn, sizeof pn, "default");
-                ln += snprintf(line + ln, sizeof line - ln, " | %s dmg %ld%% pen %s", w.id, dmg[i] ? dmg[i] : 100L, pn);
-            }
+            if (ln >= 0 && ln < static_cast<int>(sizeof line))
+                ln += snprintf(line + ln, sizeof line - ln, " | %s dmg %ld%% rpm %ld%%", w.id, dmg[i] ? dmg[i] : 100L, rpm[i] ? rpm[i] : 100L);
         }
     }
     for (int i = 0; i < kMaxModels; ++i) {
         InterlockedExchange(&g_wDmgPct[i], dmg[i]);
-        InterlockedExchange(&g_wPenSet[i], pen[i]);
+        InterlockedExchange(&g_wRpmPct[i], rpm[i]);
     }
     for (int c = 0; c < kMeleeCats; ++c) {
         InterlockedExchange(&g_catDmgPct[c], cdmg[c]);
@@ -2263,20 +2215,6 @@ void LoadWeaponParams(const wchar_t* armoryPath, const char* flag) {
     if (want || was)
         g_log("weapon-params: custom weapon stats %s (wparams='%s', file %s, %d entries: %d weapons, %d melee classes%s)%s", on ? "ON" : "off", flag,
               read ? "read" : "missing", nEnt, nW, nC, g_mpBattle ? "; multiplayer / not verified - ignored this battle" : "", line);
-}
-void ArmsSync() {
-    const int want = static_cast<int>(g_armsWant);
-    if (want == g_armsApplied) return;
-    g_armsApplied = want;
-    vm::SetArmsOverride(want >= 0 ? g_chars[want].arms : L"");
-    g_armsLogShown = 0;
-    int n = 0;
-    for (int i = 0; i < g_modelCount; ++i)
-        if (g_w[i].rend.Ready()) UnloadWeapon(i), ++n;
-    g_log("arms: %s -> %d arms kits loaded, %d loaded weapons reload with them", want >= 0 ? g_chars[want].units : "weapon's own arms",
-          vm::ArmsOverrideCount(), n);
-    ArmsLogFlush();
-    InterlockedExchange(&g_reqRoster, 1);
 }
 void RosterStep(ID3D11Device* dev) {
     if (!InterlockedExchange(&g_reqRoster, 0)) return;
@@ -2293,8 +2231,6 @@ void RosterStep(ID3D11Device* dev) {
     char infAmmo[16] = "";
     char infTac[16] = "";
     char wparams[16] = "";
-    char selMark[16] = "";
-    char kbAzerty[16] = "";
     if (FILE* f = _wfopen(path, L"r")) {
         static char line[kMaxModels * 64 + 64];
         while (fgets(line, sizeof line, f)) {
@@ -2307,8 +2243,6 @@ void RosterStep(ID3D11Device* dev) {
             if (!strncmp(line, "inf_ammo=", 9)) snprintf(infAmmo, sizeof infAmmo, "%s", line + 9);
             if (!strncmp(line, "inf_tac=", 8)) snprintf(infTac, sizeof infTac, "%s", line + 8);
             if (!strncmp(line, "wparams=", 8)) snprintf(wparams, sizeof wparams, "%s", line + 8);
-            if (!strncmp(line, "sel_marker=", 11)) snprintf(selMark, sizeof selMark, "%s", line + 11);
-            if (!strncmp(line, "kb_azerty=", 10)) snprintf(kbAzerty, sizeof kbAzerty, "%s", line + 10);
         }
         fclose(f);
     }
@@ -2338,17 +2272,6 @@ void RosterStep(ID3D11Device* dev) {
             g_log("move: infinite tactical sprint stamina (MCT) %s ('%s', %s)", tac ? "ON" : "off", infTac, camp ? "campaign" : "not campaign");
     }
     LoadWeaponParams(path, wparams);
-    {
-        LONG sm = !strcmp(selMark, "1") ? 1 : 0;
-        if (InterlockedExchange(&g_showSelMark, sm) != sm || sm)
-            g_log("ui: selection markers in first person %s (MCT sel_marker='%s')", sm ? "SHOWN" : "hidden", selMark);
-    }
-    {
-        LONG az = !strcmp(kbAzerty, "1") ? 1 : 0;
-        if (InterlockedExchange(&g_kbAzerty, az) != az || az)
-            g_log("keys: %s layout (MCT kb_azerty='%s')%s", az ? "AZERTY" : "QWERTY", kbAzerty,
-                  az ? " - move Z/Q/S/D, gun shield A, Alt+) / Alt+= cast slots 11 / 12" : "");
-    }
     RefreshFireRate();
     WIN32_FILE_ATTRIBUTE_DATA fa;
     if (GetFileAttributesExW(path, GetFileExInfoStandard, &fa) &&
@@ -2711,7 +2634,6 @@ void WarmStep(IDXGISwapChain* sc) {
     FrameProf wp;
     wp.Start(Now());
     CheckDevice(dev);
-    ArmsSync();
     wp.Mark("device");
     bool ok = EnsureWeapon(g_modelIdx, dev);
     wp.Mark("current");
@@ -2803,7 +2725,6 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
     PrefetchDevice(dev);
     if (part != kPartCross) {
         CheckDevice(dev);
-        ArmsSync();
         g_fprof.Mark("device");
         if (!EnsureWeapon(g_modelIdx, dev)) {
             g_failed = true;
@@ -3043,12 +2964,6 @@ bool VerifyStatic(uintptr_t exeBase, LogFn log, const RenderAddrs& addrs) {
         g_viewRouteOk ? "ok" : "does not match this exe - with anti-aliasing off the gun stays at Present (drawn over the UI)");
     return ok;
 }
-void SetHeroKey(const char* unitKey) {
-    const int ci = CharFor(unitKey);
-    const LONG was = InterlockedExchange(&g_armsWant, ci);
-    if (was != ci) g_log("arms: hero unit key '%s' -> %s", unitKey ? unitKey : "", ci >= 0 ? g_chars[ci].units : "weapon's own arms");
-}
-const char* UnitKeys() { return g_charUnits; }
 void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
     g_base = exeBase;
     g_log = log;
@@ -3076,37 +2991,6 @@ void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
         if (*tok) swprintf(g_models[g_modelCount++], MAX_PATH * 2, L"%ls\\%ls", dllDir, tok);
         if (!end) break;
         tok = end + 1;
-    }
-    {
-        g_charN = 0;
-        g_charUnits[0] = 0;
-        for (int ci = 1; ci <= kMaxChars; ++ci) {
-            wchar_t sec[16], cu[256], ca[MAX_PATH * 2];
-            if (ci == 1)
-                wcscpy(sec, L"character");
-            else
-                swprintf(sec, 16, L"character%d", ci);
-            GetPrivateProfileStringW(sec, L"units", L"", cu, 256, g_ini);
-            GetPrivateProfileStringW(sec, L"arms", L"", ca, MAX_PATH * 2, g_ini);
-            if (!cu[0] || !ca[0]) continue;
-            CharCfg& c = g_chars[g_charN++];
-            char u8[256];
-            WideCharToMultiByte(CP_UTF8, 0, cu, -1, u8, sizeof u8, nullptr, nullptr);
-            size_t n = 0;
-            for (const char* p = u8; *p && n + 1 < sizeof c.units; ++p)
-                if (*p != ' ' && *p != '\t') c.units[n++] = *p;
-            c.units[n] = 0;
-            c.arms[0] = 0;
-            wchar_t* actx = nullptr;
-            for (wchar_t* tok = wcstok(ca, L";", &actx); tok; tok = wcstok(nullptr, L";", &actx)) {
-                while (*tok == L' ') ++tok;
-                const size_t m = wcslen(c.arms);
-                if (*tok) swprintf(c.arms + m, MAX_PATH * 6 - m, L"%ls%ls\\%ls", m ? L";" : L"", dllDir, tok);
-            }
-            const size_t ul = strlen(g_charUnits);
-            snprintf(g_charUnits + ul, sizeof g_charUnits - ul, "%s%s", ul ? "," : "", c.units);
-            log("viewmodel: character %d [%ls]: units '%s', arms %ls", g_charN, sec, c.units, c.arms);
-        }
     }
     if (!g_modelCount) swprintf(g_models[g_modelCount++], MAX_PATH * 2, L"%ls\\tenzin_fps_vm\\m7\\m7.hvm", dllDir);
     for (int i = 0; i < g_modelCount; ++i) LoadAllSettings(i, g_w[i].set);
@@ -3296,8 +3180,6 @@ bool Reloading() {
     return g_mag.reload != 0;
 }
 bool InfTacStamina() { return g_infTac != 0; }
-bool ShowSelMarkers() { return g_showSelMark != 0; }
-bool KbAzerty() { return g_kbAzerty != 0; }
 void AmmoInfo(int* ammo, int* size, bool* reloading, int* reserve) {
     LONG s = g_mag.size, a = g_mag.ammo, r = g_mag.reserve;
     *size = s > 0 ? static_cast<int>(s) : 0;
@@ -3577,9 +3459,6 @@ void ShieldGame(float* weight, float* moveScale, float* zoomKeep) {
     *zoomKeep = 1.f - (1.f - g_sh.zoomMilli * 1e-3f) * w;
 }
 float ShieldCamKick() { return InterlockedExchange(&g_sh.camKickMdeg, 0) * 1e-3f; }
-void CrouchImpulse(float s) {
-    InterlockedExchangeAdd(&g_jlCrouchMilli, static_cast<LONG>(s * 1000.f + (s < 0.f ? -0.5f : 0.5f)));
-}
 void MoveImpulse(float jump, float land) {
     if (jump > 0.f) InterlockedExchangeAdd(&g_jlJumpMilli, static_cast<LONG>(jump * 1000.f + 0.5f));
     if (land > 0.f) InterlockedExchangeAdd(&g_jlLandMilli, static_cast<LONG>(land * 1000.f + 0.5f));
@@ -3626,10 +3505,6 @@ const wchar_t* MeleeCatSection(int cat) { return cat >= 0 && cat < kMeleeCats ? 
 int WeaponDamagePct(int idx) {
     LONG p = (WpLive() && idx >= 0 && idx < kMaxModels) ? g_wDmgPct[idx] : 0;
     return p > 0 ? static_cast<int>(p) : 100;
-}
-int WeaponPenetration(int idx) {
-    LONG p = (WpLive() && idx >= 0 && idx < kMaxModels) ? g_wPenSet[idx] : 0;
-    return p > 0 ? static_cast<int>(p - 1) : -1;
 }
 float MeleeCatDamageMul(int cat) {
     LONG p = (WpLive() && cat >= 0 && cat < kMeleeCats) ? g_catDmgPct[cat] : 0;

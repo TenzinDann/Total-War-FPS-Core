@@ -12,7 +12,6 @@
 #include "vm_audio.h"
 #ifdef HFPS_PACK_ASSETS
 #include "pack_extract.h"
-#include "foreign_hook.h"
 #endif
 extern "C" {
 void* p_GetFileVersionInfoA;
@@ -138,9 +137,6 @@ const CodePrint kMeleePrints904[] = {
     {0x301d3b4, 0x45, 0x57523644a9437e11ull},
     {0x146ff40, 0x50, 0x71341f795387a8ffull},
     {0x163d90, 0x6c2, 0x053387320a55e20dull}};
-const CodePrint kSelMarkPrints904[] = {
-    {0x2fda80c, 0x66, 0x6c528d4f91a98bb7ull},
-    {0x2f9ceb7, 0x21, 0x07582d2c7c603e09ull}};
 const CodePrint kUiPrints904[] = {
     {0x22cb2a8, 0x82, 0xa6ed6737bf2e4e83ull},
     {0x1bdfb70, 0x12e, 0xd1548a1dc462c4b2ull},
@@ -175,13 +171,6 @@ const CodePrint kShotPrints904[] = {
     {0x3253204, 0x390, 0x963dcd7a776dc208ull},
     {0x305947c, 0x40, 0x3723d2b3015e36c0ull},
     {0x8d3ca0, 0x3, 0x58389c18233078ffull},
-    {0x2f1ad84, 0x172, 0x00629d11bc269ca9ull},
-    {0x15186c4, 0x2d, 0x568d96aaf3eb0794ull},
-    {0x500c6c, 0xc4, 0x1f11cb2d47ce53e1ull},
-    {0x500294, 0x13, 0xa18aa5532e26f9aeull},
-    {0x4d7960, 0x39, 0xdf066808b9520cc0ull},
-    {0x4d8580, 0x59, 0x78aac2ac213eed1cull}};
-const CodePrint kProjLookupPrints904[] = {
     {0x2f1ad84, 0x172, 0x00629d11bc269ca9ull},
     {0x15186c4, 0x2d, 0x568d96aaf3eb0794ull},
     {0x500c6c, 0xc4, 0x1f11cb2d47ce53e1ull},
@@ -486,7 +475,6 @@ bool g_meleeOk = false;
 constexpr int32_t kAttrUnbreakable = 0x15;
 bool g_moraleLockOk = false;
 bool g_shotOk = false;
-bool g_projLookupOk = false;
 bool g_meleeHitOk = false;
 bool g_noKnockOk = false;
 bool g_shieldGameOk = false;
@@ -499,7 +487,6 @@ constexpr uintptr_t oUiHudRoot = 0x358, oUicChildCount = 0x1cc, oUicChildren = 0
 constexpr int kMaxHideUi = 12;
 constexpr uintptr_t oUicPos = 0x2c0, oUicLayout = 0x2f0, oLayoutW = 0x11c, oLayoutH = 0x120;
 bool g_uiOk = false;
-bool g_selMarkOk = false;
 struct Config {
     bool enabled = true;
     UINT toggleKey = VK_F6;
@@ -558,9 +545,6 @@ struct Config {
     float leadAutoTau = 1.5f;
     bool wall = true;
     float stepUp = 0.6f, stepDown = 0.8f, gravity = 20.3f, jumpHeight = 0.f, airControl = 0.35f, airTpMax = 1.5f, landDip = 0.12f;
-    bool crouch = true, crouchToggle = true;
-    unsigned crouchKey = VK_CONTROL;
-    float crouchEye = 0.65f, crouchSpeed = 0.5f, crouchTime = 0.2f;
     float dropClearance = 3.5f, dropPushSpeed = 6.f, dropMaxPush = 6.f;
     bool building = true;
     float bldLow = 1.f, bldHigh = 2.05f, bldSkin = 0.4f;
@@ -587,7 +571,6 @@ struct Config {
     bool hideHud = true;
     bool hideCursor = true;
     bool hidePaths = true;
-    bool hideSelMarkers = true;
     bool hideEdgeArrows = true;
     bool hudEnabled = true;
     bool castKeys = true;
@@ -831,18 +814,6 @@ void LoadConfig() {
     cfg.airControl = IniF(L"move", L"air_control", 0.35f, ini);
     cfg.airTpMax = IniF(L"move", L"air_teleport_max", 1.5f, ini);
     cfg.landDip = IniF(L"move", L"land_dip", 0.12f, ini);
-    cfg.crouch = GetPrivateProfileIntW(L"move", L"crouch", 1, ini) != 0;
-    cfg.crouchKey = GetPrivateProfileIntW(L"move", L"crouch_key", VK_CONTROL, ini);
-    if (!(cfg.crouchKey > 0 && cfg.crouchKey < 0xFF)) cfg.crouchKey = VK_CONTROL;
-    cfg.crouchToggle = GetPrivateProfileIntW(L"move", L"crouch_toggle", 1, ini) != 0;
-    cfg.crouchEye = IniF(L"move", L"crouch_eye", 0.65f, ini);
-    cfg.crouchSpeed = IniF(L"move", L"crouch_speed", 0.5f, ini);
-    cfg.crouchTime = IniF(L"move", L"crouch_time", 0.2f, ini);
-    if (!(cfg.crouchEye >= 0.3f && cfg.crouchEye <= 1.f)) cfg.crouchEye = 0.65f;
-    if (!(cfg.crouchSpeed >= 0.1f && cfg.crouchSpeed <= 1.f)) cfg.crouchSpeed = 0.5f;
-    if (!(cfg.crouchTime >= 0.f && cfg.crouchTime <= 1.f)) cfg.crouchTime = 0.2f;
-    Log("crouch: enabled=%d key=0x%02X %s eye x%.2f speed x%.2f time %.2f s", cfg.crouch, cfg.crouchKey, cfg.crouchToggle ? "toggle" : "hold",
-        cfg.crouchEye, cfg.crouchSpeed, cfg.crouchTime);
     cfg.dropClearance = IniF(L"move", L"drop_clearance", 3.5f, ini);
     cfg.dropPushSpeed = IniF(L"move", L"drop_push_speed", 6.f, ini);
     cfg.dropMaxPush = IniF(L"move", L"drop_max_push", 6.f, ini);
@@ -941,7 +912,6 @@ void LoadConfig() {
     cfg.hideHud = GetPrivateProfileIntW(L"ui", L"hide_hud", 1, ini) != 0;
     cfg.hideCursor = GetPrivateProfileIntW(L"ui", L"hide_cursor", 1, ini) != 0;
     cfg.hidePaths = GetPrivateProfileIntW(L"ui", L"hide_paths", 1, ini) != 0;
-    cfg.hideSelMarkers = GetPrivateProfileIntW(L"ui", L"hide_selection_markers", 1, ini) != 0;
     cfg.hideEdgeArrows = GetPrivateProfileIntW(L"ui", L"hide_edge_arrows", 1, ini) != 0;
     cfg.hudEnabled = GetPrivateProfileIntW(L"hud", L"enabled", 1, ini) != 0;
     cfg.hudCover = GetPrivateProfileIntW(L"hud", L"cover_viewmodel", 1, ini) != 0;
@@ -1136,9 +1106,6 @@ struct State {
     double nextShot = 0;
     bool fireChain = false;
     bool sprint = false, tac = false, ads = false;
-    bool crouch = false, ctrlPrev = false, crouchLatch = false;
-    float crouchT = 0;
-    unsigned crouchLogs = 0;
     bool shiftPrev = false;
     float adsT = 0;
     double fireBlock = 0;
@@ -1191,9 +1158,6 @@ struct State {
     uintptr_t footBlk = 0;
     bool air = false, airFar = false, spacePrev = false;
     double tAir = 0, tLand = -1, tWallCheck = 0;
-    bool jumping = false;
-    double tJump = -1;
-    unsigned jumpEdgeLogs = 0, jumpArchLogs = 0;
     unsigned jumps = 0, drops = 0, lands = 0, blocks = 0, wallLogs = 0;
     bool dropActive = false;
     float dropP0[2] = {0, 0}, dropDir[2] = {0, 0}, dropS = 0, dropTarget = 0, dropSpeed = 0;
@@ -1278,10 +1242,6 @@ struct State {
     uintptr_t pathMgr = 0;
     int32_t pathOrig[2] = {0, 0};
     unsigned pathRewrites = 0;
-    bool selOff = false, selWarned = false;
-    uintptr_t selMgr = 0;
-    int32_t selOrig = 0;
-    unsigned selRewrites = 0;
     uintptr_t meleeUnit = 0, meleeBattle = 0, meleeSkipUnit = 0;
     unsigned meleeLogs = 0;
     uintptr_t moraleUnit = 0, moraleBattle = 0, moraleSkipUnit = 0;
@@ -1360,23 +1320,9 @@ void CastReset() {
     InterlockedExchange(&g_cast.tail, g_cast.head);
     CastMarkerClear();
 }
-UINT KeyAt(UINT qwerty) {
-    if (!vmgame::KbAzerty()) return qwerty;
-    switch (qwerty) {
-    case 'W': return 'Z';
-    case 'Z': return 'W';
-    case 'A': return 'Q';
-    case 'Q': return 'A';
-    default: return qwerty;
-    }
-}
 int CastSlotKey(WPARAM w) {
     if (w >= '1' && w <= '9') return static_cast<int>(w - '0');
     if (w == '0') return 10;
-    if (vmgame::KbAzerty()) {
-        if (w == VK_OEM_4) return 11;
-        if (w == VK_OEM_PLUS || w == VK_OEM_MINUS) return 12;
-    }
     if (w == VK_OEM_MINUS) return 11;
     if (w == VK_OEM_PLUS) return 12;
     return 0;
@@ -1466,7 +1412,6 @@ bool StopMoving();
 int MoveMode();
 void HookRenderChild();
 void ShotRestoreSpeed(const char* why);
-bool FireOwner() { return cfg.fireShooter && g_shotOk; }
 uintptr_t FindProjectile(const char* key, int32_t* idOut);
 void ProbeInit();
 float StepPeriod();
@@ -1552,36 +1497,6 @@ bool HeroRouting(uintptr_t unit, int* state = nullptr) {
     if (state) *state = st;
     using FnRouting = char (*)(uintptr_t morale);
     return reinterpret_cast<FnRouting>(g_base + kFnUnitRouting904)(unit + oUnitMorale) != 0;
-}
-struct UnitKeyRec {
-    uintptr_t unit;
-    char key[48];
-};
-UnitKeyRec g_unitKeyTab[64];
-int g_unitKeyNext = 0;
-SRWLOCK g_unitKeyLock = SRWLOCK_INIT;
-void RememberUnitKey(uintptr_t unit, const char* key) {
-    AcquireSRWLockExclusive(&g_unitKeyLock);
-    int slot = -1;
-    for (int i = 0; i < 64 && slot < 0; ++i)
-        if (g_unitKeyTab[i].unit == unit) slot = i;
-    if (slot < 0) slot = g_unitKeyNext, g_unitKeyNext = (g_unitKeyNext + 1) % 64;
-    g_unitKeyTab[slot].unit = unit;
-    snprintf(g_unitKeyTab[slot].key, sizeof g_unitKeyTab[slot].key, "%s", key);
-    ReleaseSRWLockExclusive(&g_unitKeyLock);
-}
-void ForgetUnitKeys() {
-    AcquireSRWLockExclusive(&g_unitKeyLock);
-    memset(g_unitKeyTab, 0, sizeof g_unitKeyTab);
-    g_unitKeyNext = 0;
-    ReleaseSRWLockExclusive(&g_unitKeyLock);
-}
-void UnitKeyOf(uintptr_t unit, char* out, size_t n) {
-    out[0] = 0;
-    AcquireSRWLockShared(&g_unitKeyLock);
-    for (int i = 0; i < 64; ++i)
-        if (unit && g_unitKeyTab[i].unit == unit) snprintf(out, n, "%s", g_unitKeyTab[i].key);
-    ReleaseSRWLockShared(&g_unitKeyLock);
 }
 void Enter(uintptr_t mgr) {
     uintptr_t battle = Ptr(mgr + oMgrBattle);
@@ -1682,9 +1597,6 @@ void Enter(uintptr_t mgr) {
     S.baseFov = S.lastFov = (std::isfinite(fov) && fov > 0.2f && fov < 2.8f) ? fov : 0.f;
     S.sprint = S.tac = S.ads = false;
     S.shiftPrev = true;
-    S.crouch = S.crouchLatch = false;
-    S.ctrlPrev = true;
-    S.crouchT = 0;
     S.adsT = 0;
     S.fireBlock = 0;
     S.adsKind = 0;
@@ -1761,12 +1673,6 @@ void Enter(uintptr_t mgr) {
     SetupMouse();
     CastReset();
     S.active = true;
-    {
-        char heroKey[48];
-        UnitKeyOf(unit, heroKey, sizeof heroKey);
-        vmgame::SetHeroKey(heroKey);
-        Log("enter: unit key '%s'%s", heroKey, heroKey[0] ? "" : " (not reported by the battle script yet - weapon's own arms)");
-    }
     vmgame::SetFirstPerson(true);
     if (S.exitStage == 2) {
         Log("ghost: pending release cancelled - first person entered again");
@@ -1808,7 +1714,7 @@ void Enter(uintptr_t mgr) {
     S.aimSpeedSum = S.aimSpeedMax = S.aimLeadSum = S.aimSelfSpeedSum = 0;
     S.tAimStat = Now();
     const char* wantProj = vmgame::WeaponProjectile(S.projFor)[0] ? vmgame::WeaponProjectile(S.projFor) : cfg.fireProjectile;
-    if (g_projLookupOk && wantProj[0]) {
+    if (g_shotOk && wantProj[0]) {
         S.fpProj = FindProjectile(wantProj, &S.fpProjId);
         if (S.fpProj && S.fpProjId >= 0) {
             float sp = 0;
@@ -1835,12 +1741,12 @@ void Enter(uintptr_t mgr) {
         Log("probe: launch-event receiver obj=%p (vt +%llx) member +0x3d8 vt +%llx, [+0x10] = +%llx, [+0x18] = +%llx, [+0x8] = +%llx",
             (void*)yf0, rva(yvt), rva(lvt), rva(l10), rva(lvt ? Ptr(lvt + 0x18) : 0), rva(lvt ? Ptr(lvt + 0x8) : 0));
     }
-    if (FireOwner() && entity) {
+    if (cfg.fireShooter && entity) {
         uintptr_t sb3 = Ptr(g_base + kGlobalScript);
         herofx::Install(sb3 ? Ptr(sb3 + oScriptBattle) : 0, entity, S.fpProj);
     }
     LookupFocusProjectile();
-    if (FireOwner() && entity) {
+    if (cfg.fireShooter && entity) {
         uintptr_t evt = Ptr(entity), f48 = evt ? Ptr(evt + 0x48) : 0;
         Log("fire: shooter = hero entity (kills counted, own bullets pass through it); muzzle launch point %s "
             "(entity vt +%llx, [+0x48] = +%llx)",
@@ -2863,96 +2769,6 @@ void WeaponParamsSync() {
         g_meleeReachAdd[c] = vmgame::MeleeCatReachAdd(c);
     }
 }
-constexpr size_t kPenRowBytes = 0x80;
-constexpr size_t kPenRowMin = 0x38;
-struct PenRow {
-    unsigned char b[kPenRowBytes];
-};
-struct ShotPenRec {
-    uintptr_t rec;
-    uintptr_t orig, set;
-    uintptr_t copyOf;
-    int32_t origCap, origN;
-    alignas(16) PenRow copy;
-};
-struct ShotPenState {
-    ShotPenRec r[32];
-    int n = 0;
-    int logs = 0;
-} g_spen;
-bool PenRowCopy(uintptr_t row, PenRow* out, int32_t* cap, int32_t* n) {
-    memset(out, 0, sizeof *out);
-    size_t got = 0;
-    for (; got < kPenRowBytes; got += 8) {
-        uint64_t q = 0;
-        if (!Rd(row + got, q)) break;
-        memcpy(out->b + got, &q, 8);
-    }
-    if (got < kPenRowMin) return false;
-    memcpy(cap, out->b + 0x08, 4);
-    memcpy(n, out->b + 0x30, 4);
-    return *cap >= 0 && *cap <= 5 && *n >= -1 && *n <= 1000;
-}
-void ShotPenApply(uintptr_t rec) {
-    if (!rec || rec != S.fpProj) return;
-    const char* key = vmgame::WeaponProjectile(S.projFor)[0] ? vmgame::WeaponProjectile(S.projFor) : cfg.fireProjectile;
-    if (!strstr(key, "fps")) return;
-    const int want = vmgame::WeaponPenetration(S.projFor);
-    uintptr_t cur = 0;
-    if (!Rd(rec + 0xe8, cur)) return;
-    ShotPenRec* d = nullptr;
-    for (int i = 0; i < g_spen.n && !d; ++i)
-        if (g_spen.r[i].rec == rec) d = &g_spen.r[i];
-    if (!d) {
-        if (want < 0 || !cur || g_spen.n >= 32) return;
-        d = &g_spen.r[g_spen.n++];
-        d->rec = rec;
-        d->orig = d->set = cur;
-        d->copyOf = 0;
-    } else if (cur != d->set && cur != reinterpret_cast<uintptr_t>(&d->copy)) {
-        d->orig = d->set = cur;
-    }
-    uintptr_t to = d->orig;
-    if (want >= 0 && d->orig) {
-        if (d->copyOf != d->orig) {
-            PenRow row;
-            int32_t cap = 0, n = 0;
-            if (PenRowCopy(d->orig, &row, &cap, &n)) {
-                memcpy(&d->copy, &row, sizeof row);
-                d->copyOf = d->orig;
-                d->origCap = cap, d->origN = n;
-            } else if (g_spen.logs++ < 16) {
-                Log("fire: custom penetration - weapon %d: projectile %p penetration row %p does not look like one (size cap %d, max %d) - left alone",
-                    S.projFor, (void*)rec, (void*)d->orig, cap, n);
-            }
-        }
-        if (d->copyOf == d->orig && want != d->origN) {
-            InterlockedExchange(reinterpret_cast<volatile LONG*>(d->copy.b + 0x30), want);
-            to = reinterpret_cast<uintptr_t>(&d->copy);
-        }
-    }
-    if (to != cur) {
-        Wr(rec + 0xe8, to);
-        if (g_spen.logs++ < 16)
-            Log("fire: custom penetration - weapon %d: projectile %p passes through %d (original %d, size cap %d, row %p%s)", S.projFor, (void*)rec,
-                to == d->orig ? d->origN : want, d->origN, d->origCap, (void*)d->orig, to == d->orig ? "" : " -> our copy");
-    }
-    d->set = to;
-}
-void ShotPenRestore(const char* why) {
-    int n = 0;
-    for (int i = 0; i < g_spen.n; ++i) {
-        ShotPenRec& d = g_spen.r[i];
-        if (d.set == d.orig) continue;
-        uintptr_t cur = 0;
-        if (Rd(d.rec + 0xe8, cur) && cur == d.set) {
-            Wr(d.rec + 0xe8, d.orig);
-            ++n;
-        }
-        d.set = d.orig;
-    }
-    if (n) Log("fire: custom penetration - %d projectile record(s) pointed back to their own penetration row (%s)", n, why);
-}
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
               int nBodies, float clearance, float rangeOverride = 0.f) {
     uintptr_t sb = Ptr(g_base + kGlobalScript);
@@ -2970,14 +2786,13 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
         Rd(battle + oBattleNoCmd1, no1);
         Rd(battle + oBattleNoCmd2, no2);
     }
-    if (!battle || !queue || no1 || no2 || projId < 0 || (FireOwner() && !entId)) {
+    if (!battle || !queue || no1 || no2 || projId < 0 || (cfg.fireShooter && !entId)) {
         if (S.shotLogs++ < 5)
             Log("fire refused: battle=%p (camera's %p) queue=%p blocked=%u/%u projectile=%p id=%d entityId=%d", (void*)battle,
                 (void*)S.battle, (void*)queue, no1, no2, (void*)proj, projId, entId);
         return false;
     }
     ShotDamageApply(proj);
-    ShotPenApply(proj);
     if (!S.loggedProj && proj) {
         S.loggedProj = true;
         float f[48] = {};
@@ -3006,7 +2821,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
                 range = wRange > 0.f ? wRange : cfg.fireRange;
     for (int i = 0; i < 3; ++i) c.target[i] = eye[i] + fwd[i] * range;
     float d = muzzle ? cfg.muzzleDepth : cfg.fireForward, minGap = 0;
-    bool clear = FireOwner() || nBodies == 0;
+    bool clear = cfg.fireShooter != 0 || nBodies == 0;
     for (; !clear && d <= 6.0f; d += 0.1f) {
         float a[3], b[3], dir[3], len2 = 0;
         for (int i = 0; i < 3; ++i) {
@@ -3036,7 +2851,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
         c.launch[1] = gh + 0.25f;
     }
     c.tgtIsPos = 1;
-    c.shooter = FireOwner() ? S.entity : 0;
+    c.shooter = cfg.fireShooter ? S.entity : 0;
     double now = Now();
     float period = StepPeriod();
     float toNext = LastStepTime() > 0 ? static_cast<float>(LastStepTime() + period - now) : period * 0.5f;
@@ -3804,63 +3619,6 @@ float FindDropPush(float x0, float z0, float dx, float dz, float foot, float ste
         return s;
     }
     return -1.f;
-}
-float FallTime(float vy, float h, float g) {
-    h = std::fmax(h, 0.1f);
-    return (vy + std::sqrt(vy * vy + 2.f * g * h)) / g;
-}
-int JumpOffEdge(const Surf* s, int n, float footNow, float startY, float stepDown) {
-    const int i = n ? PickSurface(s, n, kNoSurf, footNow, 0.05f) : -1;
-    return i >= 0 && s[i].h < startY - stepDown ? i : -1;
-}
-constexpr float kJumpHeadroom = 2.2f;
-template <class NetPass>
-bool AirCovered(const Surf* s, int n, float foot, float startY, float head, float stepDown, NetPass netPass, int* why) {
-    *why = 0;
-    bool over = false, stand = false;
-    for (int j = 0; j < n; ++j) {
-        if (s[j].h > foot + 0.3f) {
-            if (!s[j].blk || s[j].h <= foot + head) return true;
-            over = true;
-        } else if (s[j].blk && s[j].h >= startY - stepDown) {
-            stand = true;
-        }
-    }
-    if (!over) return false;
-    if (stand) {
-        *why = 1;
-        return false;
-    }
-    if (netPass()) {
-        *why = 2;
-        return false;
-    }
-    return true;
-}
-bool CrouchWant(bool cur, bool key, bool keyPrev, bool toggle, bool standUp, bool* latch) {
-    if (toggle) {
-        *latch = false;
-        if (key && !keyPrev) cur = !cur;
-        return standUp ? false : cur;
-    }
-    if (!key) *latch = false;
-    if (standUp && key) *latch = true;
-    return key && !*latch;
-}
-float CrouchBlend(float t, bool want, float dt, float time) {
-    const float step = time > 1e-3f ? dt / time : 1.f;
-    t += want ? step : -step;
-    return t < 0.f ? 0.f : t > 1.f ? 1.f : t;
-}
-float CrouchEyeScale(float t, float eye) {
-    const float s = t * t * (3.f - 2.f * t);
-    return 1.f - (1.f - eye) * s;
-}
-bool CrouchKeyMsg(WPARAM w) {
-    const unsigned k = cfg.crouchKey;
-    if (w == k) return true;
-    if ((k == VK_LCONTROL || k == VK_RCONTROL) && w == VK_CONTROL) return true;
-    return (k == VK_LSHIFT || k == VK_RSHIFT) && w == VK_SHIFT;
 }
 bool SurfaceNear(float x, float z, float refY, float* h, uintptr_t* blk) {
     Surf s[kMaxSurf];
@@ -5058,46 +4816,6 @@ void EdgeCollect(uintptr_t uic, int depth) {
     if (Rd(uic + oUicChildCount, nc) && kids && nc <= 64)
         for (uint32_t i = 0; i < nc; ++i) EdgeCollect(Ptr(kids + 8 * i), depth - 1);
 }
-constexpr uintptr_t oSelMarkMode = 0x544;
-void SelMarkStep() {
-    bool want = S.active && cfg.hideSelMarkers && !vmgame::ShowSelMarkers() && g_selMarkOk;
-    if (want) {
-        uintptr_t mgr = PathMgr(S.battle);
-        int32_t m = -1;
-        if (mgr) Rd(mgr + oSelMarkMode, m);
-        if (!S.selOff) {
-            if (!mgr || m < 0 || m > 2) {
-                if (!S.selWarned) {
-                    S.selWarned = true;
-                    Log("ui: selection marker manager not verified (battle %p mgr %p mode %d); markers not hidden", (void*)S.battle,
-                        (void*)mgr, m);
-                }
-                return;
-            }
-            S.selMgr = mgr;
-            S.selOrig = m;
-            S.selOff = true;
-            S.selRewrites = 0;
-            const int32_t zero = 0;
-            Wr(mgr + oSelMarkMode, zero);
-            Log("ui: selection markers off (manager %p, mode %d -> 0)", (void*)mgr, m);
-        } else if (mgr == S.selMgr && m != 0) {
-            const int32_t zero = 0;
-            Wr(mgr + oSelMarkMode, zero);
-            if (S.selRewrites++ < 8) Log("ui: selection marker mode changed by the game (%d); set to 0 again", m);
-        }
-        return;
-    }
-    if (S.selOff) {
-        S.selOff = false;
-        if (PathMgr(S.battle) == S.selMgr) {
-            Wr(S.selMgr + oSelMarkMode, S.selOrig);
-            Log("ui: selection markers restored (mode %d)", S.selOrig);
-        } else {
-            Log("ui: selection marker manager gone (battle ended?); nothing to restore");
-        }
-    }
-}
 void EdgeStep() {
     bool want = S.active && cfg.hideEdgeArrows && g_uiOk;
     uintptr_t root = Ptr(g_base + kGlobalUiRoot);
@@ -5170,7 +4888,6 @@ void ShotStep() {
     uintptr_t rec = active && cfg.bulletSpeed > 0.f && S.unit ? (S.fpProj ? S.fpProj : Ptr(S.unit + oUnitProjectile)) : 0;
     if (S.speedApplied && rec != S.speedRec) ShotRestoreSpeed(rec ? "weapon changed" : "first person ended");
     if (!active) ShotDamageRestore("first person ended");
-    if (!active) ShotPenRestore("first person ended");
     WeaponParamsSync();
     if (rec && !S.speedApplied) {
         float sp = 0, m = 0;
@@ -5966,8 +5683,8 @@ void Apply(uintptr_t mgr) {
     float mx = 0, mz = 0;
     bool run = true;
     if (canMove && fg) {
-        float fwdIn = (KeyDown(KeyAt('W')) ? 1.f : 0.f) - (KeyDown('S') ? 1.f : 0.f);
-        float sideIn = (KeyDown('D') ? 1.f : 0.f) - (KeyDown(KeyAt('A')) ? 1.f : 0.f);
+        float fwdIn = (KeyDown('W') ? 1.f : 0.f) - (KeyDown('S') ? 1.f : 0.f);
+        float sideIn = (KeyDown('D') ? 1.f : 0.f) - (KeyDown('A') ? 1.f : 0.f);
         mx = sy * fwdIn + cy * sideIn;
         mz = cy * fwdIn - sy * sideIn;
         float ml = std::sqrt(mx * mx + mz * mz);
@@ -5988,7 +5705,7 @@ void Apply(uintptr_t mgr) {
         bool tap = shift && !S.shiftPrev;
         S.shiftPrev = shift;
         bool reloading = vmgame::Busy();
-        bool canSprint = canMove && fg && mode == 0 && wantMove && KeyDown(KeyAt('W')) && !KeyDown('S') && !rmb && !lmb && !reloading &&
+        bool canSprint = canMove && fg && mode == 0 && wantMove && KeyDown('W') && !KeyDown('S') && !rmb && !lmb && !reloading &&
                          !S.pinned && !S.stuck;
         bool wasSprint = S.sprint, wasTac = S.tac, wasAds = S.ads;
         if (S.sprint && !canSprint) {
@@ -6002,24 +5719,6 @@ void Apply(uintptr_t mgr) {
                 S.tac = true;
         }
         TacStaminaStep(now, dt);
-        {
-            const bool ck = fg && cfg.crouch && !S.flyer && KeyDown(static_cast<int>(cfg.crouchKey));
-            if (ck && !S.ctrlPrev && S.sprint) {
-                S.fireBlock = now + (S.tac ? cfg.tacSprintToFire : cfg.sprintToFire);
-                S.exitTac = S.tac;
-                S.sprint = S.tac = false;
-            }
-            const bool was = S.crouch;
-            S.crouch = cfg.crouch && !S.flyer && CrouchWant(S.crouch, ck, S.ctrlPrev, cfg.crouchToggle, S.sprint && !wasSprint, &S.crouchLatch);
-            S.ctrlPrev = ck;
-            if (S.crouch != was) {
-                vmgame::CrouchImpulse(S.crouch ? 1.f : -1.f);
-                if (S.crouchLogs++ < 60)
-                    Log("stance: %s (%s%s)", S.crouch ? "crouch" : "stand up", cfg.crouchToggle ? "toggle" : "hold",
-                        !S.crouch && S.sprint ? ", sprint" : was && !S.crouch && !ck && !cfg.crouchToggle ? ", key released" : "");
-            }
-            S.crouchT = CrouchBlend(S.crouchT, S.crouch, dt, cfg.crouchTime);
-        }
         S.ads = rmb && !S.sprint && !reloading && !vmgame::MeleeActive();
         if (S.ads && !wasAds) S.adsKind = now < S.fireBlock ? (S.exitTac ? 2 : 1) : 0;
         if (!S.ads) S.adsKind = 0;
@@ -6154,7 +5853,6 @@ void Apply(uintptr_t mgr) {
         float spd = S.tac ? cfg.tacSprintSpeed
                     : S.sprint ? cfg.sprintSpeed : cfg.runSpeed * (1.f - (1.f - cfg.adsMoveScale) * S.adsT);
         spd *= shieldMove;
-        spd *= 1.f - (1.f - cfg.crouchSpeed) * S.crouchT;
         (void)run;
         bool space = fg && KeyDown(VK_SPACE);
         if (space && !S.spacePrev && !S.air && !pinned && !S.stuck && !paused && cfg.jumpHeight > 0.f) {
@@ -6163,15 +5861,6 @@ void Apply(uintptr_t mgr) {
             S.airStartY = S.footY;
             S.airGap = 0;
             S.tAir = now;
-            S.jumping = true;
-            S.tJump = now;
-            S.dropPolyN = 0;
-            if (S.crouch) {
-                S.crouchLatch = !cfg.crouchToggle && KeyDown(static_cast<int>(cfg.crouchKey));
-                S.crouch = false;
-                vmgame::CrouchImpulse(-1.f);
-                if (S.crouchLogs++ < 60) Log("stance: stand up (jump)");
-            }
             ++S.jumps;
             vmgame::MoveImpulse(1.f, 0.f);
             if (S.wallLogs++ < 80)
@@ -6435,33 +6124,20 @@ void Apply(uintptr_t mgr) {
                 }
             }
         }
-        const bool jumpLevel = S.air && S.jumping && S.tJump == S.tAir;
         if (S.air && !S.dropActive && ns) {
-            RegionNet airNet;
-            int airNetOk = -1;
-            auto covered = [&](const Surf* s, int n, float px, float pz) {
-                bool old = false;
-                for (int j = 0; j < n; ++j) old = old || s[j].h > S.footY + 0.3f;
-                if (!old || !jumpLevel) return old;
-                int why = 0;
-                const bool c = AirCovered(s, n, S.footY, S.airStartY, kJumpHeadroom, cfg.stepDown, [&] {
-                    if (airNetOk < 0) airNetOk = cfg.wallBodyNet && g_netOk && RegionNetNow(&airNet) ? 1 : 0;
-                    uintptr_t hit = 0;
-                    return airNetOk == 1 && NetStep(airNet, prevKin[0], prevKin[1], px, pz, &hit) == 0;
-                }, &why);
-                if (!c && S.jumpArchLogs++ < 20)
-                    Log("wall: jump at %.2f,%.2f (foot %.2f, took off at %.2f) under a walkway / roof - %s, not a wall body", px, pz, S.footY,
-                        S.airStartY, why == 1 ? "the take-off layer goes on under it" : "the game's ground net lets it through (arch / open passage)");
-                return c;
+            auto covered = [&](const Surf* s, int n) {
+                for (int j = 0; j < n; ++j)
+                    if (s[j].h > S.footY + 0.3f) return true;
+                return false;
             };
-            if (covered(sf, ns, S.kinPos[0], S.kinPos[1])) {
+            if (covered(sf, ns)) {
                 const float tryPos[2][2] = {{S.kinPos[0], prevKin[1]}, {prevKin[0], S.kinPos[1]}};
                 bool slid = false;
                 for (int k = 0; k < 2 && !slid; ++k) {
                     if (tryPos[k][0] == prevKin[0] && tryPos[k][1] == prevKin[1]) continue;
                     Surf s5[kMaxSurf];
                     int n5 = SurfacesAt(tryPos[k][0], tryPos[k][1], s5);
-                    if (n5 && !covered(s5, n5, tryPos[k][0], tryPos[k][1])) {
+                    if (n5 && !covered(s5, n5)) {
                         S.kinPos[0] = tryPos[k][0];
                         S.kinPos[1] = tryPos[k][1];
                         S.kinVel[k == 0 ? 1 : 0] = 0;
@@ -6478,62 +6154,6 @@ void Apply(uintptr_t mgr) {
                 }
                 if (S.blocks++ < 20) Log("wall: in the air, ran into a structure at %.2f,%.2f (foot %.2f) - %s", prevKin[0], prevKin[1], S.footY,
                                          slid ? "slid along one axis" : "held");
-            }
-        }
-        if (jumpLevel && !S.dropActive && S.footBlk && ns) {
-            const int ci = JumpOffEdge(sf, ns, S.footY, S.airStartY, cfg.stepDown);
-            if (ci >= 0) {
-                float dx = S.kinPos[0] - prevKin[0], dz = S.kinPos[1] - prevKin[1], dl = std::sqrt(dx * dx + dz * dz);
-                if (dl < 1e-4f) dx = S.kinVel[0], dz = S.kinVel[1], dl = std::sqrt(dx * dx + dz * dz);
-                if (dl < 1e-4f) dx = sy, dz = cy, dl = 1.f;
-                dx /= dl;
-                dz /= dl;
-                float drop0 = S.airStartY - sf[ci].h, gap = std::fmin(cfg.dropClearance, 0.5f + 0.3f * drop0), landH = sf[ci].h;
-                float v0 = std::sqrt(S.kinVel[0] * S.kinVel[0] + S.kinVel[1] * S.kinVel[1]);
-                float range = std::fmax(cfg.dropMaxPush, v0 * FallTime(S.vy, S.footY - landH, cfg.gravity));
-                float push = cfg.dropClearance <= 0.f ? 0.f
-                           : FindDropPush(S.kinPos[0], S.kinPos[1], dx, dz, S.airStartY, cfg.stepDown, range,
-                                          [&](float px, float pz) { return BlockNear(S.footBlk, px, pz, gap); },
-                                          [&](float px, float pz, Surf* o) { return SurfacesAt(px, pz, o); }, &landH);
-                bool clear = push >= 0.f;
-                uint32_t t3 = 0;
-                float h3[3] = {};
-                if (clear && cfg.building && g_buildOk && !S.bldInside) {
-                    float ahead = std::fmax(push, 1.5f) + 0.5f;
-                    const float q2[2] = {S.kinPos[0] + dx * ahead, S.kinPos[1] + dz * ahead};
-                    if (TallWallBetween(S.kinPos, q2, S.airStartY, &t3, h3)) clear = false;
-                }
-                if (!clear) {
-                    if (S.jumpEdgeLogs++ < 20)
-                        Log("wall: jumped over the edge at %.2f,%.2f (took off at %.2f, drop %.1f m) but %s - held, back onto the take-off layer",
-                            S.kinPos[0], S.kinPos[1], S.airStartY, drop0, push < 0.f ? "no clear landing within range (wall / tower below)"
-                                                                                      : "a tall building wall is right ahead");
-                    S.kinPos[0] = prevKin[0];
-                    S.kinPos[1] = prevKin[1];
-                    S.kinVel[0] = S.kinVel[1] = 0;
-                    ns = SurfacesAt(S.kinPos[0], S.kinPos[1], sf);
-                } else {
-                    const float tFall = FallTime(S.vy, S.footY - landH, cfg.gravity);
-                    const double tUp = now - S.tJump;
-                    S.jumping = false;
-                    S.tAir = now;
-                    ++S.drops;
-                    S.dropActive = push > 0.01f;
-                    S.dropP0[0] = S.kinPos[0];
-                    S.dropP0[1] = S.kinPos[1];
-                    S.dropDir[0] = dx;
-                    S.dropDir[1] = dz;
-                    S.dropS = 0;
-                    S.dropTarget = push;
-                    S.dropSpeed = std::fmin(20.f, std::fmax(cfg.dropPushSpeed, push / (0.8f * tFall)));
-                    S.dropPolyN = push > 0.01f ? CopyBlockPoly(S.footBlk, S.dropPoly, 16) : 0;
-                    S.dropGap = gap;
-                    S.dropKept = 0;
-                    if (S.jumpEdgeLogs++ < 20)
-                        Log("wall: jumped off the edge at %.2f,%.2f %.2f s after take-off (took off at %.2f, foot %.2f, up %.1f m/s) at %.1f m/s -> "
-                            "clear ground %.2f m out (clearance %.2f, below %.2f), min push %.1f m/s", S.kinPos[0], S.kinPos[1], tUp, S.airStartY,
-                            S.footY, S.vy, v0, push, gap, landH, S.dropSpeed);
-                }
             }
         }
         if (S.air) {
@@ -6635,7 +6255,7 @@ void Apply(uintptr_t mgr) {
         if (haveDest && !S.airFar && !S.castHold && (tx * tx + tz * tz > 0.02f * 0.02f || S.castRepin) && now - S.tLastTp >= cfg.tpInterval) {
             float gx = S.leadPos[0], gz = S.leadPos[1];
             bool skipTp = false;
-            if (cfg.tpShotGuard > 0.f && !S.ghost && !FireOwner()) {
+            if (cfg.tpShotGuard > 0.f && !S.ghost && !cfg.fireShooter) {
                 float gap0 = ShotGap(gx, gz, now);
                 if (gap0 < cfg.tpShotGuard) {
                     bool found = false;
@@ -6751,7 +6371,7 @@ void Apply(uintptr_t mgr) {
     const float* vRight = kv.right;
     const float* vUp = kv.up;
     vmgame::PublishView(S.yaw, S.pitch, (S.flyer || (mode == 0 && S.air)) ? 0.f : S.camSpeed);
-    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : cfg.eyeHeight * CrouchEyeScale(S.crouchT, cfg.crouchEye)),
+    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : cfg.eyeHeight),
                     camPos[2] + cy * cfg.eyeForward};
     float target[3] = {eye[0] + vFwd[0] * 10.f, eye[1] + vFwd[1] * 10.f, eye[2] + vFwd[2] * 10.f};
     float up[3] = {0.f, 1.f, 0.f};
@@ -6917,7 +6537,7 @@ void Apply(uintptr_t mgr) {
             bodies[nb][2] = raw[2] + S.entVel[1] * cfg.fireLookahead;
             ++nb;
         }
-        if (vmgame::CurrentWeapon() != S.projFor && g_projLookupOk) {
+        if (vmgame::CurrentWeapon() != S.projFor && g_shotOk) {
             S.projFor = vmgame::CurrentWeapon();
             const char* want = vmgame::WeaponProjectile(S.projFor)[0] ? vmgame::WeaponProjectile(S.projFor) : cfg.fireProjectile;
             int32_t id = -1;
@@ -7111,7 +6731,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (!(l & (1L << 30))) vmgame::SelectWeapon(static_cast<int>(w - '0'));
             return 0;
         }
-        if (S.active && vmgame::ShieldKey() && w == KeyAt(vmgame::ShieldKey())) {
+        if (S.active && vmgame::ShieldKey() && w == vmgame::ShieldKey()) {
             if (!(l & (1L << 30))) vmgame::ToggleShield();
             return 0;
         }
@@ -7130,10 +6750,9 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 return 0;
             }
         }
-        if (S.active && (w == KeyAt('W') || w == KeyAt('A') || w == 'S' || w == 'D')) return 0;
+        if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D')) return 0;
         if (S.active && cfg.wallUp && w == cfg.wallUpKey) return 0;
         if (S.active && w == VK_SPACE && cfg.jumpHeight > 0.f) return 0;
-        if (S.active && cfg.crouch && CrouchKeyMsg(w)) return 0;
         break;
     case WM_KEYUP:
     case WM_SYSKEYUP:
@@ -7147,16 +6766,14 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 return 0;
             }
         }
-        if (S.active && (w == KeyAt('W') || w == KeyAt('A') || w == 'S' || w == 'D' || w == 'R' || (w >= '1' && w <= '9'))) return 0;
+        if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D' || w == 'R' || (w >= '1' && w <= '9'))) return 0;
         if (S.active && w == VK_SPACE && cfg.jumpHeight > 0.f) return 0;
-        if (S.active && cfg.crouch && CrouchKeyMsg(w)) return 0;
-        if (S.active && ((vmgame::ShieldKey() && w == KeyAt(vmgame::ShieldKey())) || (vmgame::ShieldHitKey() && w == vmgame::ShieldHitKey()))) return 0;
+        if (S.active && ((vmgame::ShieldKey() && w == vmgame::ShieldKey()) || (vmgame::ShieldHitKey() && w == vmgame::ShieldHitKey()))) return 0;
         if (S.active && g_heroLauncher && vmgame::LauncherConfigured() &&
             (w == vmgame::LauncherFireKey() || w == vmgame::LauncherSwitchKey() || w == vmgame::LauncherFlameKey()))
             return 0;
         break;
     case WM_SYSCHAR:
-        if (S.active && cfg.castKeys && vmgame::KbAzerty() && ((l >> 16) & 0xFF) >= 0x02 && ((l >> 16) & 0xFF) <= 0x0D) return 0;
         if (S.active && cfg.castKeys && ((w >= '0' && w <= '9') || w == '-' || w == '=')) return 0;
         break;
     case WM_MOUSEWHEEL:
@@ -7311,61 +6928,9 @@ bool HostIsWh3() {
     name = name ? name + 1 : path;
     return _wcsicmp(name, L"Warhammer3.exe") == 0;
 }
-bool ExeFileBytes(uintptr_t rva, size_t n, unsigned char* out) {
-    wchar_t path[1024];
-    DWORD pl = GetModuleFileNameW(nullptr, path, 1024);
-    if (!pl || pl >= 1024) return false;
-    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(g_base);
-    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(g_base + dos->e_lfanew);
-    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
-    for (WORD k = 0; k < nt->FileHeader.NumberOfSections; ++k, ++sec) {
-        uintptr_t va = sec->VirtualAddress, sz = sec->SizeOfRawData < sec->Misc.VirtualSize ? sec->SizeOfRawData : sec->Misc.VirtualSize;
-        if (rva < va || rva + n > va + sz) continue;
-        HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
-        if (f == INVALID_HANDLE_VALUE) return false;
-        LARGE_INTEGER at;
-        at.QuadPart = static_cast<LONGLONG>(sec->PointerToRawData) + static_cast<LONGLONG>(rva - va);
-        DWORD got = 0;
-        bool ok = SetFilePointerEx(f, at, nullptr, FILE_BEGIN) && ReadFile(f, out, static_cast<DWORD>(n), &got, nullptr) && got == n;
-        CloseHandle(f);
-        return ok;
-    }
-    return false;
-}
-bool ForeignHooksOnly(const CodePrint& cp, const char* what, size_t idx, size_t total) {
-    if (!g_base || !g_imageSize || cp.len == 0 || cp.len > 0x10000) return false;
-    uintptr_t lo = cp.rva >= fhook::kPad ? cp.rva - fhook::kPad : 0, n = cp.rva + cp.len + fhook::kPad - lo;
-    unsigned char* mem = new unsigned char[2 * n];
-    unsigned char* disk = mem + n;
-    bool ok = ExeFileBytes(lo, n, disk);
-    if (!ok) {
-        lo = cp.rva, n = cp.len;
-        ok = ExeFileBytes(lo, n, disk);
-    }
-    for (uintptr_t i = 0; ok && i < n; ++i) ok = Rd(g_base + lo + i, mem[i]);
-    unsigned long long h = 0xcbf29ce484222325ull;
-    for (uintptr_t i = 0; ok && i < cp.len; ++i) h = (h ^ disk[cp.rva - lo + i]) * 0x100000001b3ull;
-    fhook::Hook hk[fhook::kMaxHooks];
-    int k = -1;
-    if (ok && h == cp.fnv)
-        k = fhook::Classify(mem, disk, n, g_base + lo, cp.rva - lo, cp.rva - lo + cp.len, g_base, g_base + g_imageSize, hk);
-    for (int i = 0; i < k; ++i) {
-        MEMORY_BASIC_INFORMATION mbi{};
-        if (!VirtualQuery(reinterpret_cast<void*>(static_cast<uintptr_t>(hk[i].target)), &mbi, sizeof mbi) || mbi.State != MEM_COMMIT ||
-            !(mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
-            k = -1;
-    }
-    for (int i = 0; i < k; ++i)
-        Log("%s: code fingerprint %zu/%zu (+0x%llx) differs from the game file only by another program's jump hook at +0x%llx "
-            "(%zu bytes -> %p; trainer / mod) - treated as the original code",
-            what, idx, total, (unsigned long long)cp.rva, (unsigned long long)(lo + hk[i].at), hk[i].len,
-            reinterpret_cast<void*>(static_cast<uintptr_t>(hk[i].target)));
-    delete[] mem;
-    return k > 0;
-}
 bool PrintsMatch(const PrintSet& s, const char* what) {
     for (size_t i = 0; i < s.n; ++i)
-        if (!CodeMatches(s.p[i]) && !ForeignHooksOnly(s.p[i], what, i + 1, s.n)) {
+        if (!CodeMatches(s.p[i])) {
             Log("%s: code fingerprint %zu/%zu mismatch at +0x%llx (len 0x%llx)", what, i + 1, s.n,
                 (unsigned long long)s.p[i].rva, (unsigned long long)s.p[i].len);
             return false;
@@ -7433,15 +6998,8 @@ bool VerifyGame() {
         Log("hero: morale lock in first person (unbreakable) %s", g_moraleLockOk ? "ok" : "OFF - morale can still break in first person");
         g_uiOk = PrintsMatch(game->ui, "battle hud hide");
         Log("ui: battle hud hiding %s", g_uiOk ? "ok" : "OFF");
-        g_selMarkOk = g_uiOk && PrintsMatch(Prints(kSelMarkPrints904), "selection markers");
-        Log("ui: hide selection markers in first person %s", g_selMarkOk ? "ok" : "OFF - the marker under the hero stays");
-        g_projLookupOk = PrintsMatch(Prints(kProjLookupPrints904), "first-person projectile lookup");
-        Log("fire: first-person projectile lookup %s", g_projLookupOk ? "ok" : "OFF - the guns fall back to the hero's own weapon");
         g_shotOk = PrintsMatch(game->shot, "fire owner / bullet speed");
         Log("fire: owner + unlimited ammo + bullet speed %s", g_shotOk ? "ok" : "OFF");
-        if (!g_shotOk && g_projLookupOk && cfg.fireShooter)
-            Log("fire: owner checks failed - first-person bullets fly without an owner (kills not credited to the hero, the hero is kept "
-                "out of the line of fire, the hero unit's own ammo is not used)");
         g_meleeHitOk = g_shotOk && PrintsMatch(Prints(kMeleeHitPrints904), "engine melee hit");
         Log("melee: engine melee hit %s", g_meleeHitOk ? "ok" : "OFF (melee weapon falls back to splash explosions)");
         g_noKnockOk = PrintsMatch(Prints(kNoKnockPrints904), "hero no knockdown");
@@ -8057,7 +7615,6 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     UiStep();
     CursorStep();
     PathStep();
-    SelMarkStep();
     EdgeStep();
     ShotStep();
     HideSelfStep();
@@ -8081,7 +7638,6 @@ struct Fns {
     float (*tonumber)(void*, int);
     int (*type)(void*, int);
     size_t (*objlen)(void*, int);
-    const char* (*tolstring)(void*, int, size_t*);
 } f;
 int g_state = -1;
 char g_missing[48] = "";
@@ -8103,7 +7659,6 @@ bool Resolve() {
         }
         memcpy(e.slot, &p, sizeof p);
     }
-    if (FARPROC p = exe ? GetProcAddress(exe, "lua_tolstring") : nullptr) memcpy(&f.tolstring, &p, sizeof p);
     g_state = 1;
     return true;
 }
@@ -8137,31 +7692,6 @@ int IsHero(void* L) {
     }
     f.pushboolean(L, how ? 1 : 0);
     return 1;
-}
-int UnitKeysFn(void* L) {
-    f.pushstring(L, vmgame::UnitKeys());
-    return 1;
-}
-int SetUnit(void* L) {
-    bool ok = false;
-    if (f.tolstring && f.type(L, 1) == kTUserdata && f.objlen(L, 1) >= sizeof(uintptr_t)) {
-        const void* blk = f.touserdata(L, 1);
-        uintptr_t wrap = 0;
-        if (blk) memcpy(&wrap, blk, sizeof wrap);
-        const uintptr_t p = wrap ? Ptr(wrap + 8) : 0;
-        size_t n = 0;
-        const char* key = f.tolstring(L, 2, &n);
-        if (p && key && n > 0 && n < 48) {
-            RememberUnitKey(p, key);
-            ok = true;
-        }
-    }
-    f.pushboolean(L, ok ? 1 : 0);
-    return 1;
-}
-int BattleStarted(void*) {
-    ForgetUnitKeys();
-    return 0;
 }
 int HudEnabled(void* L) {
     f.pushboolean(L, cfg.hudEnabled ? 1 : 0);
@@ -8357,14 +7887,6 @@ int PushTable(void* L) {
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);
-    }
-    {
-        const struct { const char* name; CFn fn; } more[] = {{"unit_keys", UnitKeysFn}, {"set_unit", SetUnit}, {"battle_started", BattleStarted}};
-        for (const auto& e : more) {
-            f.pushcclosure(L, e.fn, 0);
-            f.setfield(L, -2, e.name);
-        }
-        if (!f.tolstring) Log("lua-api: lua_tolstring not exported - set_unit off (character arms stay the weapon's own)");
     }
     Log("lua-api: interface table v4 returned (luaopen #%ld, lua state %p)", n, L);
     return 1;
