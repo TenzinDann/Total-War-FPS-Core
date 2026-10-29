@@ -9,6 +9,7 @@
 #include <cstring>
 #include <cwchar>
 #include <initializer_list>
+#include <vector>
 namespace vm {
 namespace {
 template <class T>
@@ -1449,10 +1450,15 @@ bool ReadHvmV1(const wchar_t* path, unsigned char** out, size_t* outLen, char* e
     return true;
 }
 }
+#include "arms_override.inc"
 bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
     unsigned char* data = nullptr;
     size_t len = 0;
     if (!TakePrefetched(path, true, &data, &len) && !ReadHvmV1(path, &data, &len, err, errLen)) return false;
+    {
+        char note[300];
+        if (ApplyArmsOverride(&data, &len, note, sizeof note) || note[0]) ArmsLogAppend(path, note);
+    }
     bool ok = false;
     ID3D11Buffer* vb = nullptr;
     ID3D11Buffer* ib = nullptr;
@@ -1559,8 +1565,16 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
                 if (!strncmp(hb.name, kShieldFinger[k], sizeof hb.name)) fingerBone_[k] = static_cast<int>(b);
             if (!strncmp(hb.name, "2598db76b21b58e3", sizeof hb.name)) handTag_[0] = static_cast<int>(b);
             if (!strncmp(hb.name, "25c8bb76b2444645", sizeof hb.name)) handTag_[1] = static_cast<int>(b);
+            {
+                char nm[sizeof hb.name + 1];
+                memcpy(nm, hb.name, sizeof hb.name);
+                nm[sizeof hb.name] = 0;
+                int num = 0, sd = TwistBoneSide(nm, &num);
+                if (sd >= 0 && twistN_[sd] < kMaxTwist) twistBone_[sd][twistN_[sd]] = static_cast<int>(b), twistNum_[sd][twistN_[sd]++] = num;
+            }
         }
         cameraBone_ = (h.cameraBone >= 0 && h.cameraBone < static_cast<int>(h.boneCount)) ? h.cameraBone : -1;
+        TwistSetup();
         unsigned char* verts = data + off;
         for (uint32_t v = 0; v < h.vertexCount; ++v) {
             unsigned char* bi = verts + static_cast<size_t>(v) * kVertexStride + 48;
@@ -2401,8 +2415,64 @@ void Renderer::ShieldIk(const Look& look, const float* nInv12) {
     for (unsigned b = static_cast<unsigned>(sh); b < boneCount_; ++b)
         W[b] = bones_[b].parent >= 0 ? AffMul(W[bones_[b].parent], g_local[b]) : g_local[b];
 }
+void Renderer::TwistSetup() {
+    for (int sd = 0; sd < 2; ++sd) {
+        const int el = armBone_[sd][1], wr = armBone_[sd][2];
+        bool ok = twistN_[sd] > 0 && el >= 0 && wr >= 0 && bones_[wr].parent == el;
+        int top = 0;
+        for (int i = 0; ok && i < twistN_[sd]; ++i) {
+            ok = bones_[twistBone_[sd][i]].parent == el;
+            if (twistNum_[sd][i] > top) top = twistNum_[sd][i];
+        }
+        const float* t = ok ? bones_[wr].bind : nullptr;
+        const float al = t ? std::sqrt(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]) : 0.f;
+        const float ql = t ? std::sqrt(t[3] * t[3] + t[4] * t[4] + t[5] * t[5] + t[6] * t[6]) : 0.f;
+        if (!ok || top <= 0 || al < 1e-6f || ql < 1e-6f) {
+            twistN_[sd] = 0;
+            continue;
+        }
+        for (int k = 0; k < 3; ++k) twistAxis_[sd][k] = t[k] / al;
+        for (int k = 0; k < 4; ++k) twistBindQ_[sd][k] = t[3 + k] / ql;
+        for (int i = 0; i < twistN_[sd]; ++i) twistFrac_[sd][i] = static_cast<float>(twistNum_[sd][i]) / static_cast<float>(top);
+        twistHave_[sd] = false;
+    }
+}
+void Renderer::TwistBones() {
+    constexpr float kTwoPi = 6.28318531f, kReliableDeg = 100.f;
+    for (int sd = 0; sd < 2; ++sd) {
+        if (!twistN_[sd]) continue;
+        const int el = armBone_[sd][1], wr = armBone_[sd][2];
+        const Aff L = AffMul(AffInverse(g_world[el]), g_world[wr]);
+        float qc[4];
+        RotToQuat(L, qc);
+        const float* qb = twistBindQ_[sd];
+        const float bx = -qb[0], by = -qb[1], bz = -qb[2], bw = qb[3];
+        const float dx = qc[3] * bx + qc[0] * bw + qc[1] * bz - qc[2] * by;
+        const float dy = qc[3] * by - qc[0] * bz + qc[1] * bw + qc[2] * bx;
+        const float dz = qc[3] * bz + qc[0] * by - qc[1] * bx + qc[2] * bw;
+        const float dw = qc[3] * bw - qc[0] * bx - qc[1] * by - qc[2] * bz;
+        const float* a = twistAxis_[sd];
+        const float pr = dx * a[0] + dy * a[1] + dz * a[2];
+        float phi = std::remainder(2.f * std::atan2(pr, dw), kTwoPi);
+        float sw = std::fabs(dw * std::cos(phi * 0.5f) + pr * std::sin(phi * 0.5f));
+        const float swingDeg = 2.f * std::acos(sw > 1.f ? 1.f : sw) * 57.2957795f;
+        if (swingDeg < kReliableDeg) {
+            if (twistHave_[sd]) phi += kTwoPi * std::round((twistPrev_[sd] - phi) / kTwoPi);
+            twistPrev_[sd] = phi;
+            twistHave_[sd] = true;
+        } else {
+            phi = twistHave_[sd] ? twistPrev_[sd] : 0.f;
+        }
+        for (int i = 0; i < twistN_[sd]; ++i) {
+            const int b = twistBone_[sd][i];
+            g_local[b] = AffAxisAngle(a, phi * twistFrac_[sd][i]);
+            g_world[b] = AffMul(g_world[el], g_local[b]);
+        }
+    }
+}
 void Renderer::FinishBones(float* palette, int muzzleBone, const float* muzzleLocal, float* muzzleModel, const float* axisLocal,
                            const float* upLocal, float* axisModel, float* upModel) {
+    TwistBones();
     const Aff* world = g_world;
     for (unsigned b = 0; b < boneCount_; ++b) {
         Aff inv;
@@ -2943,6 +3013,8 @@ void Renderer::Release() {
         armBone_[sd][0] = armBone_[sd][1] = armBone_[sd][2] = -1;
         handTag_[sd] = -1;
         ikResidual_[sd] = 0.f;
+        twistN_[sd] = 0;
+        twistHave_[sd] = false;
     }
     gunBone_ = -1;
     muzzleValid_ = false;
