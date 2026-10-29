@@ -409,11 +409,6 @@ void GunSound::Play(float volume, bool loop, float pitch) {
     buf.pAudioData = pcmV_[vi];
     buf.Flags = XAUDIO2_END_OF_STREAM;
     if (loop) buf.LoopCount = XAUDIO2_LOOP_INFINITE;
-    if (loop && loopBegin_ > 0.f && fmt_.nBlockAlign) {
-        unsigned frames = buf.AudioBytes / fmt_.nBlockAlign;
-        unsigned lb = static_cast<unsigned>(loopBegin_ * static_cast<float>(fmt_.nSamplesPerSec));
-        if (lb > 0 && lb + 64 < frames) buf.LoopBegin = lb, buf.LoopLength = frames - lb;
-    }
     if (volume < 0.f) volume = 0.f;
     if (volume > 2.f) volume = 2.f;
     IXAudio2SourceVoice* v = voices_[pick];

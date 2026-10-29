@@ -1161,8 +1161,6 @@ struct State {
     unsigned tpGuarded = 0, tpGuardSkipped = 0, guardLogs = 0;
     uintptr_t fpProj = 0;
     int32_t fpProjId = -1;
-    uintptr_t fpProjAds = 0;
-    int32_t fpProjAdsId = -1;
     int projFor = -1;
     int32_t meleeProjId[vmgame::kStrikeKinds] = {-1, -1, -1, -1, -1};
     unsigned meleeStrikes = 0, meleeFailed = 0, strikeLogs = 0;
@@ -1510,20 +1508,6 @@ bool Install(uintptr_t battle, uintptr_t heroEntity, uintptr_t projRecord);
 void Uninstall(const char* why);
 void Track(uintptr_t projRecord);
 }
-void LookupFocusProjectile() {
-    S.fpProjAds = 0;
-    S.fpProjAdsId = -1;
-    const char* key = vmgame::WeaponProjectileAds(S.projFor);
-    if (!g_shotOk || !key[0]) return;
-    int32_t id = -1;
-    uintptr_t rec = FindProjectile(key, &id);
-    if (rec && id >= 0) {
-        S.fpProjAds = rec;
-        S.fpProjAdsId = id;
-        herofx::Track(rec);
-    }
-    Log("fire: weapon %d focus projectile '%s' -> %s (id %d)", S.projFor, key, S.fpProjAds ? "found" : "NOT FOUND (same as hip)", id);
-}
 void EarlyFlightUninstall(const char* why);
 long EarlyFlightCalls();
 long EarlyFlightPromoted();
@@ -1581,36 +1565,6 @@ bool HeroRouting(uintptr_t unit, int* state = nullptr) {
     if (state) *state = st;
     using FnRouting = char (*)(uintptr_t morale);
     return reinterpret_cast<FnRouting>(g_base + kFnUnitRouting904)(unit + oUnitMorale) != 0;
-}
-struct UnitKeyRec {
-    uintptr_t unit;
-    char key[48];
-};
-UnitKeyRec g_unitKeyTab[64];
-int g_unitKeyNext = 0;
-SRWLOCK g_unitKeyLock = SRWLOCK_INIT;
-void RememberUnitKey(uintptr_t unit, const char* key) {
-    AcquireSRWLockExclusive(&g_unitKeyLock);
-    int slot = -1;
-    for (int i = 0; i < 64 && slot < 0; ++i)
-        if (g_unitKeyTab[i].unit == unit) slot = i;
-    if (slot < 0) slot = g_unitKeyNext, g_unitKeyNext = (g_unitKeyNext + 1) % 64;
-    g_unitKeyTab[slot].unit = unit;
-    snprintf(g_unitKeyTab[slot].key, sizeof g_unitKeyTab[slot].key, "%s", key);
-    ReleaseSRWLockExclusive(&g_unitKeyLock);
-}
-void ForgetUnitKeys() {
-    AcquireSRWLockExclusive(&g_unitKeyLock);
-    memset(g_unitKeyTab, 0, sizeof g_unitKeyTab);
-    g_unitKeyNext = 0;
-    ReleaseSRWLockExclusive(&g_unitKeyLock);
-}
-void UnitKeyOf(uintptr_t unit, char* out, size_t n) {
-    out[0] = 0;
-    AcquireSRWLockShared(&g_unitKeyLock);
-    for (int i = 0; i < 64; ++i)
-        if (unit && g_unitKeyTab[i].unit == unit) snprintf(out, n, "%s", g_unitKeyTab[i].key);
-    ReleaseSRWLockShared(&g_unitKeyLock);
 }
 void Enter(uintptr_t mgr) {
     uintptr_t battle = Ptr(mgr + oMgrBattle);
@@ -1796,12 +1750,6 @@ void Enter(uintptr_t mgr) {
     CastReset();
     S.active = true;
     if (S.mpMode) mp::QueueOn(S.unit);
-    {
-        char heroKey[48];
-        UnitKeyOf(unit, heroKey, sizeof heroKey);
-        vmgame::SetHeroKey(heroKey);
-        Log("enter: unit key '%s'%s", heroKey, heroKey[0] ? "" : " (not reported by the battle script yet - weapon's own arms)");
-    }
     vmgame::SetFirstPerson(true);
     if (S.exitStage == 2) {
         Log("ghost: pending release cancelled - first person entered again");
@@ -1878,7 +1826,6 @@ void Enter(uintptr_t mgr) {
         uintptr_t sb3 = Ptr(g_base + kGlobalScript);
         herofx::Install(sb3 ? Ptr(sb3 + oScriptBattle) : 0, entity, S.fpProj);
     }
-    LookupFocusProjectile();
     if (FireOwner() && entity) {
         uintptr_t evt = Ptr(entity), f48 = evt ? Ptr(evt + 0x48) : 0;
         Log("fire: shooter = hero entity (kills counted, own bullets pass through it); muzzle launch point %s "
@@ -3011,7 +2958,7 @@ void ShotPenRestore(const char* why) {
     if (n) Log("fire: custom penetration - %d projectile record(s) pointed back to their own penetration row (%s)", n, why);
 }
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
-              int nBodies, float clearance, float rangeOverride = 0.f) {
+              int nBodies, float clearance) {
     uintptr_t sb = Ptr(g_base + kGlobalScript);
     uintptr_t battle = sb ? Ptr(sb + oScriptBattle) : 0;
     unsigned char no1 = 1, no2 = 1;
@@ -3059,8 +3006,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     } else {
         for (int i = 0; i < 3; ++i) ray[i] = fwd[i];
     }
-    const float wRange = rangeOverride > 0.f ? rangeOverride : vmgame::WeaponFireRange(vmgame::CurrentWeapon()),
-                range = wRange > 0.f ? wRange : cfg.fireRange;
+    const float wRange = vmgame::WeaponFireRange(vmgame::CurrentWeapon()), range = wRange > 0.f ? wRange : cfg.fireRange;
     for (int i = 0; i < 3; ++i) c.target[i] = eye[i] + fwd[i] * range;
     float d = muzzle ? cfg.muzzleDepth : cfg.fireForward, minGap = 0;
     bool clear = FireOwner() || nBodies == 0;
@@ -7017,19 +6963,10 @@ void Apply(uintptr_t mgr) {
             S.fpProjId = S.fpProj ? id : -1;
             herofx::Track(S.fpProj);
             Log("fire: weapon %d projectile '%s' -> %s (id %d)", S.projFor, want, S.fpProj ? "found" : "NOT FOUND (hero's own)", S.fpProjId);
-            LookupFocusProjectile();
         }
-        float sdirs[8][3], srange = 0.f;
-        bool focus = false;
-        const int nShot = vmgame::ShotPattern(adsW, fwd, right, camUp, sdirs, 8, &srange, &focus);
-        const uintptr_t hipProj = S.fpProj;
-        const int32_t hipProjId = S.fpProjId;
-        if (focus && S.fpProjAds) S.fpProj = S.fpProjAds, S.fpProjId = S.fpProjAdsId;
-        int fired = 0;
-        for (int k = 0; k < nShot; ++k) fired += FireShot(eye, sdirs[k], right, camUp, bodies, nb, clearance, srange) ? 1 : 0;
-        S.fpProj = hipProj;
-        S.fpProjId = hipProjId;
-        if (fired) {
+        float sfwd[3];
+        vmgame::SpreadDir(fwd, right, camUp, sfwd);
+        if (FireShot(eye, sfwd, right, camUp, bodies, nb, clearance)) {
             ++S.shots;
             vmgame::Fire();
             S.camKick.OnShot(kp, adsW, now, &S.pitch, &S.yaw, lim);
@@ -8175,7 +8112,6 @@ struct Fns {
     float (*tonumber)(void*, int);
     int (*type)(void*, int);
     size_t (*objlen)(void*, int);
-    const char* (*tolstring)(void*, int, size_t*);
 } f;
 int g_state = -1;
 char g_missing[48] = "";
@@ -8197,7 +8133,6 @@ bool Resolve() {
         }
         memcpy(e.slot, &p, sizeof p);
     }
-    if (FARPROC p = exe ? GetProcAddress(exe, "lua_tolstring") : nullptr) memcpy(&f.tolstring, &p, sizeof p);
     g_state = 1;
     return true;
 }
@@ -8231,31 +8166,6 @@ int IsHero(void* L) {
     }
     f.pushboolean(L, how ? 1 : 0);
     return 1;
-}
-int UnitKeysFn(void* L) {
-    f.pushstring(L, vmgame::UnitKeys());
-    return 1;
-}
-int SetUnit(void* L) {
-    bool ok = false;
-    if (f.tolstring && f.type(L, 1) == kTUserdata && f.objlen(L, 1) >= sizeof(uintptr_t)) {
-        const void* blk = f.touserdata(L, 1);
-        uintptr_t wrap = 0;
-        if (blk) memcpy(&wrap, blk, sizeof wrap);
-        const uintptr_t p = wrap ? Ptr(wrap + 8) : 0;
-        size_t n = 0;
-        const char* key = f.tolstring(L, 2, &n);
-        if (p && key && n > 0 && n < 48) {
-            RememberUnitKey(p, key);
-            ok = true;
-        }
-    }
-    f.pushboolean(L, ok ? 1 : 0);
-    return 1;
-}
-int BattleStarted(void*) {
-    ForgetUnitKeys();
-    return 0;
 }
 int HudEnabled(void* L) {
     f.pushboolean(L, cfg.hudEnabled ? 1 : 0);
@@ -8460,13 +8370,11 @@ int PushTable(void* L) {
         f.setfield(L, -2, e.name);
     }
     {
-        const struct { const char* name; CFn fn; } more[] = {{"unit_keys", UnitKeysFn}, {"set_unit", SetUnit}, {"battle_started", BattleStarted},
-                                                             {"set_mp_players", SetMpPlayers}};
-        for (const auto& e : more) {
+        const struct { const char* name; CFn fn; } mp[] = {{"set_mp_players", SetMpPlayers}};
+        for (const auto& e : mp) {
             f.pushcclosure(L, e.fn, 0);
             f.setfield(L, -2, e.name);
         }
-        if (!f.tolstring) Log("lua-api: lua_tolstring not exported - set_unit off (character arms stay the weapon's own)");
     }
     Log("lua-api: interface table v4 returned (luaopen #%ld, lua state %p)", n, L);
     return 1;
