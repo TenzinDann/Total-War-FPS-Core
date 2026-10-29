@@ -1500,6 +1500,7 @@ void AddExempt(uintptr_t self, uint32_t hp);
 void BracketOpen(uintptr_t self, uint32_t hp);
 bool BracketClose(uintptr_t self);
 void PostStep(uintptr_t world);
+void MeleeResult(uint32_t from, uint32_t seq, uintptr_t unit, int kind, int hits, int kills, int sHits, int sKills, const char* dl, const char* sl);
 }
 namespace herofx {
 bool Install(uintptr_t battle, uintptr_t heroEntity, uintptr_t projRecord);
@@ -1823,8 +1824,8 @@ void Enter(uintptr_t mgr) {
         if (cfg.fastFire && g_shotOk && !S.mpMode) FastFireInstall(sbf ? Ptr(sbf + oScriptBattle) : 0);
         if (cfg.earlyFlight && g_shotOk && cfg.fireShooter && !S.mpMode) EarlyFlightInstall(sbf ? Ptr(sbf + oScriptBattle) : 0, entity);
         if (S.mpMode)
-            Log("mp: multiplayer path - ammo flags, shield / no-knockdown / super armor by message (FPS_ON / KEEP / SHIELD / FPS_OFF); off until they "
-                "are message-driven: fast fire, early flight, melee engine (falls back to splash projectiles), ghost mode, bullet speed rewrite, "
+            Log("mp: multiplayer path - ammo flags, shield / no-knockdown / super armor, melee by message (FPS_ON / KEEP / SHIELD / MELEE / FPS_OFF); "
+                "off until they are message-driven: fast fire, early flight, ghost mode, bullet speed rewrite, "
                 "custom weapon stats");
         if (sbf && Ptr(sbf + oScriptBattle)) LogUnitLists(Ptr(sbf + oScriptBattle));
         uint64_t mp = 1;
@@ -2382,6 +2383,12 @@ struct MeleeReq {
     float dx, dz;
     uintptr_t hero;
     double t;
+    const MeleeCatCfg* cc = nullptr;
+    float rmax = 0.f;
+    int mpFlags = -1;
+    bool quiet = false;
+    uint32_t mpFrom = 0, mpSeq = 0;
+    uintptr_t mpUnit = 0;
 };
 struct MeleeQueue {
     SRWLOCK lock = SRWLOCK_INIT;
@@ -2414,7 +2421,8 @@ bool MeleeEngineQueue(int kind, int cat, const float eye[3], const float fwd[3])
     ReleaseSRWLockExclusive(&g_mq.lock);
     return ok;
 }
-int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const MeleeKindCfg& arc, const MeleeCatCfg& cc, float frac, int* dmgOut) {
+int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const MeleeKindCfg& arc, const MeleeCatCfg& cc, float frac, int* dmgOut,
+                   int mpFlags = -1) {
     using FnCalc = int32_t* (*)(uintptr_t combat, int32_t* out, uintptr_t attacker, uintptr_t victim, uint32_t splitTargets);
     using FnCtor = void* (*)(void* hitInfo, uintptr_t victim);
     using FnDtor = void (*)(void* hitInfo);
@@ -2432,7 +2440,7 @@ int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const Mele
         uint32_t a58 = 0;
         Rd(hero + 0xa58, a58);
         reinterpret_cast<FnCalc>(g_base + kFnMeleeHitCalc904)(combat, r, hero, victim, 1);
-        if (g_mq.diag < 40) {
+        if (mpFlags < 0 && g_mq.diag < 40) {
             InterlockedIncrement(&g_mq.diag);
             int32_t rv[2] = {0, 0};
             uint32_t vhp = 0, vmax = 0;
@@ -2471,11 +2479,11 @@ int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const Mele
     }
     bool killed = (res & 0xff) != 0;
     float delta[3] = {vp[0] - hp[0], vp[1] - hp[1], vp[2] - hp[2]};
-    if (!killed && cfg.meleeReact) {
+    if (!killed && (mpFlags < 0 ? cfg.meleeReact : (mpFlags & 4) != 0)) {
         uintptr_t vt = Ptr(victim), fn = vt ? Ptr(vt + 0x3a8) : 0;
         if (fn >= g_base && fn < g_base + g_imageSize) reinterpret_cast<FnReact>(fn)(victim, hero, delta);
     }
-    if (cfg.meleeEffects && (dmg > 0 || !arc.damage)) {
+    if ((mpFlags < 0 ? cfg.meleeEffects : (mpFlags & 8) != 0) && (dmg > 0 || !arc.damage)) {
         uintptr_t fx = Ptr(world + 0xf0);
         float hh = 0.f, vh = 0.f, hr = 0.f, vr = 0.f;
         Rd(hero + 0x9c, hh);
@@ -2508,12 +2516,12 @@ constexpr float kMeleeStepSpread = 5.f;
 float g_meleeTargetRadiusMax = 4.f;
 constexpr float kMeleeBodyRef = 0.6f;
 constexpr float kMeleeMountSlack = 1.f;
-float MeleeBigSlack() { return (g_meleeTargetRadiusMax > kMeleeBodyRef ? g_meleeTargetRadiusMax - kMeleeBodyRef : 0.f) + kMeleeMountSlack; }
-float MeleeTargetExtra(uintptr_t e) {
-    if (!(g_meleeTargetRadiusMax > kMeleeBodyRef)) return 0.f;
+float MeleeBigSlack(float rmax = g_meleeTargetRadiusMax) { return (rmax > kMeleeBodyRef ? rmax - kMeleeBodyRef : 0.f) + kMeleeMountSlack; }
+float MeleeTargetExtra(uintptr_t e, float rmax = g_meleeTargetRadiusMax) {
+    if (!(rmax > kMeleeBodyRef)) return 0.f;
     float r = 0.f;
     if (!Rd(e + 0xa0, r) || !(r > kMeleeBodyRef && r < 50.f)) return 0.f;
-    return (r < g_meleeTargetRadiusMax ? r : g_meleeTargetRadiusMax) - kMeleeBodyRef;
+    return (r < rmax ? r : rmax) - kMeleeBodyRef;
 }
 float MeleeWideCos(float halfDeg, float extra, float d) {
     float a = halfDeg + (extra >= d ? 90.f : std::asin(extra / d) * 180.f / kPi);
@@ -2625,6 +2633,7 @@ unsigned MeleeGather(uintptr_t world, uintptr_t battle, uintptr_t hero, uintptr_
     }
     return ng;
 }
+void MeleeEngineRun(uintptr_t world, uintptr_t hero, const MeleeReq* reqs, int nr);
 void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
     if (!g_mq.n) return;
     MeleeReq reqs[8];
@@ -2633,6 +2642,9 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
     memcpy(reqs, g_mq.q, sizeof(MeleeReq) * nr);
     g_mq.n = 0;
     ReleaseSRWLockExclusive(&g_mq.lock);
+    MeleeEngineRun(world, hero, reqs, nr);
+}
+void MeleeEngineRun(uintptr_t world, uintptr_t hero, const MeleeReq* reqs, int nr) {
     uintptr_t outer = Ptr(hero + 0x58);
     if (!outer || Ptr(outer + 0x440) != world) {
         if (g_mq.logs++ < 8) Log("melee-engine: hero %p world mismatch ([+0x58]=%p [+0x440]=%p, hook world %p) - skipped", (void*)hero,
@@ -2647,27 +2659,30 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
     using FnCanHit = char (*)(uintptr_t e);
     float org[8][3];
     int no = 0;
+    bool anyMp = false;
     for (int ri = 0; ri < nr; ++ri) {
         const MeleeReq& rq = reqs[ri];
-        if (rq.hero != hero || Now() - rq.t > 0.6) continue;
+        if (rq.hero != hero || (!rq.cc && Now() - rq.t > 0.6)) continue;
         const int cat = rq.cat >= 0 && rq.cat < vmgame::kMeleeCats ? rq.cat : vmgame::kMeleeCatSword;
-        const MeleeKindCfg arc = MeleeCatEff(cat).k[rq.kind];
+        const MeleeKindCfg arc = (rq.cc ? *rq.cc : MeleeCatEff(cat)).k[rq.kind];
         org[no][0] = rq.ox, org[no][1] = rq.oz;
-        org[no][2] = arc.reach + (arc.splashR > 0.f && arc.splashMax > 0 ? arc.splashR : 0.f) + MeleeBigSlack();
+        org[no][2] = arc.reach + (arc.splashR > 0.f && arc.splashMax > 0 ? arc.splashR : 0.f) + MeleeBigSlack(rq.cc ? rq.rmax : g_meleeTargetRadiusMax);
+        if (rq.cc) anyMp = true;
         ++no;
     }
     unsigned unitsSkipped = 0, unitsAll = 0;
     const double tGather = Now();
-    const unsigned ng = no ? MeleeGather(world, outer, hero, heroUnit, org, no, &unitsSkipped, &unitsAll) : 0;
+    const unsigned ng = no ? MeleeGather(world, anyMp ? 0 : outer, hero, heroUnit, org, no, &unitsSkipped, &unitsAll) : 0;
     const double gatherMs = (Now() - tGather) * 1000.0;
     for (int ri = 0; ri < nr; ++ri) {
         const MeleeReq& rq = reqs[ri];
-        if (rq.hero != hero || Now() - rq.t > 0.6) {
-            vmgame::MeleeHitFeedback(0);
+        if (rq.hero != hero || (!rq.cc && Now() - rq.t > 0.6)) {
+            if (!rq.quiet) vmgame::MeleeHitFeedback(0);
             continue;
         }
         const int cat = rq.cat >= 0 && rq.cat < vmgame::kMeleeCats ? rq.cat : vmgame::kMeleeCatSword;
-        const MeleeCatCfg cc = MeleeCatEff(cat);
+        const float rmax = rq.cc ? rq.rmax : g_meleeTargetRadiusMax;
+        const MeleeCatCfg cc = rq.cc ? *rq.cc : MeleeCatEff(cat);
         const MeleeKindCfg& arc = cc.k[rq.kind];
         const bool heavy = rq.kind == vmgame::kStrikeHeavySweep || rq.kind == vmgame::kStrikeHeavy;
         const float splashR = arc.splashR, splashDmg = arc.splashDmg;
@@ -2683,7 +2698,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         static Cand cand[96];
         int nc = 0;
         unsigned scanned = 0;
-        const float bigSlack = MeleeBigSlack();
+        const float bigSlack = MeleeBigSlack(rmax);
         int nMount = 0, nBig = 0;
         for (unsigned g = 0; g < ng; ++g) {
             const uintptr_t rider = g_mgather[g].e;
@@ -2705,7 +2720,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
                 e = mount, tx = mq[0], tz = mq[2];
                 vx = tx - rq.ox, vz = tz - rq.oz, d = std::sqrt(vx * vx + vz * vz);
             }
-            const float extra = MeleeTargetExtra(e), de = d - extra;
+            const float extra = MeleeTargetExtra(e, rmax), de = d - extra;
             if (de > scanR) continue;
             bool inArc = de <= reach && (d <= 0.6f || (vx * rq.dx + vz * rq.dz) / d >= (extra > 0.f ? MeleeWideCos(arc.halfDeg, extra, d) : cosHalf));
             if (!inArc && !splash) continue;
@@ -2760,7 +2775,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
             if (np >= arc.maxHit || np >= 16) continue;
             prim[np++] = c;
             cand[c].done = true;
-            int dmg = 0, rr = MeleeEngineHit(world, hero, cand[c].e, arc, cc, 1.f, &dmg);
+            int dmg = 0, rr = MeleeEngineHit(world, hero, cand[c].e, arc, cc, 1.f, &dmg, rq.mpFlags);
             if (rr) ++hits;
             if (rr == 2) ++kills;
             if (dn < 140) dn += snprintf(dl + dn, sizeof dl - dn, "%s%d%s@%.1f", np > 1 ? " " : "", dmg, rr == 2 ? "k" : rr ? "" : "x", cand[c].d);
@@ -2794,7 +2809,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
             for (int s = 0; s < ms; ++s) {
                 Cand& cd = cand[sc[s].c];
                 cd.done = true;
-                int dmg = 0, rr = MeleeEngineHit(world, hero, cd.e, arc, cc, splashDmg, &dmg);
+                int dmg = 0, rr = MeleeEngineHit(world, hero, cd.e, arc, cc, splashDmg, &dmg, rq.mpFlags);
                 if (rr) ++sHits;
                 if (rr == 2) ++sKills;
                 if (sn < 140) sn += snprintf(sl + sn, sizeof sl - sn, "%s%d%s@%.1f", s ? " " : "", dmg, rr == 2 ? "k" : rr ? "" : "x", sc[s].d);
@@ -2803,12 +2818,13 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
         InterlockedIncrement(&g_mq.strikes);
         InterlockedExchangeAdd(&g_mq.hits, hits + sHits);
         InterlockedExchangeAdd(&g_mq.kills, kills + sKills);
-        vmgame::MeleeHitFeedback(hits + sHits);
+        if (!rq.quiet) vmgame::MeleeHitFeedback(hits + sHits);
         if (g_mq.logs++ < 200)
             Log("melee-engine: cat %d kind %d %s (reach %.2f m, arc %.0f, splash %.1f m x%d) (%.0f ms after queue) scanned %u (units %u, %u skipped far, %.2f ms), "
                 "in arc %d (candidates: %d mounts, %d big), hit %d, killed %d, damage [%s] | splash hit %d, killed %d [%s] (forced hits so far %ld, fallback damage so far %ld)",
                 cat, rq.kind, heavy ? "heavy" : "light", reach, arc.halfDeg * 2.f, splashR, splashMax, (Now() - rq.t) * 1000.0, scanned, unitsAll,
                 unitsSkipped, gatherMs, inArc, nMount, nBig, hits, kills, dl, sHits, sKills, sl, g_mq.forced, g_mq.fallback);
+        if (rq.cc) mp::MeleeResult(rq.mpFrom, rq.mpSeq, rq.mpUnit, rq.kind, hits, kills, sHits, sKills, dl, sl);
     }
 }
 #include "hero_fire_fx.inc"
@@ -6944,13 +6960,15 @@ void Apply(uintptr_t mgr) {
         int strikeCat = vmgame::kMeleeCatSword;
         int strike = vmgame::TakeMeleeStrike(&strikeCat);
         if (strike >= 0 && g_fireOk && cfg.fireEnabled) {
-            bool engine = MeleeEngineReady();
-            if (engine ? MeleeEngineQueue(strike, strikeCat, eye, vFwd) : MeleeStrike(strike, eye, vFwd))
+            const bool viaMp = S.mpMode && mp::MeleeReady();
+            bool engine = viaMp || MeleeEngineReady();
+            if (viaMp ? mp::SendMelee(strike, strikeCat, eye, vFwd) : engine ? MeleeEngineQueue(strike, strikeCat, eye, vFwd) : MeleeStrike(strike, eye, vFwd))
                 ++S.meleeStrikes;
             else
                 ++S.meleeFailed;
             if (S.strikeLogs < 4 && S.meleeStrikes == 1)
-                Log("melee: first strike via %s", engine ? "engine melee hit (sim thread)" : "splash explosion");
+                Log("melee: first strike via %s", viaMp ? "MELEE message (engine melee hit on every machine)" : engine ? "engine melee hit (sim thread)"
+                                                                                                         : "splash explosion");
         }
         held = false;
     }

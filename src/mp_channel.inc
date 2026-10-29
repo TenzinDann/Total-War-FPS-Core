@@ -16,11 +16,14 @@ const CodePrint kPrints904[] = {{0x2ece760, 0x5b, 0x7b0bf0edb8cc1942ull},
                                 {0x2eeb29c, 0x53, 0x3fe38d7eb43d316eull},
                                 {0x2eeedd8, 0x38, 0x1e40299fca8b7e54ull}};
 constexpr uint32_t kMagic = 0x53504648;
-constexpr uint32_t kProto = 2;
-enum : uint32_t { kHello = 1, kFpsOn = 2, kFpsOff = 3, kKeep = 4, kShield = 5 };
+constexpr uint32_t kProto = 3;
+enum : uint32_t { kHello = 1, kFpsOn = 2, kFpsOff = 3, kKeep = 4, kShield = 5, kMelee = 6 };
 const char* MsgName(uint32_t k) {
-    return k == kHello ? "HELLO" : k == kFpsOn ? "FPS_ON" : k == kFpsOff ? "FPS_OFF" : k == kKeep ? "KEEP" : k == kShield ? "SHIELD" : "?";
+    return k == kHello ? "HELLO" : k == kFpsOn ? "FPS_ON" : k == kFpsOff ? "FPS_OFF" : k == kKeep ? "KEEP" : k == kShield ? "SHIELD"
+           : k == kMelee ? "MELEE" : "?";
 }
+enum : uint32_t { kMfDamage = 1, kMfAlwaysHit = 2, kMfReact = 4, kMfEffects = 8 };
+constexpr int kMeleeFields = 18;
 enum : uint32_t { kFlKnock = 1, kFlShield = 2, kFlArmor = 4, kFlRefund = 8, kFlStaggerPartial = 16 };
 constexpr uint32_t kFlHooks = kFlKnock | kFlShield | kFlArmor;
 bool g_ok = false;
@@ -68,6 +71,14 @@ struct VtCopy {
 int g_nVtc = 0;
 uintptr_t g_psWorld = 0, g_psObj = 0;
 LONG64 g_psFxQpc = 0;
+struct MeleeMsg {
+    uintptr_t unit;
+    uint32_t from, seq;
+    int kind, cat, flags;
+    float o[3], d[2], rmax;
+    MeleeCatCfg cc;
+} g_mm[16];
+int g_nMm = 0;
 struct ShieldSent {
     int32_t milli;
     float yaw, angle;
@@ -326,14 +337,41 @@ void PostStep(uintptr_t world) {
         h.hpPrev = hp + add;
         h.exempt = 0;
     }
+    MeleeMsg mm[16];
+    const int nm = g_nMm;
+    memcpy(mm, g_mm, sizeof(MeleeMsg) * nm);
+    g_nMm = 0;
     ReleaseSRWLockExclusive(&g_heroLock);
-    if (!fx) return;
-    LARGE_INTEGER q;
-    QueryPerformanceCounter(&q);
-    if (q.QuadPart - g_psFxQpc > g_qpf.QuadPart / 4) {
-        g_psFxQpc = q.QuadPart;
-        vmgame::ShieldHit();
+    if (fx) {
+        LARGE_INTEGER q;
+        QueryPerformanceCounter(&q);
+        if (q.QuadPart - g_psFxQpc > g_qpf.QuadPart / 4) {
+            g_psFxQpc = q.QuadPart;
+            vmgame::ShieldHit();
+        }
     }
+    for (int i = 0; i < nm; ++i) {
+        uintptr_t e = 0;
+        if (!UnitEntities(mm[i].unit, &e, 1) || !e) continue;
+        MeleeReq r = {mm[i].kind, mm[i].cat, mm[i].o[0], mm[i].o[1], mm[i].o[2], mm[i].d[0], mm[i].d[1], e, Now()};
+        r.cc = &mm[i].cc;
+        r.rmax = mm[i].rmax;
+        r.mpFlags = mm[i].flags;
+        r.quiet = !(mm[i].from == g_nonce && S.active && S.mpMode && S.entity == e);
+        r.mpFrom = mm[i].from;
+        r.mpSeq = mm[i].seq;
+        r.mpUnit = mm[i].unit;
+        MeleeEngineRun(world, e, &r, 1);
+    }
+}
+void MeleeResult(uint32_t from, uint32_t seq, uintptr_t unit, int kind, int hits, int kills, int sHits, int sKills, const char* dl, const char* sl) {
+    uintptr_t battle = ScriptBattle();
+    uint32_t step = 0;
+    if (battle) Rd(battle + oBattleStep, step);
+    int32_t id = 0;
+    Rd(unit + oUnitNetId, id);
+    Log("mp-digest: step %u MELEE-HIT from %08x #%u unit %d kind %d | hit %d killed %d [%s] | splash hit %d killed %d [%s]", step, from, seq, id, kind,
+        hits, kills, dl, sHits, sKills, sl);
 }
 void Digest(const char* what, uint32_t from, uint32_t seq, uintptr_t unit) {
     uintptr_t battle = ScriptBattle();
@@ -385,6 +423,7 @@ void Handler(uintptr_t rd, uintptr_t world) {
         AcquireSRWLockExclusive(&g_heroLock);
         g_simWorld = world;
         g_nHero = 0;
+        g_nMm = 0;
         ReleaseSRWLockExclusive(&g_heroLock);
     }
     if (from == g_nonce) {
@@ -438,12 +477,15 @@ void Handler(uintptr_t rd, uintptr_t world) {
     uint32_t want = 0;
     int32_t milli = 0;
     float yaw = 0.f, half = 180.f;
+    uint32_t mf[kMeleeFields] = {};
     if (kind == kFpsOn || kind == kKeep) {
         rdField(rd, 4, &want, 4);
     } else if (kind == kShield) {
         rdField(rd, 4, &milli, 4);
         rdField(rd, 4, &yaw, 4);
         rdField(rd, 4, &half, 4);
+    } else if (kind == kMelee) {
+        for (uint32_t& x : mf) rdField(rd, 4, &x, 4);
     }
     Rd(rd + oRdError, err);
     if (err) {
@@ -468,7 +510,26 @@ void Handler(uintptr_t rd, uintptr_t world) {
         if (i >= 0) {
             ApplyAmmo(unit);
             Hook(g_hero[i], want, MsgName(kind));
-            wantSteps = (g_hero[i].flags & kFlShield) != 0;
+            wantSteps = true;
+        }
+    } else if (kind == kMelee && i >= 0) {
+        auto f = [&](int k) {
+            float v;
+            memcpy(&v, &mf[k], 4);
+            return v;
+        };
+        const int mk = static_cast<int>(mf[0]), mc = static_cast<int>(mf[1]);
+        if (mk < 0 || mk >= vmgame::kStrikeKinds || mc < 0 || mc >= vmgame::kMeleeCats || g_nMm >= 16) {
+            Log("mp: MELEE from %08x #%u dropped (kind %d cat %d, queue %d)", from, seq, mk, mc, g_nMm);
+        } else {
+            MeleeMsg& m = g_mm[g_nMm++];
+            memset(&m, 0, sizeof m);
+            m.unit = unit, m.from = from, m.seq = seq, m.kind = mk, m.cat = mc, m.flags = static_cast<int>(mf[17]);
+            m.o[0] = f(2), m.o[1] = f(3), m.o[2] = f(4), m.d[0] = f(5), m.d[1] = f(6), m.rmax = f(16);
+            MeleeKindCfg& k = m.cc.k[mk];
+            k.reach = f(7), k.halfDeg = f(8), k.dmg = f(9), k.maxHit = static_cast<int>(mf[10]), k.damage = (mf[17] & kMfDamage) != 0;
+            k.splashR = f(11), k.splashDmg = f(12), k.splashMax = static_cast<int>(mf[13]);
+            m.cc.damageScale = f(14), m.cc.fallback = f(15), m.cc.alwaysHit = (mf[17] & kMfAlwaysHit) != 0, m.cc.blockAngle = -1.f;
         }
     } else if (kind == kShield && i >= 0) {
         g_hero[i].milli = milli < 0 ? 0 : milli > 1000 ? 1000 : milli;
@@ -523,6 +584,28 @@ bool SendHero(uint32_t kind, uintptr_t unit) {
     const uint32_t fl = LocalFlags();
     return Send(kind, unit, &fl, 1);
 }
+bool MeleeReady() {
+    return g_ok && g_helloBack && !g_nPend && cfg.meleeEngine && g_meleeHitOk && g_ef.siteState > 0 && S.active && S.mpMode && S.unit;
+}
+bool SendMelee(int kind, int cat, const float eye[3], const float fwd[3]) {
+    if (cat < 0 || cat >= vmgame::kMeleeCats) cat = vmgame::kMeleeCatSword;
+    float hx = fwd[0], hz = fwd[2], hl = std::sqrt(hx * hx + hz * hz);
+    if (kind < 0 || kind >= vmgame::kStrikeKinds || hl < 1e-3f) return false;
+    const MeleeCatCfg cc = MeleeCatEff(cat);
+    const MeleeKindCfg& k = cc.k[kind];
+    uint32_t x[kMeleeFields] = {};
+    auto put = [&](int i, float v) { memcpy(&x[i], &v, 4); };
+    x[0] = static_cast<uint32_t>(kind);
+    x[1] = static_cast<uint32_t>(cat);
+    put(2, eye[0]), put(3, eye[1]), put(4, eye[2]), put(5, hx / hl), put(6, hz / hl);
+    put(7, k.reach), put(8, k.halfDeg), put(9, k.dmg);
+    x[10] = static_cast<uint32_t>(k.maxHit);
+    put(11, k.splashR), put(12, k.splashDmg);
+    x[13] = static_cast<uint32_t>(k.splashMax);
+    put(14, cc.damageScale), put(15, cc.fallback), put(16, g_meleeTargetRadiusMax);
+    x[17] = (k.damage ? kMfDamage : 0u) | (cc.alwaysHit ? kMfAlwaysHit : 0u) | (cfg.meleeReact ? kMfReact : 0u) | (cfg.meleeEffects ? kMfEffects : 0u);
+    return Send(kMelee, S.unit, x, kMeleeFields);
+}
 void Queue(uint32_t kind, uintptr_t unit) {
     if (!g_ok) return;
     if (g_nPend == 8) {
@@ -552,6 +635,7 @@ void Init() {
     g_features = (g_tpOk ? 1u : 0) | (g_ovrOk ? 2u : 0) | (g_shotOk ? 4u : 0) | (g_fireOk ? 8u : 0) | (g_mpFlagOk ? 16u : 0);
     if (g_ef.siteState == 0) EarlyFlightSiteCheck();
     g_features |= (g_noKnockOk ? 32u : 0) | (g_shieldGameOk ? 64u : 0) | (g_armorOk ? 128u : 0) | (g_ef.siteState > 0 ? 256u : 0);
+    g_features |= g_meleeHitOk ? 512u : 0;
     if (!PrintsMatch(Prints(kPrints904), "mp channel") ||
         !CheckRegStub(kRegProfiler904, kFnProfilerNop904, kTypeProfiler904, "BCQ_COMMAND_PROFILER_TAG")) {
         Log("mp: channel OFF (fingerprints / registration stub) - first person stays off in multiplayer battles");
@@ -589,6 +673,7 @@ void Frame() {
         InterlockedExchange(&g_lagMaxMs, 0);
         AcquireSRWLockExclusive(&g_heroLock);
         g_nHero = 0;
+        g_nMm = 0;
         g_simWorld = 0;
         ReleaseSRWLockExclusive(&g_heroLock);
         g_psWorld = g_psObj = 0;
