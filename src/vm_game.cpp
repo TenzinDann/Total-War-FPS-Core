@@ -2383,7 +2383,7 @@ void RosterStep(ID3D11Device* dev) {
         for (int i = 0; i < g_modelCount; ++i)
             if (usable(i)) g_roster[n++] = i;
     } else {
-        if (!(campaign && loadout[0])) {
+        if (!loadout[0]) {
             wchar_t w[kSlots * 64 + 8] = L"";
             from = "ini loadout_default";
             if (!campaign) {
@@ -2393,7 +2393,7 @@ void RosterStep(ID3D11Device* dev) {
             if (!w[0]) GetPrivateProfileStringW(L"viewmodel", L"loadout_default", L"", w, kSlots * 64 + 8, g_ini);
             snprintf(loadout, sizeof loadout, "%ls", w);
         } else {
-            from = "armory file";
+            from = campaign ? "armory file" : "armory file (custom battle loadout)";
         }
         const char* p = loadout;
         for (int k = 0; k < kSlots; ++k) {
