@@ -149,7 +149,7 @@ bool ApplyArmsOverride(unsigned char** pdata, size_t* plen, char* note, size_t n
             if (!strncmp(bones[b].name, name, 47)) return static_cast<int>(b);
         return -1;
     };
-    int best = -1, bestMiss = 1 << 30, bestMissNT = 0, bestUsedNT = 0;
+    int best = -1, bestMiss = 1 << 30;
     float bestDist = 0.f;
     for (size_t ki = 0; ki < g_armsKits.size(); ++ki) {
         const ArmsKit& k = g_armsKits[ki];
@@ -158,26 +158,18 @@ bool ApplyArmsOverride(unsigned char** pdata, size_t* plen, char* note, size_t n
         for (uint32_t v = 0; v < k.h.vertexCount; ++v)
             for (int c = 0; c < 4; ++c)
                 if (kv[v * kVertexStride + 52 + c] && kv[v * kVertexStride + 48 + c] < k.bones.size()) used[kv[v * kVertexStride + 48 + c]] = true;
-        int miss = 0, missNT = 0, usedNT = 0;
+        int miss = 0;
         float dist = 0.f;
         for (size_t j = 0; j < k.bones.size(); ++j) {
             if (!used[j]) continue;
-            const bool twist = TwistBoneSide(k.bones[j].name, nullptr) >= 0;
-            if (!twist) ++usedNT;
             int w = findBone(k.bones[j].name);
             if (w < 0) {
                 ++miss;
-                if (!twist) ++missNT;
                 continue;
             }
             for (int e = 0; e < 12; ++e) dist += std::fabs(k.bones[j].invBind[e] - bones[w].invBind[e]);
         }
-        if (miss < bestMiss || (miss == bestMiss && dist < bestDist))
-            best = static_cast<int>(ki), bestMiss = miss, bestDist = dist, bestMissNT = missNT, bestUsedNT = usedNT;
-    }
-    if (bestUsedNT > 0 && bestMissNT * 2 > bestUsedNT) {
-        snprintf(note, noteLen, "arms override: kit does not fit this skeleton (%d of %d bones missing) - weapon's own arms kept", bestMissNT, bestUsedNT);
-        return false;
+        if (miss < bestMiss || (miss == bestMiss && dist < bestDist)) best = static_cast<int>(ki), bestMiss = miss, bestDist = dist;
     }
     const ArmsKit& k = g_armsKits[best];
     std::vector<int> map(k.bones.size(), -1);
