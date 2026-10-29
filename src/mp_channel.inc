@@ -119,6 +119,25 @@ bool Mode(uintptr_t battle) {
     if (!(g_mpFlagOk && battle && Rd(battle + oBattleIsMp, v))) v = 1;
     return v != 0;
 }
+bool RealMp(uintptr_t battle) {
+    uint64_t v = 1;
+    if (!(g_mpFlagOk && battle && Rd(battle + oBattleIsMp, v))) v = 1;
+    return v != 0;
+}
+volatile LONG g_wantPlayers = 0, g_listAi = 0, g_listWatch = 0, g_listCalls = 0;
+volatile uintptr_t g_listBattle = 0;
+void SetPlayers(int n, int ai, int watch) {
+    const uintptr_t b = ScriptBattle();
+    const bool changed = b != g_listBattle || n != g_wantPlayers || ai != g_listAi || watch != g_listWatch;
+    InterlockedExchange(&g_wantPlayers, n);
+    InterlockedExchange(&g_listAi, ai);
+    InterlockedExchange(&g_listWatch, watch);
+    g_listBattle = b;
+    InterlockedIncrement(&g_listCalls);
+    if (changed)
+        Log("mp: player list from the battle script (battle %p): %d playing human(s), %d AI slot(s), %d watching%s", (void*)b, n, ai, watch,
+            n < 0 ? " - read error" : n == 0 ? " - no list (single player, or not ready yet)" : "");
+}
 float Lag() {
     LONG n = g_lagN, ms = g_lagMs, mx = g_lagMaxMs;
     if (!n) return 0.3f;
@@ -729,11 +748,25 @@ void Frame() {
     }
 }
 bool EnterAllowed() {
-    if (!Mode(ScriptBattle())) return true;
+    const uintptr_t battle = ScriptBattle();
+    if (!Mode(battle)) return true;
+    const bool real = RealMp(battle);
+    const LONG listed = g_listBattle == battle ? g_wantPlayers : 0;
+    const LONG need = real ? listed : 1;
+    char buf[200];
     const char* why = !g_ok ? "channel not available on this game version" : g_mismatch ? "a player's core / game version / checks differ from ours"
-                      : !g_helloBack ? "handshake not finished yet (our HELLO has not come back)" : nullptr;
+                      : !g_helloBack ? "handshake not finished yet (our HELLO has not come back)"
+                      : real && listed < 0 ? "the multiplayer player list could not be read (battle script)"
+                      : real && listed == 0 ? "the multiplayer player list is not reported yet (battle script tenzin_fps_access.lua)"
+                                            : nullptr;
+    if (!why && g_peers < need) {
+        snprintf(buf, sizeof buf, "heard HELLO from %ld of %ld playing human(s) - waiting (a player without this build or with another version never says HELLO)",
+                 g_peers, need);
+        why = buf;
+    }
     if (!why) return true;
-    Log("enter refused: multiplayer path - %s (players heard %ld)", why, g_peers);
+    Log("enter refused: multiplayer path - %s (players heard %ld, list %ld playing / %ld AI / %ld watching, list reports %ld)", why, g_peers, listed,
+        g_listAi, g_listWatch, g_listCalls);
     return false;
 }
 }

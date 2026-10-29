@@ -8435,6 +8435,13 @@ int CastHoldApi(void* L) {
     f.pushboolean(L, ok ? 1 : 0);
     return 1;
 }
+int SetMpPlayers(void* L) {
+    int v[3] = {-1, 0, 0};
+    for (int i = 0; i < 3; ++i)
+        if (f.type(L, i + 1) == kTNumber) v[i] = static_cast<int>(f.tonumber(L, i + 1));
+    mp::SetPlayers(v[0], v[1], v[2]);
+    return 0;
+}
 int PushTable(void* L) {
     LONG n = InterlockedIncrement(&g_opens);
     if (!Resolve()) {
@@ -8453,7 +8460,8 @@ int PushTable(void* L) {
         f.setfield(L, -2, e.name);
     }
     {
-        const struct { const char* name; CFn fn; } more[] = {{"unit_keys", UnitKeysFn}, {"set_unit", SetUnit}, {"battle_started", BattleStarted}};
+        const struct { const char* name; CFn fn; } more[] = {{"unit_keys", UnitKeysFn}, {"set_unit", SetUnit}, {"battle_started", BattleStarted},
+                                                             {"set_mp_players", SetMpPlayers}};
         for (const auto& e : more) {
             f.pushcclosure(L, e.fn, 0);
             f.setfield(L, -2, e.name);
