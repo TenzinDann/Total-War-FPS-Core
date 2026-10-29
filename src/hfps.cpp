@@ -525,6 +525,7 @@ struct Config {
     float tpShotGuard = 1.1f;
     bool fastFire = true;
     bool earlyFlight = true;
+    bool mpForce = false;
     bool autoLead = true;
     float leadExtra = 0.f;
     float leadScale = 1.f;
@@ -804,6 +805,7 @@ void LoadConfig() {
     cfg.tpShotGuard = IniF(L"fire", L"teleport_guard", cfg.tpShotGuard, ini);
     cfg.fastFire = GetPrivateProfileIntW(L"fire", L"fast_fire", 1, ini) != 0;
     cfg.earlyFlight = GetPrivateProfileIntW(L"fire", L"early_flight", 1, ini) != 0;
+    cfg.mpForce = GetPrivateProfileIntW(L"mp", L"force_mp_mode", 0, ini) != 0;
     cfg.autoLead = GetPrivateProfileIntW(L"fire", L"auto_lead", 1, ini) != 0;
     cfg.leadExtra = IniF(L"fire", L"lead_extra", cfg.leadExtra, ini);
     if (!(cfg.leadExtra >= -0.3f && cfg.leadExtra <= 0.5f)) cfg.leadExtra = 0.f;
@@ -1219,8 +1221,9 @@ struct State {
     unsigned tpSent = 0, tpFailed = 0, tpLogs = 0, leashHits = 0;
     int lastMode = -1;
     bool flyer = false;
-    TpRec tpHist[8] = {};
+    TpRec tpHist[32] = {};
     unsigned tpHead = 0;
+    bool mpMode = false;
     bool stuck = false;
     double tStuck = 0, tNoFollow = -1;
     float stuckPos[3] = {};
@@ -1477,6 +1480,16 @@ void LogUnitLists(uintptr_t battle);
 bool FastFireInstall(uintptr_t battle);
 void FastFireUninstall(const char* why);
 bool EarlyFlightInstall(uintptr_t battle, uintptr_t heroEntity);
+namespace mp {
+bool Mode(uintptr_t battle);
+uintptr_t ScriptBattle();
+bool EnterAllowed();
+void QueueOn(uintptr_t unit);
+void QueueOff(uintptr_t unit);
+float Lag();
+void Frame();
+void Init();
+}
 namespace herofx {
 bool Install(uintptr_t battle, uintptr_t heroEntity, uintptr_t projRecord);
 void Uninstall(const char* why);
@@ -1510,6 +1523,7 @@ void Exit(uintptr_t mgr, const char* why, bool release = true) {
     FastFireUninstall(why);
     EarlyFlightUninstall(why);
     herofx::Uninstall(why);
+    if (S.mpMode) mp::QueueOff(S.unit);
     int mode = S.lastMode >= 0 ? S.lastMode : MoveMode();
     if (!release) {
         Log("move: hero not released (%s)", why);
@@ -1597,6 +1611,11 @@ void Enter(uintptr_t mgr) {
     if (Ptr(fpCtrl + oFpCtrlEntity)) {
         Refuse(kRefuseArtillery);
         Log("enter refused: native artillery first-person mode is active");
+        return;
+    }
+    S.mpMode = mp::Mode(mp::ScriptBattle());
+    if (!mp::EnterAllowed()) {
+        Refuse(kRefuseOther);
         return;
     }
     if (!FpCamOk(cam)) {
@@ -1761,6 +1780,7 @@ void Enter(uintptr_t mgr) {
     SetupMouse();
     CastReset();
     S.active = true;
+    if (S.mpMode) mp::QueueOn(S.unit);
     {
         char heroKey[48];
         UnitKeyOf(unit, heroKey, sizeof heroKey);
@@ -1772,7 +1792,7 @@ void Enter(uintptr_t mgr) {
         Log("ghost: pending release cancelled - first person entered again");
         S.exitStage = 0;
     }
-    S.ghostWanted = cfg.ghost && g_ghostOk && g_tpOk && cfg.moveEnabled && MoveMode() == 0;
+    S.ghostWanted = cfg.ghost && g_ghostOk && g_tpOk && cfg.moveEnabled && MoveMode() == 0 && !S.mpMode;
     S.ghost = false;
     S.ghostLogs = 0;
     S.heroAlliance = -1;
@@ -1789,13 +1809,16 @@ void Enter(uintptr_t mgr) {
     VelReset();
     {
         uintptr_t sbf = Ptr(g_base + kGlobalScript);
-        if (cfg.fastFire && g_shotOk) FastFireInstall(sbf ? Ptr(sbf + oScriptBattle) : 0);
-        if (cfg.earlyFlight && g_shotOk && cfg.fireShooter) EarlyFlightInstall(sbf ? Ptr(sbf + oScriptBattle) : 0, entity);
+        if (cfg.fastFire && g_shotOk && !S.mpMode) FastFireInstall(sbf ? Ptr(sbf + oScriptBattle) : 0);
+        if (cfg.earlyFlight && g_shotOk && cfg.fireShooter && !S.mpMode) EarlyFlightInstall(sbf ? Ptr(sbf + oScriptBattle) : 0, entity);
+        if (S.mpMode)
+            Log("mp: multiplayer path - ammo flags by message (FPS_ON / KEEP / FPS_OFF); off until they are message-driven: fast fire, early flight, "
+                "melee engine (falls back to splash projectiles), shield, no-knockdown, super armor, ghost mode, bullet speed rewrite, custom weapon stats");
         if (sbf && Ptr(sbf + oScriptBattle)) LogUnitLists(Ptr(sbf + oScriptBattle));
         uint64_t mp = 1;
         uintptr_t btm = sbf ? Ptr(sbf + oScriptBattle) : 0;
         if (!(g_mpFlagOk && btm && Rd(btm + oBattleIsMp, mp))) mp = 1;
-        vmgame::SetMpBattle(mp != 0);
+        vmgame::SetMpBattle(mp != 0 || S.mpMode);
     }
     S.fpProj = 0;
     S.fpProjId = -1;
@@ -4798,7 +4821,7 @@ bool NoKnockInstall(uintptr_t ent) {
     return ok;
 }
 void NoKnockStep() {
-    bool want = S.active && S.entity && ((cfg.noKnock && g_noKnockOk) || (cfg.shieldGame && g_shieldGameOk) || (cfg.superArmor && g_armorOk));
+    bool want = S.active && S.entity && !S.mpMode && ((cfg.noKnock && g_noKnockOk) || (cfg.shieldGame && g_shieldGameOk) || (cfg.superArmor && g_armorOk));
     if (g_nk.ent && (!want || g_nk.ent != S.entity || g_nk.gen != g_cfgGen))
         NoKnockRemove(!want ? "first person off / switched off" : g_nk.ent != S.entity ? "hero changed" : "ini reloaded");
     if (!want) return;
@@ -5158,6 +5181,7 @@ void EdgeStep() {
     }
 }
 constexpr uintptr_t oProjSpeed = 0x64, oProjMass = 0xc0, oUnitAmmo = 0x3d90, oAmmoNoTake = 0xc, kAmmoSlot = 0x10;
+#include "mp_channel.inc"
 void ShotRestoreSpeed(const char* why) {
     if (!S.speedApplied) return;
     S.speedApplied = false;
@@ -5167,7 +5191,7 @@ void ShotRestoreSpeed(const char* why) {
 }
 void ShotStep() {
     bool active = S.active && g_shotOk && g_fireOk && cfg.fireEnabled;
-    uintptr_t rec = active && cfg.bulletSpeed > 0.f && S.unit ? (S.fpProj ? S.fpProj : Ptr(S.unit + oUnitProjectile)) : 0;
+    uintptr_t rec = active && !S.mpMode && cfg.bulletSpeed > 0.f && S.unit ? (S.fpProj ? S.fpProj : Ptr(S.unit + oUnitProjectile)) : 0;
     if (S.speedApplied && rec != S.speedRec) ShotRestoreSpeed(rec ? "weapon changed" : "first person ended");
     if (!active) ShotDamageRestore("first person ended");
     if (!active) ShotPenRestore("first person ended");
@@ -5193,7 +5217,7 @@ void ShotStep() {
             Log("fire: projectile record %p speed %.2f mass %.2f look wrong; bullet speed unchanged", (void*)rec, sp, m);
         }
     }
-    bool wantAmmo = active && cfg.fireShooter && cfg.unlimitedAmmo && S.unit && S.entity;
+    bool wantAmmo = active && cfg.fireShooter && cfg.unlimitedAmmo && S.unit && S.entity && !S.mpMode;
     if (wantAmmo && !S.ammoApplied) {
         S.ammoUnit = S.unit;
         S.ammoEntity = S.entity;
@@ -6120,12 +6144,13 @@ void Apply(uintptr_t mgr) {
         bool judged = false, follow = false;
         bool unbound = S.ghostWanted || S.airFar || S.air || (S.tLand > 0 && now - S.tLand < 0.5);
         if (unbound || pinned || S.castHold) judged = true, follow = true;
+        const double lagX = S.mpMode ? mp::Lag() : 0.0;
         for (const TpRec& r : S.tpHist) {
             if (unbound || pinned || S.castHold) break;
-            if (r.t <= 0 || now - r.t > 0.45) continue;
+            if (r.t <= 0 || now - r.t > 0.45 + lagX) continue;
             float fx = raw[0] - r.x, fz = raw[2] - r.z;
             if (fx * fx + fz * fz < 0.16f) follow = true;
-            if (now - r.t >= 0.25) judged = true;
+            if (now - r.t >= 0.25 + lagX) judged = true;
         }
         if (!judged) follow = true;
         if (pinned) {
@@ -6142,7 +6167,7 @@ void Apply(uintptr_t mgr) {
             S.tNoFollow = -1;
         } else if (S.tNoFollow < 0) {
             S.tNoFollow = now;
-        } else if (now - S.tNoFollow >= 0.25) {
+        } else if (now - S.tNoFollow >= 0.25 + lagX) {
             S.stuck = true;
             S.tStuck = now;
             memcpy(S.stuckPos, raw, sizeof raw);
@@ -6253,6 +6278,10 @@ void Apply(uintptr_t mgr) {
             }
         }
         float leash = S.stuck ? cfg.stuckLeash : cfg.leash;
+        if (S.mpMode && !S.stuck) {
+            float extra = cfg.runSpeed * mp::Lag();
+            leash += extra > 6.f ? 6.f : extra;
+        }
         float ex = S.kinPos[0] - raw[0], ez = S.kinPos[1] - raw[2];
         float ed = std::sqrt(ex * ex + ez * ez);
         const bool skipAhead = !S.stuck && ed > leash && LeashSkipAhead(ex, ez, S.kinVel, ed, leash);
@@ -7481,6 +7510,7 @@ bool VerifyGame() {
         Log("audio: follow game master x sfx volume %s", g_gameVolOk ? "ok" : "OFF - first-person sounds stay at fixed -5 dB");
         Log("wall: building walls %s (building=%d)", g_buildOk ? "solid" : "OFF - can walk through buildings", cfg.building);
         Log("wall: city walls / building nav blocks %s (wall=%d)", g_wallOk ? "ok" : "OFF - terrain only, jumping still works", cfg.wall);
+        mp::Init();
         Log("move: unit orders %s, entity halt %s, entity move %s, entity teleport %s (unavailable modes fall back to unit orders)",
             m ? "ok" : "OFF", h ? "ok" : "OFF", o ? "ok" : "OFF", t ? "ok" : "OFF");
     }
@@ -8042,6 +8072,7 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
             S.mgr != mgr ? "camera manager changed" : "camera manager re-created at the same address", (void*)S.mgr, (void*)mgr, oldExit, oldLauncher);
     }
     if (S.exitStage && (!S.active || S.exitStage == 1)) ExitSequenceStep(mgr);
+    mp::Frame();
     if (InterlockedExchange(&g_reqToggle, 0)) {
         if (S.active)
             Exit(mgr, "toggle-key");
