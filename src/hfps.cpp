@@ -1480,6 +1480,7 @@ void LogUnitLists(uintptr_t battle);
 bool FastFireInstall(uintptr_t battle);
 void FastFireUninstall(const char* why);
 bool EarlyFlightInstall(uintptr_t battle, uintptr_t heroEntity);
+unsigned PromoteHeroBullets(uintptr_t world, uintptr_t* ours, uintptr_t hero);
 namespace mp {
 bool Mode(uintptr_t battle);
 uintptr_t ScriptBattle();
@@ -1493,7 +1494,9 @@ struct HitView {
     float f, yaw, angle;
     bool armor, staggerOnPartial, local;
 };
-enum : int { kCntMissileFull, kCntMissilePart, kCntMeleeFull, kCntMeleePart, kCntSide, kCntStagger, kCntArmor, kCntKnock, kCntRefund, kCnt };
+enum : int { kCntMissileFull, kCntMissilePart, kCntMeleeFull, kCntMeleePart, kCntSide, kCntStagger, kCntArmor, kCntKnock, kCntRefund, kCntEarly,
+             kCnt };
+bool EarlyFlightOn();
 bool HitState(uintptr_t self, HitView* v);
 void Count(uintptr_t self, int what);
 void AddExempt(uintptr_t self, uint32_t hp);
@@ -1825,7 +1828,7 @@ void Enter(uintptr_t mgr) {
         if (cfg.earlyFlight && g_shotOk && cfg.fireShooter && !S.mpMode) EarlyFlightInstall(sbf ? Ptr(sbf + oScriptBattle) : 0, entity);
         if (S.mpMode)
             Log("mp: multiplayer path - ammo flags, shield / no-knockdown / super armor, melee by message (FPS_ON / KEEP / SHIELD / MELEE / FPS_OFF); "
-                "off until they are message-driven: fast fire, early flight, ghost mode, bullet speed rewrite, "
+                "off until they are message-driven: fast fire, ghost mode, bullet speed rewrite, "
                 "custom weapon stats");
         if (sbf && Ptr(sbf + oScriptBattle)) LogUnitLists(Ptr(sbf + oScriptBattle));
         uint64_t mp = 1;
@@ -3106,7 +3109,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     float aim[3] = {eye[0] + fwd[0] * hit.dist, eye[1] + fwd[1] * hit.dist, eye[2] + fwd[2] * hit.dist};
     float leadT = 0.f, lead[2] = {0.f, 0.f};
     if (cfg.autoLead && hit.ent && (hit.vel[0] != 0.f || hit.vel[1] != 0.f)) {
-        float steps = (fast ? 1.0f : 2.5f) - (EarlyFlightActive() ? 1.0f : 0.0f);
+        float steps = (fast ? 1.0f : 2.5f) - (EarlyFlightActive() || mp::EarlyFlightOn() ? 1.0f : 0.0f) ;
         leadT = (toNext + period * steps + cfg.displayLag + hit.dist / (cfg.bulletSpeed > 100.f ? cfg.bulletSpeed : 2000.f)) * cfg.leadScale +
                 cfg.leadExtra;
         if (leadT < 0.f) leadT = 0.f;
@@ -7717,7 +7720,7 @@ bool LoadRealVersion() {
 #undef RESOLVE
     return true;
 }
-unsigned PromoteHeroBullets(uintptr_t world, uintptr_t* ours) {
+unsigned PromoteHeroBullets(uintptr_t world, uintptr_t* ours, uintptr_t hero) {
     uintptr_t pm = *reinterpret_cast<uintptr_t*>(world + 0x1c8);
     if (!pm) return 0;
     uint32_t pc = *reinterpret_cast<uint32_t*>(pm + 0x24);
@@ -7727,7 +7730,7 @@ unsigned PromoteHeroBullets(uintptr_t world, uintptr_t* ours) {
     unsigned k = 0, w = 0;
     for (uint32_t i = 0; i < pc; ++i) {
         uintptr_t p = pa[i];
-        if (k < 64 && p && *reinterpret_cast<uintptr_t*>(p + 0x20) == g_ef.hero)
+        if (k < 64 && p && *reinterpret_cast<uintptr_t*>(p + 0x20) == hero)
             ours[k++] = p;
         else
             pa[w++] = p;
@@ -7754,7 +7757,7 @@ extern "C" void hfps_post_step_begin(uintptr_t self, uintptr_t world) {
     ShieldHpStep();
     MeleeEngineStep(world, g_ef.hero);
     uintptr_t ours[64];
-    unsigned k = PromoteHeroBullets(world, ours);
+    unsigned k = PromoteHeroBullets(world, ours, g_ef.hero);
     hitprobe::Arm(world, g_ef.hero, ours, k);
 }
 extern "C" void hfps_sim_tick(uintptr_t self, uintptr_t packet, uintptr_t battle) {

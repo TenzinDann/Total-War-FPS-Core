@@ -16,7 +16,7 @@ const CodePrint kPrints904[] = {{0x2ece760, 0x5b, 0x7b0bf0edb8cc1942ull},
                                 {0x2eeb29c, 0x53, 0x3fe38d7eb43d316eull},
                                 {0x2eeedd8, 0x38, 0x1e40299fca8b7e54ull}};
 constexpr uint32_t kMagic = 0x53504648;
-constexpr uint32_t kProto = 3;
+constexpr uint32_t kProto = 4;
 enum : uint32_t { kHello = 1, kFpsOn = 2, kFpsOff = 3, kKeep = 4, kShield = 5, kMelee = 6 };
 const char* MsgName(uint32_t k) {
     return k == kHello ? "HELLO" : k == kFpsOn ? "FPS_ON" : k == kFpsOff ? "FPS_OFF" : k == kKeep ? "KEEP" : k == kShield ? "SHIELD"
@@ -24,7 +24,7 @@ const char* MsgName(uint32_t k) {
 }
 enum : uint32_t { kMfDamage = 1, kMfAlwaysHit = 2, kMfReact = 4, kMfEffects = 8 };
 constexpr int kMeleeFields = 18;
-enum : uint32_t { kFlKnock = 1, kFlShield = 2, kFlArmor = 4, kFlRefund = 8, kFlStaggerPartial = 16 };
+enum : uint32_t { kFlKnock = 1, kFlShield = 2, kFlArmor = 4, kFlRefund = 8, kFlStaggerPartial = 16, kFlEarly = 32 };
 constexpr uint32_t kFlHooks = kFlKnock | kFlShield | kFlArmor;
 bool g_ok = false;
 uint32_t g_nonce = 0;
@@ -59,6 +59,7 @@ struct Hero {
     float yaw, angle;
     uint32_t hpPrev, exempt, bracketHp, refundHp;
     bool hpInit, bracket;
+    bool early;
     int32_t cnt[kCnt];
 } g_hero[16];
 int g_nHero = 0;
@@ -145,8 +146,10 @@ void ApplyAmmo(uintptr_t unit) {
 }
 uint32_t LocalFlags() {
     return (cfg.noKnock && g_noKnockOk ? kFlKnock : 0u) | (cfg.shieldGame && g_shieldGameOk ? kFlShield : 0u) |
-           (cfg.superArmor && g_armorOk ? kFlArmor : 0u) | (cfg.shieldRefund ? kFlRefund : 0u) | (cfg.shieldStagger ? kFlStaggerPartial : 0u);
+           (cfg.superArmor && g_armorOk ? kFlArmor : 0u) | (cfg.shieldRefund ? kFlRefund : 0u) | (cfg.shieldStagger ? kFlStaggerPartial : 0u) |
+           (cfg.earlyFlight && g_shotOk && cfg.fireShooter ? kFlEarly : 0u);
 }
+bool EarlyFlightOn() { return S.active && S.mpMode && (LocalFlags() & kFlEarly) && g_ef.siteState > 0; }
 uint32_t SupportedFlags(uintptr_t vt, uint32_t want, size_t* slotsOut) {
     uintptr_t lo = 0, hi = 0;
     *slotsOut = 0;
@@ -363,6 +366,21 @@ void PostStep(uintptr_t world) {
         r.mpUnit = mm[i].unit;
         MeleeEngineRun(world, e, &r, 1);
     }
+    uintptr_t heroes[16];
+    int nh = 0;
+    AcquireSRWLockShared(&g_heroLock);
+    for (int i = 0; i < g_nHero; ++i)
+        if (g_hero[i].early && g_hero[i].ent) heroes[nh++] = g_hero[i].ent;
+    ReleaseSRWLockShared(&g_heroLock);
+    for (int j = 0; j < nh; ++j) {
+        uintptr_t ours[64];
+        const unsigned k = PromoteHeroBullets(world, ours, heroes[j]);
+        if (!k) continue;
+        AcquireSRWLockExclusive(&g_heroLock);
+        for (int i = 0; i < g_nHero; ++i)
+            if (g_hero[i].ent == heroes[j]) g_hero[i].cnt[kCntEarly] += static_cast<int32_t>(k);
+        ReleaseSRWLockExclusive(&g_heroLock);
+    }
 }
 void MeleeResult(uint32_t from, uint32_t seq, uintptr_t unit, int kind, int hits, int kills, int sHits, int sKills, const char* dl, const char* sl) {
     uintptr_t battle = ScriptBattle();
@@ -391,14 +409,16 @@ void Digest(const char* what, uint32_t from, uint32_t seq, uintptr_t unit) {
             EntPos(e, p);
         }
     }
-    char sh[200] = "";
+    char sh[256] = "";
     AcquireSRWLockShared(&g_heroLock);
     int i = unit ? FindHero(unit) : -1;
     if (i >= 0) {
         const Hero& h = g_hero[i];
-        snprintf(sh, sizeof sh, " | hooks %x shield %d yaw %.3f half %.0f | missile %d/%d melee %d/%d side %d stagger %d armor %d knock %d refund %d +%u",
+        snprintf(sh, sizeof sh, " | hooks %x shield %d yaw %.3f half %.0f | missile %d/%d melee %d/%d side %d stagger %d armor %d knock %d refund %d +%u"
+                 " | early %d %d",
                  h.flags, h.milli, h.yaw, h.angle, h.cnt[kCntMissileFull], h.cnt[kCntMissilePart], h.cnt[kCntMeleeFull], h.cnt[kCntMeleePart],
-                 h.cnt[kCntSide], h.cnt[kCntStagger], h.cnt[kCntArmor], h.cnt[kCntKnock], h.cnt[kCntRefund], h.refundHp);
+                 h.cnt[kCntSide], h.cnt[kCntStagger], h.cnt[kCntArmor], h.cnt[kCntKnock], h.cnt[kCntRefund], h.refundHp, h.early ? 1 : 0,
+                 h.cnt[kCntEarly]);
     }
     ReleaseSRWLockShared(&g_heroLock);
     Log("mp-digest: step %u %s from %08x #%u unit %d ammo %d/%d no-take %d/%d hp %d pos %.3f,%.3f,%.3f heroes %d%s", step, what, from, seq,
@@ -509,6 +529,7 @@ void Handler(uintptr_t rd, uintptr_t world) {
         }
         if (i >= 0) {
             ApplyAmmo(unit);
+            g_hero[i].early = (want & kFlEarly) && g_ef.siteState > 0;
             Hook(g_hero[i], want, MsgName(kind));
             wantSteps = true;
         }
