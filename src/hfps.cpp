@@ -1159,6 +1159,8 @@ struct State {
     unsigned tpGuarded = 0, tpGuardSkipped = 0, guardLogs = 0;
     uintptr_t fpProj = 0;
     int32_t fpProjId = -1;
+    uintptr_t fpProjAds = 0;
+    int32_t fpProjAdsId = -1;
     int projFor = -1;
     int32_t meleeProjId[vmgame::kStrikeKinds] = {-1, -1, -1, -1, -1};
     unsigned meleeStrikes = 0, meleeFailed = 0, strikeLogs = 0;
@@ -1479,6 +1481,20 @@ namespace herofx {
 bool Install(uintptr_t battle, uintptr_t heroEntity, uintptr_t projRecord);
 void Uninstall(const char* why);
 void Track(uintptr_t projRecord);
+}
+void LookupFocusProjectile() {
+    S.fpProjAds = 0;
+    S.fpProjAdsId = -1;
+    const char* key = vmgame::WeaponProjectileAds(S.projFor);
+    if (!g_shotOk || !key[0]) return;
+    int32_t id = -1;
+    uintptr_t rec = FindProjectile(key, &id);
+    if (rec && id >= 0) {
+        S.fpProjAds = rec;
+        S.fpProjAdsId = id;
+        herofx::Track(rec);
+    }
+    Log("fire: weapon %d focus projectile '%s' -> %s (id %d)", S.projFor, key, S.fpProjAds ? "found" : "NOT FOUND (same as hip)", id);
 }
 void EarlyFlightUninstall(const char* why);
 long EarlyFlightCalls();
@@ -1823,6 +1839,7 @@ void Enter(uintptr_t mgr) {
         uintptr_t sb3 = Ptr(g_base + kGlobalScript);
         herofx::Install(sb3 ? Ptr(sb3 + oScriptBattle) : 0, entity, S.fpProj);
     }
+    LookupFocusProjectile();
     if (FireOwner() && entity) {
         uintptr_t evt = Ptr(entity), f48 = evt ? Ptr(evt + 0x48) : 0;
         Log("fire: shooter = hero entity (kills counted, own bullets pass through it); muzzle launch point %s "
@@ -2937,7 +2954,7 @@ void ShotPenRestore(const char* why) {
     if (n) Log("fire: custom penetration - %d projectile record(s) pointed back to their own penetration row (%s)", n, why);
 }
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
-              int nBodies, float clearance) {
+              int nBodies, float clearance, float rangeOverride = 0.f) {
     uintptr_t sb = Ptr(g_base + kGlobalScript);
     uintptr_t battle = sb ? Ptr(sb + oScriptBattle) : 0;
     unsigned char no1 = 1, no2 = 1;
@@ -2985,7 +3002,8 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     } else {
         for (int i = 0; i < 3; ++i) ray[i] = fwd[i];
     }
-    const float wRange = vmgame::WeaponFireRange(vmgame::CurrentWeapon()), range = wRange > 0.f ? wRange : cfg.fireRange;
+    const float wRange = rangeOverride > 0.f ? rangeOverride : vmgame::WeaponFireRange(vmgame::CurrentWeapon()),
+                range = wRange > 0.f ? wRange : cfg.fireRange;
     for (int i = 0; i < 3; ++i) c.target[i] = eye[i] + fwd[i] * range;
     float d = muzzle ? cfg.muzzleDepth : cfg.fireForward, minGap = 0;
     bool clear = FireOwner() || nBodies == 0;
@@ -6908,10 +6926,19 @@ void Apply(uintptr_t mgr) {
             S.fpProjId = S.fpProj ? id : -1;
             herofx::Track(S.fpProj);
             Log("fire: weapon %d projectile '%s' -> %s (id %d)", S.projFor, want, S.fpProj ? "found" : "NOT FOUND (hero's own)", S.fpProjId);
+            LookupFocusProjectile();
         }
-        float sfwd[3];
-        vmgame::SpreadDir(fwd, right, camUp, sfwd);
-        if (FireShot(eye, sfwd, right, camUp, bodies, nb, clearance)) {
+        float sdirs[8][3], srange = 0.f;
+        bool focus = false;
+        const int nShot = vmgame::ShotPattern(adsW, fwd, right, camUp, sdirs, 8, &srange, &focus);
+        const uintptr_t hipProj = S.fpProj;
+        const int32_t hipProjId = S.fpProjId;
+        if (focus && S.fpProjAds) S.fpProj = S.fpProjAds, S.fpProjId = S.fpProjAdsId;
+        int fired = 0;
+        for (int k = 0; k < nShot; ++k) fired += FireShot(eye, sdirs[k], right, camUp, bodies, nb, clearance, srange) ? 1 : 0;
+        S.fpProj = hipProj;
+        S.fpProjId = hipProjId;
+        if (fired) {
             ++S.shots;
             vmgame::Fire();
             S.camKick.OnShot(kp, adsW, now, &S.pitch, &S.yaw, lim);

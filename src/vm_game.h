@@ -74,6 +74,8 @@ void SetUiCovers(const float* r, int n);
 void GetKick(kick::Params* out);
 const char* WeaponProjectile(int idx);
 float WeaponFireRange(int idx);
+const char* WeaponProjectileAds(int idx);
+int ShotPattern(float adsW, const float fwd[3], const float right[3], const float up[3], float (*out)[3], int maxOut, float* range, bool* focus);
 void ToggleTestLayer();
 void RequestReload();
 void SetFirstPerson(bool on);
