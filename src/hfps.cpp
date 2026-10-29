@@ -1159,8 +1159,6 @@ struct State {
     unsigned tpGuarded = 0, tpGuardSkipped = 0, guardLogs = 0;
     uintptr_t fpProj = 0;
     int32_t fpProjId = -1;
-    uintptr_t fpProjAds = 0;
-    int32_t fpProjAdsId = -1;
     int projFor = -1;
     int32_t meleeProjId[vmgame::kStrikeKinds] = {-1, -1, -1, -1, -1};
     unsigned meleeStrikes = 0, meleeFailed = 0, strikeLogs = 0;
@@ -1360,9 +1358,23 @@ void CastReset() {
     InterlockedExchange(&g_cast.tail, g_cast.head);
     CastMarkerClear();
 }
+UINT KeyAt(UINT qwerty) {
+    if (!vmgame::KbAzerty()) return qwerty;
+    switch (qwerty) {
+    case 'W': return 'Z';
+    case 'Z': return 'W';
+    case 'A': return 'Q';
+    case 'Q': return 'A';
+    default: return qwerty;
+    }
+}
 int CastSlotKey(WPARAM w) {
     if (w >= '1' && w <= '9') return static_cast<int>(w - '0');
     if (w == '0') return 10;
+    if (vmgame::KbAzerty()) {
+        if (w == VK_OEM_4) return 11;
+        if (w == VK_OEM_PLUS || w == VK_OEM_MINUS) return 12;
+    }
     if (w == VK_OEM_MINUS) return 11;
     if (w == VK_OEM_PLUS) return 12;
     return 0;
@@ -1467,20 +1479,6 @@ namespace herofx {
 bool Install(uintptr_t battle, uintptr_t heroEntity, uintptr_t projRecord);
 void Uninstall(const char* why);
 void Track(uintptr_t projRecord);
-}
-void LookupFocusProjectile() {
-    S.fpProjAds = 0;
-    S.fpProjAdsId = -1;
-    const char* key = vmgame::WeaponProjectileAds(S.projFor);
-    if (!g_shotOk || !key[0]) return;
-    int32_t id = -1;
-    uintptr_t rec = FindProjectile(key, &id);
-    if (rec && id >= 0) {
-        S.fpProjAds = rec;
-        S.fpProjAdsId = id;
-        herofx::Track(rec);
-    }
-    Log("fire: weapon %d focus projectile '%s' -> %s (id %d)", S.projFor, key, S.fpProjAds ? "found" : "NOT FOUND (same as hip)", id);
 }
 void EarlyFlightUninstall(const char* why);
 long EarlyFlightCalls();
@@ -1825,7 +1823,6 @@ void Enter(uintptr_t mgr) {
         uintptr_t sb3 = Ptr(g_base + kGlobalScript);
         herofx::Install(sb3 ? Ptr(sb3 + oScriptBattle) : 0, entity, S.fpProj);
     }
-    LookupFocusProjectile();
     if (FireOwner() && entity) {
         uintptr_t evt = Ptr(entity), f48 = evt ? Ptr(evt + 0x48) : 0;
         Log("fire: shooter = hero entity (kills counted, own bullets pass through it); muzzle launch point %s "
@@ -2940,7 +2937,7 @@ void ShotPenRestore(const char* why) {
     if (n) Log("fire: custom penetration - %d projectile record(s) pointed back to their own penetration row (%s)", n, why);
 }
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
-              int nBodies, float clearance, float rangeOverride = 0.f) {
+              int nBodies, float clearance) {
     uintptr_t sb = Ptr(g_base + kGlobalScript);
     uintptr_t battle = sb ? Ptr(sb + oScriptBattle) : 0;
     unsigned char no1 = 1, no2 = 1;
@@ -2988,8 +2985,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     } else {
         for (int i = 0; i < 3; ++i) ray[i] = fwd[i];
     }
-    const float wRange = rangeOverride > 0.f ? rangeOverride : vmgame::WeaponFireRange(vmgame::CurrentWeapon()),
-                range = wRange > 0.f ? wRange : cfg.fireRange;
+    const float wRange = vmgame::WeaponFireRange(vmgame::CurrentWeapon()), range = wRange > 0.f ? wRange : cfg.fireRange;
     for (int i = 0; i < 3; ++i) c.target[i] = eye[i] + fwd[i] * range;
     float d = muzzle ? cfg.muzzleDepth : cfg.fireForward, minGap = 0;
     bool clear = FireOwner() || nBodies == 0;
@@ -5952,8 +5948,8 @@ void Apply(uintptr_t mgr) {
     float mx = 0, mz = 0;
     bool run = true;
     if (canMove && fg) {
-        float fwdIn = (KeyDown('W') ? 1.f : 0.f) - (KeyDown('S') ? 1.f : 0.f);
-        float sideIn = (KeyDown('D') ? 1.f : 0.f) - (KeyDown('A') ? 1.f : 0.f);
+        float fwdIn = (KeyDown(KeyAt('W')) ? 1.f : 0.f) - (KeyDown('S') ? 1.f : 0.f);
+        float sideIn = (KeyDown('D') ? 1.f : 0.f) - (KeyDown(KeyAt('A')) ? 1.f : 0.f);
         mx = sy * fwdIn + cy * sideIn;
         mz = cy * fwdIn - sy * sideIn;
         float ml = std::sqrt(mx * mx + mz * mz);
@@ -5974,7 +5970,7 @@ void Apply(uintptr_t mgr) {
         bool tap = shift && !S.shiftPrev;
         S.shiftPrev = shift;
         bool reloading = vmgame::Busy();
-        bool canSprint = canMove && fg && mode == 0 && wantMove && KeyDown('W') && !KeyDown('S') && !rmb && !lmb && !reloading &&
+        bool canSprint = canMove && fg && mode == 0 && wantMove && KeyDown(KeyAt('W')) && !KeyDown('S') && !rmb && !lmb && !reloading &&
                          !S.pinned && !S.stuck;
         bool wasSprint = S.sprint, wasTac = S.tac, wasAds = S.ads;
         if (S.sprint && !canSprint) {
@@ -6912,19 +6908,10 @@ void Apply(uintptr_t mgr) {
             S.fpProjId = S.fpProj ? id : -1;
             herofx::Track(S.fpProj);
             Log("fire: weapon %d projectile '%s' -> %s (id %d)", S.projFor, want, S.fpProj ? "found" : "NOT FOUND (hero's own)", S.fpProjId);
-            LookupFocusProjectile();
         }
-        float sdirs[8][3], srange = 0.f;
-        bool focus = false;
-        const int nShot = vmgame::ShotPattern(adsW, fwd, right, camUp, sdirs, 8, &srange, &focus);
-        const uintptr_t hipProj = S.fpProj;
-        const int32_t hipProjId = S.fpProjId;
-        if (focus && S.fpProjAds) S.fpProj = S.fpProjAds, S.fpProjId = S.fpProjAdsId;
-        int fired = 0;
-        for (int k = 0; k < nShot; ++k) fired += FireShot(eye, sdirs[k], right, camUp, bodies, nb, clearance, srange) ? 1 : 0;
-        S.fpProj = hipProj;
-        S.fpProjId = hipProjId;
-        if (fired) {
+        float sfwd[3];
+        vmgame::SpreadDir(fwd, right, camUp, sfwd);
+        if (FireShot(eye, sfwd, right, camUp, bodies, nb, clearance)) {
             ++S.shots;
             vmgame::Fire();
             S.camKick.OnShot(kp, adsW, now, &S.pitch, &S.yaw, lim);
@@ -7097,7 +7084,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (!(l & (1L << 30))) vmgame::SelectWeapon(static_cast<int>(w - '0'));
             return 0;
         }
-        if (S.active && vmgame::ShieldKey() && w == vmgame::ShieldKey()) {
+        if (S.active && vmgame::ShieldKey() && w == KeyAt(vmgame::ShieldKey())) {
             if (!(l & (1L << 30))) vmgame::ToggleShield();
             return 0;
         }
@@ -7116,7 +7103,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 return 0;
             }
         }
-        if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D')) return 0;
+        if (S.active && (w == KeyAt('W') || w == KeyAt('A') || w == 'S' || w == 'D')) return 0;
         if (S.active && cfg.wallUp && w == cfg.wallUpKey) return 0;
         if (S.active && w == VK_SPACE && cfg.jumpHeight > 0.f) return 0;
         if (S.active && cfg.crouch && CrouchKeyMsg(w)) return 0;
@@ -7133,15 +7120,16 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 return 0;
             }
         }
-        if (S.active && (w == 'W' || w == 'A' || w == 'S' || w == 'D' || w == 'R' || (w >= '1' && w <= '9'))) return 0;
+        if (S.active && (w == KeyAt('W') || w == KeyAt('A') || w == 'S' || w == 'D' || w == 'R' || (w >= '1' && w <= '9'))) return 0;
         if (S.active && w == VK_SPACE && cfg.jumpHeight > 0.f) return 0;
         if (S.active && cfg.crouch && CrouchKeyMsg(w)) return 0;
-        if (S.active && ((vmgame::ShieldKey() && w == vmgame::ShieldKey()) || (vmgame::ShieldHitKey() && w == vmgame::ShieldHitKey()))) return 0;
+        if (S.active && ((vmgame::ShieldKey() && w == KeyAt(vmgame::ShieldKey())) || (vmgame::ShieldHitKey() && w == vmgame::ShieldHitKey()))) return 0;
         if (S.active && g_heroLauncher && vmgame::LauncherConfigured() &&
             (w == vmgame::LauncherFireKey() || w == vmgame::LauncherSwitchKey() || w == vmgame::LauncherFlameKey()))
             return 0;
         break;
     case WM_SYSCHAR:
+        if (S.active && cfg.castKeys && vmgame::KbAzerty() && ((l >> 16) & 0xFF) >= 0x02 && ((l >> 16) & 0xFF) <= 0x0D) return 0;
         if (S.active && cfg.castKeys && ((w >= '0' && w <= '9') || w == '-' || w == '=')) return 0;
         break;
     case WM_MOUSEWHEEL:

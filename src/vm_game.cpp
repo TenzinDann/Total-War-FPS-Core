@@ -354,6 +354,7 @@ LONG g_ammoLevel[kMaxModels] = {};
 volatile LONG g_infAmmo = 0;
 volatile LONG g_infTac = 0;
 volatile LONG g_showSelMark = 0;
+volatile LONG g_kbAzerty = 0;
 volatile LONG g_wpOn = 0;
 volatile LONG g_wDmgPct[kMaxModels] = {};
 volatile LONG g_wPenSet[kMaxModels] = {};
@@ -1676,7 +1677,6 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
                       {&w.stepSprint, w.set.stepClothSprint, "step cloth sprint"}, {&w.stepRattle, w.set.stepRattle, "step rattle"},
                       {&w.spinUp, w.set.spinUpSound, "spin up"}, {&w.spinLoop, w.set.spinLoopSound, "spin loop"},
                       {&w.spinDown, w.set.spinDownSound, "spin down"}};
-        w.spinLoop.SetLoopBegin(w.set.spinLoopStart);
         for (Step& st : steps) {
             st.snd->Release();
             if (!st.list[0]) continue;
@@ -1740,7 +1740,7 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
         }
     }
     w.flash.Release();
-    if (w.set.flashFx[0] || w.set.effectFx[0] || (w.set.flashGas && w.set.flashGasFx[0]) || w.set.flameFx[0]) {
+    if (w.set.flashFx[0] || w.set.effectFx[0] || (w.set.flashGas && w.set.flashGasFx[0])) {
         err[0] = 0;
         wchar_t eff[MAX_PATH * 2] = L"", gas[MAX_PATH * 2] = L"";
         path[0] = 0;
@@ -1754,13 +1754,6 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
                   w.set.effectFx, w.flash.GasLoaded(), w.set.flashGasFx, w.set.flashGasScale, w.set.flashGasAlpha);
         else
             g_log("viewmodel: [%d] muzzle fx failed: %s", idx, err);
-        if (w.flash.Loaded() && w.set.flameFx[0]) {
-            wchar_t fl[MAX_PATH * 2];
-            swprintf(fl, MAX_PATH * 2, L"%ls\\%ls", dir, w.set.flameFx);
-            w.flash.LoadFlame(fl, w.set);
-            g_log("viewmodel: [%d] flame fx from %ls: layers %ls / %ls / %ls / %ls", idx, w.set.flameFx, w.set.flame[0].tex, w.set.flame[1].tex,
-                  w.set.flame[2].tex, w.set.flame[3].tex);
-        }
     }
     w.shells.Release();
     if (w.set.shellEject) {
@@ -2293,6 +2286,7 @@ void RosterStep(ID3D11Device* dev) {
     char infTac[16] = "";
     char wparams[16] = "";
     char selMark[16] = "";
+    char kbAzerty[16] = "";
     if (FILE* f = _wfopen(path, L"r")) {
         static char line[kMaxModels * 64 + 64];
         while (fgets(line, sizeof line, f)) {
@@ -2306,6 +2300,7 @@ void RosterStep(ID3D11Device* dev) {
             if (!strncmp(line, "inf_tac=", 8)) snprintf(infTac, sizeof infTac, "%s", line + 8);
             if (!strncmp(line, "wparams=", 8)) snprintf(wparams, sizeof wparams, "%s", line + 8);
             if (!strncmp(line, "sel_marker=", 11)) snprintf(selMark, sizeof selMark, "%s", line + 11);
+            if (!strncmp(line, "kb_azerty=", 10)) snprintf(kbAzerty, sizeof kbAzerty, "%s", line + 10);
         }
         fclose(f);
     }
@@ -2339,6 +2334,12 @@ void RosterStep(ID3D11Device* dev) {
         LONG sm = !strcmp(selMark, "1") ? 1 : 0;
         if (InterlockedExchange(&g_showSelMark, sm) != sm || sm)
             g_log("ui: selection markers in first person %s (MCT sel_marker='%s')", sm ? "SHOWN" : "hidden", selMark);
+    }
+    {
+        LONG az = !strcmp(kbAzerty, "1") ? 1 : 0;
+        if (InterlockedExchange(&g_kbAzerty, az) != az || az)
+            g_log("keys: %s layout (MCT kb_azerty='%s')%s", az ? "AZERTY" : "QWERTY", kbAzerty,
+                  az ? " - move Z/Q/S/D, gun shield A, Alt+) / Alt+= cast slots 11 / 12" : "");
     }
     RefreshFireRate();
     WIN32_FILE_ATTRIBUTE_DATA fa;
@@ -3288,6 +3289,7 @@ bool Reloading() {
 }
 bool InfTacStamina() { return g_infTac != 0; }
 bool ShowSelMarkers() { return g_showSelMark != 0; }
+bool KbAzerty() { return g_kbAzerty != 0; }
 void AmmoInfo(int* ammo, int* size, bool* reloading, int* reserve) {
     LONG s = g_mag.size, a = g_mag.ammo, r = g_mag.reserve;
     *size = s > 0 ? static_cast<int>(s) : 0;
@@ -3644,7 +3646,6 @@ void MeleeHitFeedback(int hits) {
 }
 const char* WeaponProjectile(int idx) { return idx >= 0 && idx < g_modelCount ? g_w[idx].set.projectile : ""; }
 float WeaponFireRange(int idx) { return idx >= 0 && idx < g_modelCount ? g_w[idx].set.fireRange : 0.f; }
-const char* WeaponProjectileAds(int idx) { return idx >= 0 && idx < g_modelCount ? g_w[idx].set.projectileAds : ""; }
 bool ScopeWheel(int delta) {
     const int i = g_modelIdx;
     const int k = ScopeLevelIdx(i);
@@ -3701,32 +3702,6 @@ void SpreadDir(const float fwd[3], const float right[3], const float up[3], floa
     }
     n = 1.f / std::sqrt(n);
     for (int i = 0; i < 3; ++i) out[i] *= n;
-}
-int ShotPattern(float adsW, const float fwd[3], const float right[3], const float up[3], float (*out)[3], int maxOut, float* range, bool* focus) {
-    const int idx = CurrentWeapon();
-    const bool foc = adsW >= 0.5f;
-    int n = 1;
-    float fan = 0.f, rg = 0.f;
-    if (idx >= 0 && idx < g_modelCount) {
-        const auto& s = g_w[idx].set;
-        n = foc ? s.pelletsAds : s.pellets;
-        fan = (foc ? s.pelletFanAds : s.pelletFan) * 0.01745329f;
-        rg = foc && s.fireRangeAds > 0.f ? s.fireRangeAds : s.fireRange;
-    }
-    if (n > maxOut) n = maxOut;
-    if (n < 1) n = 1;
-    for (int k = 0; k < n; ++k) {
-        g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
-        const float u = static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
-        const float yw = fan > 0.f ? -fan + 2.f * fan * (static_cast<float>(k) + u) / static_cast<float>(n) : 0.f;
-        const float c = std::cos(yw), sn = std::sin(yw);
-        float d[3], r[3];
-        for (int i = 0; i < 3; ++i) d[i] = fwd[i] * c + right[i] * sn, r[i] = right[i] * c - fwd[i] * sn;
-        SpreadDir(d, r, up, out[k]);
-    }
-    if (range) *range = rg;
-    if (focus) *focus = foc;
-    return n;
 }
 bool CurveAdsState(float* frac, float* adsFovAlt) {
     LONG f = g_curveFracMicro;
