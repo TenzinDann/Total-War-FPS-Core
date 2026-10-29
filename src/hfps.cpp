@@ -525,6 +525,7 @@ struct Config {
     float tpShotGuard = 1.1f;
     bool fastFire = true;
     bool earlyFlight = true;
+    bool mpForce = false;
     bool autoLead = true;
     float leadExtra = 0.f;
     float leadScale = 1.f;
@@ -804,6 +805,7 @@ void LoadConfig() {
     cfg.tpShotGuard = IniF(L"fire", L"teleport_guard", cfg.tpShotGuard, ini);
     cfg.fastFire = GetPrivateProfileIntW(L"fire", L"fast_fire", 1, ini) != 0;
     cfg.earlyFlight = GetPrivateProfileIntW(L"fire", L"early_flight", 1, ini) != 0;
+    cfg.mpForce = GetPrivateProfileIntW(L"mp", L"force_mp_mode", 0, ini) != 0;
     cfg.autoLead = GetPrivateProfileIntW(L"fire", L"auto_lead", 1, ini) != 0;
     cfg.leadExtra = IniF(L"fire", L"lead_extra", cfg.leadExtra, ini);
     if (!(cfg.leadExtra >= -0.3f && cfg.leadExtra <= 0.5f)) cfg.leadExtra = 0.f;
@@ -1159,6 +1161,8 @@ struct State {
     unsigned tpGuarded = 0, tpGuardSkipped = 0, guardLogs = 0;
     uintptr_t fpProj = 0;
     int32_t fpProjId = -1;
+    uintptr_t fpProjAds = 0;
+    int32_t fpProjAdsId = -1;
     int projFor = -1;
     int32_t meleeProjId[vmgame::kStrikeKinds] = {-1, -1, -1, -1, -1};
     unsigned meleeStrikes = 0, meleeFailed = 0, strikeLogs = 0;
@@ -1217,8 +1221,9 @@ struct State {
     unsigned tpSent = 0, tpFailed = 0, tpLogs = 0, leashHits = 0;
     int lastMode = -1;
     bool flyer = false;
-    TpRec tpHist[8] = {};
+    TpRec tpHist[32] = {};
     unsigned tpHead = 0;
+    bool mpMode = false;
     bool stuck = false;
     double tStuck = 0, tNoFollow = -1;
     float stuckPos[3] = {};
@@ -1475,10 +1480,45 @@ void LogUnitLists(uintptr_t battle);
 bool FastFireInstall(uintptr_t battle);
 void FastFireUninstall(const char* why);
 bool EarlyFlightInstall(uintptr_t battle, uintptr_t heroEntity);
+namespace mp {
+bool Mode(uintptr_t battle);
+uintptr_t ScriptBattle();
+bool EnterAllowed();
+void QueueOn(uintptr_t unit);
+void QueueOff(uintptr_t unit);
+float Lag();
+void Frame();
+void Init();
+struct HitView {
+    float f, yaw, angle;
+    bool armor, staggerOnPartial, local;
+};
+enum : int { kCntMissileFull, kCntMissilePart, kCntMeleeFull, kCntMeleePart, kCntSide, kCntStagger, kCntArmor, kCntKnock, kCntRefund, kCnt };
+bool HitState(uintptr_t self, HitView* v);
+void Count(uintptr_t self, int what);
+void AddExempt(uintptr_t self, uint32_t hp);
+void BracketOpen(uintptr_t self, uint32_t hp);
+bool BracketClose(uintptr_t self);
+void PostStep(uintptr_t world);
+}
 namespace herofx {
 bool Install(uintptr_t battle, uintptr_t heroEntity, uintptr_t projRecord);
 void Uninstall(const char* why);
 void Track(uintptr_t projRecord);
+}
+void LookupFocusProjectile() {
+    S.fpProjAds = 0;
+    S.fpProjAdsId = -1;
+    const char* key = vmgame::WeaponProjectileAds(S.projFor);
+    if (!g_shotOk || !key[0]) return;
+    int32_t id = -1;
+    uintptr_t rec = FindProjectile(key, &id);
+    if (rec && id >= 0) {
+        S.fpProjAds = rec;
+        S.fpProjAdsId = id;
+        herofx::Track(rec);
+    }
+    Log("fire: weapon %d focus projectile '%s' -> %s (id %d)", S.projFor, key, S.fpProjAds ? "found" : "NOT FOUND (same as hip)", id);
 }
 void EarlyFlightUninstall(const char* why);
 long EarlyFlightCalls();
@@ -1494,6 +1534,7 @@ void Exit(uintptr_t mgr, const char* why, bool release = true) {
     FastFireUninstall(why);
     EarlyFlightUninstall(why);
     herofx::Uninstall(why);
+    if (S.mpMode) mp::QueueOff(S.unit);
     int mode = S.lastMode >= 0 ? S.lastMode : MoveMode();
     if (!release) {
         Log("move: hero not released (%s)", why);
@@ -1537,6 +1578,36 @@ bool HeroRouting(uintptr_t unit, int* state = nullptr) {
     using FnRouting = char (*)(uintptr_t morale);
     return reinterpret_cast<FnRouting>(g_base + kFnUnitRouting904)(unit + oUnitMorale) != 0;
 }
+struct UnitKeyRec {
+    uintptr_t unit;
+    char key[48];
+};
+UnitKeyRec g_unitKeyTab[64];
+int g_unitKeyNext = 0;
+SRWLOCK g_unitKeyLock = SRWLOCK_INIT;
+void RememberUnitKey(uintptr_t unit, const char* key) {
+    AcquireSRWLockExclusive(&g_unitKeyLock);
+    int slot = -1;
+    for (int i = 0; i < 64 && slot < 0; ++i)
+        if (g_unitKeyTab[i].unit == unit) slot = i;
+    if (slot < 0) slot = g_unitKeyNext, g_unitKeyNext = (g_unitKeyNext + 1) % 64;
+    g_unitKeyTab[slot].unit = unit;
+    snprintf(g_unitKeyTab[slot].key, sizeof g_unitKeyTab[slot].key, "%s", key);
+    ReleaseSRWLockExclusive(&g_unitKeyLock);
+}
+void ForgetUnitKeys() {
+    AcquireSRWLockExclusive(&g_unitKeyLock);
+    memset(g_unitKeyTab, 0, sizeof g_unitKeyTab);
+    g_unitKeyNext = 0;
+    ReleaseSRWLockExclusive(&g_unitKeyLock);
+}
+void UnitKeyOf(uintptr_t unit, char* out, size_t n) {
+    out[0] = 0;
+    AcquireSRWLockShared(&g_unitKeyLock);
+    for (int i = 0; i < 64; ++i)
+        if (unit && g_unitKeyTab[i].unit == unit) snprintf(out, n, "%s", g_unitKeyTab[i].key);
+    ReleaseSRWLockShared(&g_unitKeyLock);
+}
 void Enter(uintptr_t mgr) {
     uintptr_t battle = Ptr(mgr + oMgrBattle);
     uintptr_t ui = Ptr(g_base + kGlobalUi);
@@ -1551,6 +1622,11 @@ void Enter(uintptr_t mgr) {
     if (Ptr(fpCtrl + oFpCtrlEntity)) {
         Refuse(kRefuseArtillery);
         Log("enter refused: native artillery first-person mode is active");
+        return;
+    }
+    S.mpMode = mp::Mode(mp::ScriptBattle());
+    if (!mp::EnterAllowed()) {
+        Refuse(kRefuseOther);
         return;
     }
     if (!FpCamOk(cam)) {
@@ -1715,12 +1791,19 @@ void Enter(uintptr_t mgr) {
     SetupMouse();
     CastReset();
     S.active = true;
+    if (S.mpMode) mp::QueueOn(S.unit);
+    {
+        char heroKey[48];
+        UnitKeyOf(unit, heroKey, sizeof heroKey);
+        vmgame::SetHeroKey(heroKey);
+        Log("enter: unit key '%s'%s", heroKey, heroKey[0] ? "" : " (not reported by the battle script yet - weapon's own arms)");
+    }
     vmgame::SetFirstPerson(true);
     if (S.exitStage == 2) {
         Log("ghost: pending release cancelled - first person entered again");
         S.exitStage = 0;
     }
-    S.ghostWanted = cfg.ghost && g_ghostOk && g_tpOk && cfg.moveEnabled && MoveMode() == 0;
+    S.ghostWanted = cfg.ghost && g_ghostOk && g_tpOk && cfg.moveEnabled && MoveMode() == 0 && !S.mpMode;
     S.ghost = false;
     S.ghostLogs = 0;
     S.heroAlliance = -1;
@@ -1737,13 +1820,17 @@ void Enter(uintptr_t mgr) {
     VelReset();
     {
         uintptr_t sbf = Ptr(g_base + kGlobalScript);
-        if (cfg.fastFire && g_shotOk) FastFireInstall(sbf ? Ptr(sbf + oScriptBattle) : 0);
-        if (cfg.earlyFlight && g_shotOk && cfg.fireShooter) EarlyFlightInstall(sbf ? Ptr(sbf + oScriptBattle) : 0, entity);
+        if (cfg.fastFire && g_shotOk && !S.mpMode) FastFireInstall(sbf ? Ptr(sbf + oScriptBattle) : 0);
+        if (cfg.earlyFlight && g_shotOk && cfg.fireShooter && !S.mpMode) EarlyFlightInstall(sbf ? Ptr(sbf + oScriptBattle) : 0, entity);
+        if (S.mpMode)
+            Log("mp: multiplayer path - ammo flags, shield / no-knockdown / super armor by message (FPS_ON / KEEP / SHIELD / FPS_OFF); off until they "
+                "are message-driven: fast fire, early flight, melee engine (falls back to splash projectiles), ghost mode, bullet speed rewrite, "
+                "custom weapon stats");
         if (sbf && Ptr(sbf + oScriptBattle)) LogUnitLists(Ptr(sbf + oScriptBattle));
         uint64_t mp = 1;
         uintptr_t btm = sbf ? Ptr(sbf + oScriptBattle) : 0;
         if (!(g_mpFlagOk && btm && Rd(btm + oBattleIsMp, mp))) mp = 1;
-        vmgame::SetMpBattle(mp != 0);
+        vmgame::SetMpBattle(mp != 0 || S.mpMode);
     }
     S.fpProj = 0;
     S.fpProjId = -1;
@@ -1787,6 +1874,7 @@ void Enter(uintptr_t mgr) {
         uintptr_t sb3 = Ptr(g_base + kGlobalScript);
         herofx::Install(sb3 ? Ptr(sb3 + oScriptBattle) : 0, entity, S.fpProj);
     }
+    LookupFocusProjectile();
     if (FireOwner() && entity) {
         uintptr_t evt = Ptr(entity), f48 = evt ? Ptr(evt + 0x48) : 0;
         Log("fire: shooter = hero entity (kills counted, own bullets pass through it); muzzle launch point %s "
@@ -2013,25 +2101,40 @@ struct EarlyFlight {
     volatile LONG calls = 0, promoted = 0, maxPending = 0;
     volatile LONG64 lastQpc = 0;
 } g_ef;
+void EarlyFlightSiteCheck() {
+    unsigned char b[38] = {};
+    for (int i = 0; i < 38; ++i) Rd(g_base + kPostStepCall904 + i, b[i]);
+    int32_t r1 = 0, r2 = 0;
+    unsigned char o1 = 0, o2 = 0;
+    Rd(g_base + kProjMergeCall904, o1);
+    Rd(g_base + kProjMergeCall904 + 1, r1);
+    Rd(g_base + kProjUpdCall904 + 7, o2);
+    Rd(g_base + kProjUpdCall904 + 8, r2);
+    uint32_t off1c8 = 0;
+    Rd(g_base + kProjUpdCall904 + 3, off1c8);
+    bool ok = !memcmp(b, kPostStepCallBytes, 38) && o1 == 0xe8 && kProjMergeCall904 + 5 + r1 == kProjMerge904 && o2 == 0xe8 &&
+              kProjUpdCall904 + 12 + r2 == kProjUpd904 && off1c8 == 0x1c8;
+    g_ef.siteState = ok ? 1 : -1;
+    if (ok) g_post_step_ret = g_base + kPostStepRet904;
+    Log("early-flight: post_step call site / projectile merge %s", ok ? "verified" : "NOT matching (other game version) - off");
+}
+bool EarlyFlightCopy(uintptr_t vt, size_t slots) {
+    size_t copyN = slots + 16 > 256 ? slots + 16 : 256;
+    auto* c = static_cast<uintptr_t*>(VirtualAlloc(nullptr, (copyN + 1) * sizeof(uintptr_t), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (!c) return false;
+    c[0] = Ptr(vt - 8);
+    for (size_t i = 0; i < copyN; ++i) c[1 + i] = Ptr(vt + 8 * i);
+    g_orig_post_step = reinterpret_cast<void*>(c[1 + 2]);
+    c[1 + 2] = reinterpret_cast<uintptr_t>(&hfps_post_step_thunk);
+    DWORD old;
+    VirtualProtect(c, (copyN + 1) * sizeof(uintptr_t), PAGE_READONLY, &old);
+    g_ef.vtCopy = c;
+    g_ef.vtCopyOf = vt;
+    return true;
+}
 bool EarlyFlightInstall(uintptr_t battle, uintptr_t heroEntity) {
     if (!cfg.earlyFlight || !battle || !heroEntity) return false;
-    if (g_ef.siteState == 0) {
-        unsigned char b[38] = {};
-        for (int i = 0; i < 38; ++i) Rd(g_base + kPostStepCall904 + i, b[i]);
-        int32_t r1 = 0, r2 = 0;
-        unsigned char o1 = 0, o2 = 0;
-        Rd(g_base + kProjMergeCall904, o1);
-        Rd(g_base + kProjMergeCall904 + 1, r1);
-        Rd(g_base + kProjUpdCall904 + 7, o2);
-        Rd(g_base + kProjUpdCall904 + 8, r2);
-        uint32_t off1c8 = 0;
-        Rd(g_base + kProjUpdCall904 + 3, off1c8);
-        bool ok = !memcmp(b, kPostStepCallBytes, 38) && o1 == 0xe8 && kProjMergeCall904 + 5 + r1 == kProjMerge904 && o2 == 0xe8 &&
-                  kProjUpdCall904 + 12 + r2 == kProjUpd904 && off1c8 == 0x1c8;
-        g_ef.siteState = ok ? 1 : -1;
-        if (ok) g_post_step_ret = g_base + kPostStepRet904;
-        Log("early-flight: post_step call site / projectile merge %s", ok ? "verified" : "NOT matching (other game version) - off");
-    }
+    if (g_ef.siteState == 0) EarlyFlightSiteCheck();
     if (g_ef.siteState < 0) return false;
     uintptr_t world = Ptr(battle + 0x440), y = world ? Ptr(world + 0xf0) : 0, obj = y ? y + 0x58 : 0, vt = obj ? Ptr(obj) : 0;
     uintptr_t lo = 0, hi = 0;
@@ -2055,19 +2158,7 @@ bool EarlyFlightInstall(uintptr_t battle, uintptr_t heroEntity) {
         Log("early-flight: dispatcher %p vtable %p has only %zu slots - not hooking", (void*)obj, (void*)vt, slots);
         return false;
     }
-    if (!g_ef.vtCopy || g_ef.vtCopyOf != vt) {
-        size_t copyN = slots + 16 > 256 ? slots + 16 : 256;
-        auto* c = static_cast<uintptr_t*>(VirtualAlloc(nullptr, (copyN + 1) * sizeof(uintptr_t), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-        if (!c) return false;
-        c[0] = Ptr(vt - 8);
-        for (size_t i = 0; i < copyN; ++i) c[1 + i] = Ptr(vt + 8 * i);
-        g_orig_post_step = reinterpret_cast<void*>(c[1 + 2]);
-        c[1 + 2] = reinterpret_cast<uintptr_t>(&hfps_post_step_thunk);
-        DWORD old;
-        VirtualProtect(c, (copyN + 1) * sizeof(uintptr_t), PAGE_READONLY, &old);
-        g_ef.vtCopy = c;
-        g_ef.vtCopyOf = vt;
-    }
+    if ((!g_ef.vtCopy || g_ef.vtCopyOf != vt) && !EarlyFlightCopy(vt, slots)) return false;
     g_ef.world = world;
     g_ef.hero = heroEntity;
     g_ef.calls = g_ef.promoted = g_ef.maxPending = 0;
@@ -2901,7 +2992,7 @@ void ShotPenRestore(const char* why) {
     if (n) Log("fire: custom penetration - %d projectile record(s) pointed back to their own penetration row (%s)", n, why);
 }
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
-              int nBodies, float clearance) {
+              int nBodies, float clearance, float rangeOverride = 0.f) {
     uintptr_t sb = Ptr(g_base + kGlobalScript);
     uintptr_t battle = sb ? Ptr(sb + oScriptBattle) : 0;
     unsigned char no1 = 1, no2 = 1;
@@ -2949,7 +3040,8 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     } else {
         for (int i = 0; i < 3; ++i) ray[i] = fwd[i];
     }
-    const float wRange = vmgame::WeaponFireRange(vmgame::CurrentWeapon()), range = wRange > 0.f ? wRange : cfg.fireRange;
+    const float wRange = rangeOverride > 0.f ? rangeOverride : vmgame::WeaponFireRange(vmgame::CurrentWeapon()),
+                range = wRange > 0.f ? wRange : cfg.fireRange;
     for (int i = 0; i < 3; ++i) c.target[i] = eye[i] + fwd[i] * range;
     float d = muzzle ? cfg.muzzleDepth : cfg.fireForward, minGap = 0;
     bool clear = FireOwner() || nBodies == 0;
@@ -4453,9 +4545,9 @@ struct NoKnock {
     unsigned logs = 0;
 } g_nk;
 void ShieldBracketClose(uintptr_t self);
-uint64_t KnockBackStub(uintptr_t self, void*) { return ShieldBracketClose(self), InterlockedIncrement(&g_nk.blocked[0]), 0; }
-uint64_t KnockDownStub(uintptr_t self, void*) { return ShieldBracketClose(self), InterlockedIncrement(&g_nk.blocked[1]), 0; }
-uint64_t KnockFlyingStub(uintptr_t self, void*) { return ShieldBracketClose(self), InterlockedIncrement(&g_nk.blocked[2]), 0; }
+uint64_t KnockBackStub(uintptr_t self, void*) { return ShieldBracketClose(self), InterlockedIncrement(&g_nk.blocked[0]), mp::Count(self, mp::kCntKnock), 0; }
+uint64_t KnockDownStub(uintptr_t self, void*) { return ShieldBracketClose(self), InterlockedIncrement(&g_nk.blocked[1]), mp::Count(self, mp::kCntKnock), 0; }
+uint64_t KnockFlyingStub(uintptr_t self, void*) { return ShieldBracketClose(self), InterlockedIncrement(&g_nk.blocked[2]), mp::Count(self, mp::kCntKnock), 0; }
 struct ShieldGameState {
     uintptr_t ent = 0;
     uintptr_t orig310 = 0, orig3a8 = 0, orig558 = 0;
@@ -4483,6 +4575,7 @@ void ShieldBracketCloseLocked(uintptr_t self) {
     if (Rd(self + 0xb1c, hp) && hp < g_sb.bracketHp) g_sb.exempt += g_sb.bracketHp - hp;
 }
 void ShieldBracketClose(uintptr_t self) {
+    if (mp::BracketClose(self)) return;
     if (!self || self != g_sb.ent || !g_sb.bracket) return;
     AcquireSRWLockExclusive(&g_sb.lock);
     ShieldBracketCloseLocked(self);
@@ -4492,7 +4585,9 @@ using FnHeroProjHit = uint64_t (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, u
 uint64_t HeroProjHit(uintptr_t self, uintptr_t proj, uintptr_t list, uintptr_t flag, uintptr_t out) {
     auto orig = reinterpret_cast<FnHeroProjHit>(g_sb.orig310);
     ShieldBracketClose(self);
-    float f = ShieldFrac(self);
+    mp::HitView mv{};
+    const bool mpHero = mp::HitState(self, &mv);
+    float f = mpHero ? mv.f : ShieldFrac(self);
     if (!(f > 0.f) || !proj || !out) return orig(self, proj, list, flag, out);
     uint8_t alive = 0;
     uintptr_t mount = 1;
@@ -4507,7 +4602,8 @@ uint64_t HeroProjHit(uintptr_t self, uintptr_t proj, uintptr_t list, uintptr_t f
         if (shooter ? ReadVec(shooter + oEntPos, src) : ReadVec(proj + 0xf4, src)) dx = src[0] - h[0], dz = src[2] - h[2];
     }
     float ang = 0.f;
-    bool front = shieldhit::Frontal(S.yaw, dx, dz, ShieldAngleNow(), &ang);
+    const float half = mpHero ? mv.angle : ShieldAngleNow();
+    bool front = shieldhit::Frontal(mpHero ? mv.yaw : S.yaw, dx, dz, half, &ang);
     float m[4] = {}, rec[2] = {};
     for (int i = 0; i < 4; ++i) Rd(proj + 0x78 + 4 * i, m[i]);
     uintptr_t r = Ptr(proj + 0x90);
@@ -4516,14 +4612,16 @@ uint64_t HeroProjHit(uintptr_t self, uintptr_t proj, uintptr_t list, uintptr_t f
     float speed = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
     if (!front) {
         InterlockedIncrement(&g_sb.side);
-        if (ShieldLog()) Log("shield-game: missile from the side (%.0f deg > %.0f) not blocked, raw %.0f, speed %.1f", ang, ShieldAngleNow(), raw, speed);
+        if (mpHero) mp::Count(self, mp::kCntSide);
+        if (ShieldLog()) Log("shield-game: missile from the side (%.0f deg > %.0f) not blocked, raw %.0f, speed %.1f", ang, half, raw, speed);
         return orig(self, proj, list, flag, out);
     }
-    vmgame::ShieldHit();
+    if (!mpHero || mv.local) vmgame::ShieldHit();
     if (!g_sb.hookTid) InterlockedExchange(&g_sb.hookTid, static_cast<LONG>(GetCurrentThreadId()));
     if (shieldhit::Full(f)) {
         *reinterpret_cast<uint16_t*>(out) = 0;
         InterlockedIncrement(&g_sb.missileFull);
+        if (mpHero) mp::Count(self, mp::kCntMissileFull);
         if (ShieldLog())
             Log("shield-game: missile blocked 100%% (raw %.0f, speed %.1f, from %.0f deg, shooter %p, projectile %p) - eaten by the shield", raw, speed, ang,
                 (void*)Ptr(proj + 0x20), (void*)proj);
@@ -4538,11 +4636,16 @@ uint64_t HeroProjHit(uintptr_t self, uintptr_t proj, uintptr_t list, uintptr_t f
     for (int i = 0; i < 4; ++i) pm[i] = save[i];
     Rd(self + 0xb1c, hp1);
     if (hp1 < hp0) {
-        AcquireSRWLockExclusive(&g_sb.lock);
-        g_sb.exempt += hp0 - hp1;
-        ReleaseSRWLockExclusive(&g_sb.lock);
+        if (mpHero) {
+            mp::AddExempt(self, hp0 - hp1);
+        } else {
+            AcquireSRWLockExclusive(&g_sb.lock);
+            g_sb.exempt += hp0 - hp1;
+            ReleaseSRWLockExclusive(&g_sb.lock);
+        }
     }
     InterlockedIncrement(&g_sb.missilePart);
+    if (mpHero) mp::Count(self, mp::kCntMissilePart);
     if (ShieldLog())
         Log("shield-game: missile blocked %.0f%% (raw %.0f -> %.0f, speed %.1f, from %.0f deg) hp %u -> %u", f * 100.f, raw, raw * (1.f - f), speed, ang, hp0,
             hp1);
@@ -4550,7 +4653,9 @@ uint64_t HeroProjHit(uintptr_t self, uintptr_t proj, uintptr_t list, uintptr_t f
 }
 extern "C" void hfps_hero_melee(uintptr_t self, uintptr_t pend) {
     ShieldBracketClose(self);
-    float f = ShieldFrac(self);
+    mp::HitView mv{};
+    const bool mpHero = mp::HitState(self, &mv);
+    float f = mpHero ? mv.f : ShieldFrac(self);
     uintptr_t victim = 0;
     if (!(f > 0.f) || !pend || !Rd(pend + 0x10, victim) || victim != self) return;
     if (!g_sb.hookTid) InterlockedExchange(&g_sb.hookTid, static_cast<LONG>(GetCurrentThreadId()));
@@ -4563,9 +4668,11 @@ extern "C" void hfps_hero_melee(uintptr_t self, uintptr_t pend) {
     ReadVec(attacker + oEntPos, a);
     ReadVec(self + oEntPos, h);
     float ang = 0.f;
-    if (!shieldhit::Frontal(S.yaw, a[0] - h[0], a[2] - h[2], ShieldAngleNow(), &ang)) {
+    const float half = mpHero ? mv.angle : ShieldAngleNow();
+    if (!shieldhit::Frontal(mpHero ? mv.yaw : S.yaw, a[0] - h[0], a[2] - h[2], half, &ang)) {
         InterlockedIncrement(&g_sb.side);
-        if (ShieldLog()) Log("shield-game: melee from the side (%.0f deg > %.0f) not blocked, kind %d damage %u", ang, ShieldAngleNow(), kind, dmg);
+        if (mpHero) mp::Count(self, mp::kCntSide);
+        if (ShieldLog()) Log("shield-game: melee from the side (%.0f deg > %.0f) not blocked, kind %d damage %u", ang, half, kind, dmg);
         return;
     }
     shieldhit::MeleeRewrite rw = shieldhit::RewriteMelee(kind, dmg, f);
@@ -4575,16 +4682,21 @@ extern "C" void hfps_hero_melee(uintptr_t self, uintptr_t pend) {
     *reinterpret_cast<volatile int32_t*>(pend) = rw.kind;
     *reinterpret_cast<volatile uint32_t*>(pend + 4) = rw.damage;
     if (rw.partial) {
-        AcquireSRWLockExclusive(&g_sb.lock);
-        g_sb.bracket = true;
-        g_sb.bracketHp = hp;
-        ReleaseSRWLockExclusive(&g_sb.lock);
+        if (mpHero) {
+            mp::BracketOpen(self, hp);
+        } else {
+            AcquireSRWLockExclusive(&g_sb.lock);
+            g_sb.bracket = true;
+            g_sb.bracketHp = hp;
+            ReleaseSRWLockExclusive(&g_sb.lock);
+        }
     }
     InterlockedIncrement(shieldhit::Full(f) ? &g_sb.meleeFull : kind == shieldhit::kMiss ? &g_sb.meleeMiss : &g_sb.meleePart);
+    if (mpHero) mp::Count(self, shieldhit::Full(f) ? mp::kCntMeleeFull : mp::kCntMeleePart);
     if (ShieldLog())
         Log("shield-game: melee blocked %.0f%% kind %d -> %d, damage %u -> %u (attacker %p, from %.0f deg, hero hp %u)", f * 100.f, kind, rw.kind, dmg, rw.damage,
             (void*)attacker, ang, hp);
-    vmgame::ShieldHit();
+    if (!mpHero || mv.local) vmgame::ShieldHit();
 }
 using FnHeroReact = uint64_t (*)(uintptr_t, uintptr_t, uintptr_t);
 uint64_t HeroHitReact(uintptr_t self, uintptr_t attacker, uintptr_t delta) {
@@ -4593,17 +4705,23 @@ uint64_t HeroHitReact(uintptr_t self, uintptr_t attacker, uintptr_t delta) {
 }
 using FnHeroStagger = uint64_t (*)(uintptr_t, uintptr_t);
 uint64_t HeroStagger(uintptr_t self, uintptr_t info) {
-    if (g_nk.armor && cfg.superArmor && S.active) {
-        InterlockedIncrement(&g_nk.armorSkipped);
+    mp::HitView mv{};
+    const bool mpHero = mp::HitState(self, &mv);
+    if (mpHero ? mv.armor : (g_nk.armor && cfg.superArmor && S.active)) {
+        if (mpHero)
+            mp::Count(self, mp::kCntArmor);
+        else
+            InterlockedIncrement(&g_nk.armorSkipped);
         return 0;
     }
-    float f = ShieldFrac(self);
-    if (f > 0.f && info && shieldhit::EatStagger(f, cfg.shieldStagger)) {
+    float f = mpHero ? mv.f : ShieldFrac(self);
+    if (f > 0.f && info && shieldhit::EatStagger(f, mpHero ? mv.staggerOnPartial : cfg.shieldStagger)) {
         float v[3] = {};
         for (int i = 0; i < 3; ++i) Rd(info + 8 + 4 * i, v[i]);
         float ang = 0.f;
-        if (shieldhit::Frontal(S.yaw, -v[0], -v[2], ShieldAngleNow(), &ang)) {
+        if (shieldhit::Frontal(mpHero ? mv.yaw : S.yaw, -v[0], -v[2], mpHero ? mv.angle : ShieldAngleNow(), &ang)) {
             InterlockedIncrement(&g_sb.stagger);
+            if (mpHero) mp::Count(self, mp::kCntStagger);
             uint8_t flag = 0;
             Rd(info + 0x14, flag);
             if (ShieldLog()) Log("shield-game: hit reaction (state 18, flag %u) eaten by the shield (%.0f%%, from %.0f deg)", flag, f * 100.f, ang);
@@ -4744,7 +4862,7 @@ bool NoKnockInstall(uintptr_t ent) {
     return ok;
 }
 void NoKnockStep() {
-    bool want = S.active && S.entity && ((cfg.noKnock && g_noKnockOk) || (cfg.shieldGame && g_shieldGameOk) || (cfg.superArmor && g_armorOk));
+    bool want = S.active && S.entity && !S.mpMode && ((cfg.noKnock && g_noKnockOk) || (cfg.shieldGame && g_shieldGameOk) || (cfg.superArmor && g_armorOk));
     if (g_nk.ent && (!want || g_nk.ent != S.entity || g_nk.gen != g_cfgGen))
         NoKnockRemove(!want ? "first person off / switched off" : g_nk.ent != S.entity ? "hero changed" : "ini reloaded");
     if (!want) return;
@@ -5104,6 +5222,7 @@ void EdgeStep() {
     }
 }
 constexpr uintptr_t oProjSpeed = 0x64, oProjMass = 0xc0, oUnitAmmo = 0x3d90, oAmmoNoTake = 0xc, kAmmoSlot = 0x10;
+#include "mp_channel.inc"
 void ShotRestoreSpeed(const char* why) {
     if (!S.speedApplied) return;
     S.speedApplied = false;
@@ -5113,7 +5232,7 @@ void ShotRestoreSpeed(const char* why) {
 }
 void ShotStep() {
     bool active = S.active && g_shotOk && g_fireOk && cfg.fireEnabled;
-    uintptr_t rec = active && cfg.bulletSpeed > 0.f && S.unit ? (S.fpProj ? S.fpProj : Ptr(S.unit + oUnitProjectile)) : 0;
+    uintptr_t rec = active && !S.mpMode && cfg.bulletSpeed > 0.f && S.unit ? (S.fpProj ? S.fpProj : Ptr(S.unit + oUnitProjectile)) : 0;
     if (S.speedApplied && rec != S.speedRec) ShotRestoreSpeed(rec ? "weapon changed" : "first person ended");
     if (!active) ShotDamageRestore("first person ended");
     if (!active) ShotPenRestore("first person ended");
@@ -5139,7 +5258,7 @@ void ShotStep() {
             Log("fire: projectile record %p speed %.2f mass %.2f look wrong; bullet speed unchanged", (void*)rec, sp, m);
         }
     }
-    bool wantAmmo = active && cfg.fireShooter && cfg.unlimitedAmmo && S.unit && S.entity;
+    bool wantAmmo = active && cfg.fireShooter && cfg.unlimitedAmmo && S.unit && S.entity && !S.mpMode;
     if (wantAmmo && !S.ammoApplied) {
         S.ammoUnit = S.unit;
         S.ammoEntity = S.entity;
@@ -6066,12 +6185,13 @@ void Apply(uintptr_t mgr) {
         bool judged = false, follow = false;
         bool unbound = S.ghostWanted || S.airFar || S.air || (S.tLand > 0 && now - S.tLand < 0.5);
         if (unbound || pinned || S.castHold) judged = true, follow = true;
+        const double lagX = S.mpMode ? mp::Lag() : 0.0;
         for (const TpRec& r : S.tpHist) {
             if (unbound || pinned || S.castHold) break;
-            if (r.t <= 0 || now - r.t > 0.45) continue;
+            if (r.t <= 0 || now - r.t > 0.45 + lagX) continue;
             float fx = raw[0] - r.x, fz = raw[2] - r.z;
             if (fx * fx + fz * fz < 0.16f) follow = true;
-            if (now - r.t >= 0.25) judged = true;
+            if (now - r.t >= 0.25 + lagX) judged = true;
         }
         if (!judged) follow = true;
         if (pinned) {
@@ -6088,7 +6208,7 @@ void Apply(uintptr_t mgr) {
             S.tNoFollow = -1;
         } else if (S.tNoFollow < 0) {
             S.tNoFollow = now;
-        } else if (now - S.tNoFollow >= 0.25) {
+        } else if (now - S.tNoFollow >= 0.25 + lagX) {
             S.stuck = true;
             S.tStuck = now;
             memcpy(S.stuckPos, raw, sizeof raw);
@@ -6199,6 +6319,10 @@ void Apply(uintptr_t mgr) {
             }
         }
         float leash = S.stuck ? cfg.stuckLeash : cfg.leash;
+        if (S.mpMode && !S.stuck) {
+            float extra = cfg.runSpeed * mp::Lag();
+            leash += extra > 6.f ? 6.f : extra;
+        }
         float ex = S.kinPos[0] - raw[0], ez = S.kinPos[1] - raw[2];
         float ed = std::sqrt(ex * ex + ez * ez);
         const bool skipAhead = !S.stuck && ed > leash && LeashSkipAhead(ex, ez, S.kinVel, ed, leash);
@@ -6872,10 +6996,19 @@ void Apply(uintptr_t mgr) {
             S.fpProjId = S.fpProj ? id : -1;
             herofx::Track(S.fpProj);
             Log("fire: weapon %d projectile '%s' -> %s (id %d)", S.projFor, want, S.fpProj ? "found" : "NOT FOUND (hero's own)", S.fpProjId);
+            LookupFocusProjectile();
         }
-        float sfwd[3];
-        vmgame::SpreadDir(fwd, right, camUp, sfwd);
-        if (FireShot(eye, sfwd, right, camUp, bodies, nb, clearance)) {
+        float sdirs[8][3], srange = 0.f;
+        bool focus = false;
+        const int nShot = vmgame::ShotPattern(adsW, fwd, right, camUp, sdirs, 8, &srange, &focus);
+        const uintptr_t hipProj = S.fpProj;
+        const int32_t hipProjId = S.fpProjId;
+        if (focus && S.fpProjAds) S.fpProj = S.fpProjAds, S.fpProjId = S.fpProjAdsId;
+        int fired = 0;
+        for (int k = 0; k < nShot; ++k) fired += FireShot(eye, sdirs[k], right, camUp, bodies, nb, clearance, srange) ? 1 : 0;
+        S.fpProj = hipProj;
+        S.fpProjId = hipProjId;
+        if (fired) {
             ++S.shots;
             vmgame::Fire();
             S.camKick.OnShot(kp, adsW, now, &S.pitch, &S.yaw, lim);
@@ -7418,6 +7551,7 @@ bool VerifyGame() {
         Log("audio: follow game master x sfx volume %s", g_gameVolOk ? "ok" : "OFF - first-person sounds stay at fixed -5 dB");
         Log("wall: building walls %s (building=%d)", g_buildOk ? "solid" : "OFF - can walk through buildings", cfg.building);
         Log("wall: city walls / building nav blocks %s (wall=%d)", g_wallOk ? "ok" : "OFF - terrain only, jumping still works", cfg.wall);
+        mp::Init();
         Log("move: unit orders %s, entity halt %s, entity move %s, entity teleport %s (unavailable modes fall back to unit orders)",
             m ? "ok" : "OFF", h ? "ok" : "OFF", o ? "ok" : "OFF", t ? "ok" : "OFF");
     }
@@ -7596,6 +7730,7 @@ extern "C" void hfps_post_step_begin(uintptr_t self, uintptr_t world) {
     LARGE_INTEGER q;
     QueryPerformanceCounter(&q);
     g_ef.lastQpc = q.QuadPart;
+    mp::PostStep(world);
     if (!world || world != g_ef.world || !g_ef.hero) return;
     hitprobe::Observe(world, g_ef.hero);
     ShieldHpStep();
@@ -7979,6 +8114,7 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
             S.mgr != mgr ? "camera manager changed" : "camera manager re-created at the same address", (void*)S.mgr, (void*)mgr, oldExit, oldLauncher);
     }
     if (S.exitStage && (!S.active || S.exitStage == 1)) ExitSequenceStep(mgr);
+    mp::Frame();
     if (InterlockedExchange(&g_reqToggle, 0)) {
         if (S.active)
             Exit(mgr, "toggle-key");
@@ -8018,6 +8154,7 @@ struct Fns {
     float (*tonumber)(void*, int);
     int (*type)(void*, int);
     size_t (*objlen)(void*, int);
+    const char* (*tolstring)(void*, int, size_t*);
 } f;
 int g_state = -1;
 char g_missing[48] = "";
@@ -8039,6 +8176,7 @@ bool Resolve() {
         }
         memcpy(e.slot, &p, sizeof p);
     }
+    if (FARPROC p = exe ? GetProcAddress(exe, "lua_tolstring") : nullptr) memcpy(&f.tolstring, &p, sizeof p);
     g_state = 1;
     return true;
 }
@@ -8072,6 +8210,31 @@ int IsHero(void* L) {
     }
     f.pushboolean(L, how ? 1 : 0);
     return 1;
+}
+int UnitKeysFn(void* L) {
+    f.pushstring(L, vmgame::UnitKeys());
+    return 1;
+}
+int SetUnit(void* L) {
+    bool ok = false;
+    if (f.tolstring && f.type(L, 1) == kTUserdata && f.objlen(L, 1) >= sizeof(uintptr_t)) {
+        const void* blk = f.touserdata(L, 1);
+        uintptr_t wrap = 0;
+        if (blk) memcpy(&wrap, blk, sizeof wrap);
+        const uintptr_t p = wrap ? Ptr(wrap + 8) : 0;
+        size_t n = 0;
+        const char* key = f.tolstring(L, 2, &n);
+        if (p && key && n > 0 && n < 48) {
+            RememberUnitKey(p, key);
+            ok = true;
+        }
+    }
+    f.pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
+int BattleStarted(void*) {
+    ForgetUnitKeys();
+    return 0;
 }
 int HudEnabled(void* L) {
     f.pushboolean(L, cfg.hudEnabled ? 1 : 0);
@@ -8267,6 +8430,14 @@ int PushTable(void* L) {
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);
+    }
+    {
+        const struct { const char* name; CFn fn; } more[] = {{"unit_keys", UnitKeysFn}, {"set_unit", SetUnit}, {"battle_started", BattleStarted}};
+        for (const auto& e : more) {
+            f.pushcclosure(L, e.fn, 0);
+            f.setfield(L, -2, e.name);
+        }
+        if (!f.tolstring) Log("lua-api: lua_tolstring not exported - set_unit off (character arms stay the weapon's own)");
     }
     Log("lua-api: interface table v4 returned (luaopen #%ld, lua state %p)", n, L);
     return 1;
