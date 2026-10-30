@@ -12,6 +12,7 @@ public:
     static long long ClockSamples();
     static unsigned ClockRate();
     void FadeAll();
+    void SetLoopBegin(float seconds) { loopBegin_ = seconds > 0.f ? seconds : 0.f; }
     void Update();
     void Release();
     static bool ReadPcm(const wchar_t* path, WAVEFORMATEX* fmt, unsigned char** pcm, unsigned* bytes, char* err, size_t errLen);
@@ -40,5 +41,6 @@ private:
     double fadeAt_[kVoices] = {};
     float vol_[kVoices] = {};
     int nVoices_ = 0;
+    float loopBegin_ = 0.f;
 };
 }
