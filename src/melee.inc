@@ -492,6 +492,9 @@ int PickVariant(int act, int base) {
     return idx[k];
 }
 int g_blockVar = -1;
+int g_blockForms = 0;
+float g_enterOverride = -1.f;
+constexpr float kBlockPushFade = 0.1f;
 int CycleBlock(int base) {
     int idx[4] = {base};
     int n = 1;
@@ -503,6 +506,7 @@ int CycleBlock(int base) {
         idx[n++] = c;
     }
     g_blockVar = n > 1 ? (g_blockVar + 1) % n : 0;
+    g_blockForms = n;
     if (g_log) g_log("melee: block form %d of %d", g_blockVar + 1, n);
     return idx[g_blockVar];
 }
@@ -561,13 +565,15 @@ void Go(int next, double now, const char* why, const char* clip = nullptr, float
     g.struck = false;
     g.blkFree = false;
     const Def& nd = Ms().def[next];
+    const float enter = g_enterOverride >= 0.f ? g_enterOverride : nd.enter;
+    g_enterOverride = -1.f;
     int c = clip ? Wp().rend.FindClip(clip) : -1;
     if (c >= 0) {
         MPlay(c, now, fade >= 0.f ? fade : nd.enter, nd.scale);
     } else {
         c = Wp().rend.FindClip(nd.clip);
         if (c >= 0) c = next == kBlock ? CycleBlock(c) : PickVariant(next, c);
-        MPlay(c >= 0 ? c : g_an.idle, now, nd.enter, nd.scale);
+        MPlay(c >= 0 ? c : g_an.idle, now, enter, nd.scale);
         if (next == kBlock) BlockMatchStart(c, now);
     }
     if (IsAttack(next) || next == kPush) {
@@ -662,6 +668,10 @@ void MeleeStep(vm::Look& l, double now) {
             else PlayRest(now, 0.2);
         } else if (press && t >= 0.2) {
             g.pending = false;
+            if (g_blockForms > 1 && Ms().def[kPush].enter < kBlockPushFade) {
+                g_enterOverride = kBlockPushFade;
+                if (g_log) g_log("melee: push from block form %d, fade %.2f s", g_blockVar + 1, kBlockPushFade);
+            }
             Go(kPush, now, "press while blocking");
         }
     } else if (IsAttack(g.act)) {
