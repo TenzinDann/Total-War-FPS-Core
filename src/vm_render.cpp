@@ -9,6 +9,7 @@
 #include <cstring>
 #include <cwchar>
 #include <initializer_list>
+#include <vector>
 namespace vm {
 namespace {
 template <class T>
@@ -1107,6 +1108,8 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     GetPrivateProfileStringW(L"viewmodel", L"spin_loop_sound", s.spinLoopSound, s.spinLoopSound, 512, ini);
     GetPrivateProfileStringW(L"viewmodel", L"spin_down_sound", s.spinDownSound, s.spinDownSound, 512, ini);
     s.spinVolume = IniFloat(ini, L"spin_volume", s.spinVolume);
+    s.spinLoopStart = IniFloat(ini, L"spin_loop_start", s.spinLoopStart);
+    if (!(s.spinLoopStart >= 0.f && s.spinLoopStart <= 30.f)) s.spinLoopStart = 0.f;
     s.spinBarrels = IniFloat(ini, L"spin_barrels", s.spinBarrels);
     if (!(s.spinBarrels >= 1.f && s.spinBarrels <= 24.f)) s.spinBarrels = 6.f;
     s.spinDownTime = IniFloat(ini, L"spin_down_time", s.spinDownTime);
@@ -1151,6 +1154,34 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     }
     s.fireRange = IniFloat(ini, L"fire_range", s.fireRange);
     if (!(s.fireRange == 0.f || (s.fireRange >= 5.f && s.fireRange <= 2000.f))) s.fireRange = 0.f;
+    {
+        wchar_t pw[64] = L"";
+        GetPrivateProfileStringW(L"viewmodel", L"projectile_ads", L"", pw, 64, ini);
+        if (pw[0] && WideCharToMultiByte(CP_UTF8, 0, pw, -1, s.projectileAds, sizeof s.projectileAds, nullptr, nullptr) <= 0) s.projectileAds[0] = 0;
+    }
+    s.fireRangeAds = IniFloat(ini, L"fire_range_ads", s.fireRangeAds);
+    if (!(s.fireRangeAds == 0.f || (s.fireRangeAds >= 5.f && s.fireRangeAds <= 2000.f))) s.fireRangeAds = 0.f;
+    s.pellets = static_cast<int>(IniFloat(ini, L"pellets", static_cast<float>(s.pellets)) + 0.5f);
+    s.pelletsAds = static_cast<int>(IniFloat(ini, L"pellets_ads", static_cast<float>(s.pelletsAds)) + 0.5f);
+    if (s.pellets < 1 || s.pellets > 8) s.pellets = 1;
+    if (s.pelletsAds < 1 || s.pelletsAds > 8) s.pelletsAds = 1;
+    s.pelletFan = IniFloat(ini, L"pellet_fan", s.pelletFan);
+    s.pelletFanAds = IniFloat(ini, L"pellet_fan_ads", s.pelletFanAds);
+    if (!(s.pelletFan >= 0.f && s.pelletFan <= 60.f)) s.pelletFan = 0.f;
+    if (!(s.pelletFanAds >= 0.f && s.pelletFanAds <= 60.f)) s.pelletFanAds = 0.f;
+    s.burst = IniFloat(ini, L"burst", static_cast<float>(s.burst)) != 0.f ? 1 : 0;
+    s.burstMin = IniFloat(ini, L"burst_min", s.burstMin);
+    if (!(s.burstMin >= 0.5f && s.burstMin <= 20.f)) s.burstMin = 2.f;
+    s.burstScatterAds = IniFloat(ini, L"burst_scatter_ads", s.burstScatterAds);
+    if (!(s.burstScatterAds >= 0.f && s.burstScatterAds <= 10.f)) s.burstScatterAds = 0.f;
+    s.burstPierceAds = static_cast<int>(IniFloat(ini, L"burst_pierce_ads", static_cast<float>(s.burstPierceAds)) + 0.5f);
+    if (s.burstPierceAds < 0 || s.burstPierceAds > 64) s.burstPierceAds = 0;
+    s.burstReachAds = IniFloat(ini, L"burst_reach_ads", s.burstReachAds);
+    if (!(s.burstReachAds >= 0.55f && s.burstReachAds <= 5.f)) s.burstReachAds = 0.55f;
+    s.burstCover = IniFloat(ini, L"burst_cover", s.burstCover);
+    if (!(s.burstCover == 0.f || (s.burstCover >= 0.05f && s.burstCover <= 2.f))) s.burstCover = 0.f;
+    s.burstCoverMax = static_cast<int>(IniFloat(ini, L"burst_cover_max", static_cast<float>(s.burstCoverMax)) + 0.5f);
+    if (s.burstCoverMax < 1 || s.burstCoverMax > 128) s.burstCoverMax = 64;
     if (!(s.fireLfeVolume >= 0.f && s.fireLfeVolume <= 2.f)) s.fireLfeVolume = 0.7f;
     if (!(s.fireAtmoVolume >= 0.f && s.fireAtmoVolume <= 2.f)) s.fireAtmoVolume = 0.7f;
     if (!(s.fireTailVolume >= 0.f && s.fireTailVolume <= 2.f)) s.fireTailVolume = 0.7f;
@@ -1168,10 +1199,89 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.flashLight = IniFloat(ini, L"flash_light", s.flashLight);
     s.flashSmoke = IniFloat(ini, L"flash_smoke", s.flashSmoke ? 1.f : 0.f) != 0.f;
     s.flashFlame = IniFloat(ini, L"flash_flame", s.flashFlame ? 1.f : 0.f) != 0.f;
+    GetPrivateProfileStringW(L"viewmodel", L"flame_fx", s.flameFx, s.flameFx, 128, ini);
+    s.flameAim = IniFloat(ini, L"flame_aim", s.flameAim);
+    s.flameGap = IniFloat(ini, L"flame_gap", s.flameGap);
+    if (!(s.flameAim >= 2.f && s.flameAim <= 500.f)) s.flameAim = 30.f;
+    if (!(s.flameGap >= 0.02f && s.flameGap <= 1.f)) s.flameGap = 0.09f;
+    s.flameFan = IniFloat(ini, L"flame_fan", s.flameFan);
+    s.flameFanAds = IniFloat(ini, L"flame_fan_ads", s.flameFanAds);
+    s.flameAimAds = IniFloat(ini, L"flame_aim_ads", s.flameAimAds);
+    if (!(s.flameFan >= 0.f && s.flameFan <= 80.f)) s.flameFan = 0.f;
+    if (!(s.flameFanAds >= 0.f && s.flameFanAds <= 80.f)) s.flameFanAds = 0.f;
+    if (!(s.flameAimAds == 0.f || (s.flameAimAds >= 2.f && s.flameAimAds <= 500.f))) s.flameAimAds = 0.f;
+    for (int li = 0; li < 4; ++li) {
+        Settings::FlameLayer& L = s.flame[li];
+        wchar_t k[48];
+        auto key = [&](const wchar_t* n) {
+            swprintf(k, 48, L"flame%d_%ls", li + 1, n);
+            return k;
+        };
+        GetPrivateProfileStringW(L"viewmodel", key(L"tex"), L.tex, L.tex, 64, ini);
+        float c2[2] = {static_cast<float>(L.cx), static_cast<float>(L.cy)};
+        IniVec2(ini, key(L"cells"), c2);
+        L.cx = std::max(1, std::min(32, static_cast<int>(c2[0] + 0.5f)));
+        L.cy = std::max(1, std::min(32, static_cast<int>(c2[1] + 0.5f)));
+        L.fps = IniFloat(ini, key(L"fps"), L.fps);
+        L.randFrame = IniFloat(ini, key(L"rand_frame"), L.randFrame ? 1.f : 0.f) != 0.f;
+        L.rate = IniFloat(ini, key(L"rate"), L.rate);
+        IniVec2(ini, key(L"speed"), L.speed);
+        IniVec2(ini, key(L"life"), L.life);
+        IniVec2(ini, key(L"size"), L.size);
+        L.sizeEase = IniFloat(ini, key(L"size_ease"), L.sizeEase);
+        L.gravity = IniFloat(ini, key(L"gravity"), L.gravity);
+        L.drag = IniFloat(ini, key(L"drag"), L.drag);
+        L.spread = IniFloat(ini, key(L"spread"), L.spread);
+        L.jitter = IniFloat(ini, key(L"jitter"), L.jitter);
+        IniVec3(ini, key(L"color"), L.col0);
+        memcpy(L.col1, L.col0, sizeof L.col1);
+        IniVec3(ini, key(L"color_end"), L.col1);
+        L.alpha = IniFloat(ini, key(L"alpha"), L.alpha);
+        IniVec2(ini, key(L"fade"), L.fade);
+        L.bright = IniFloat(ini, key(L"bright"), L.bright);
+        L.stretch = IniFloat(ini, key(L"stretch"), L.stretch);
+        L.spin = IniFloat(ini, key(L"spin"), L.spin);
+        L.additive = IniFloat(ini, key(L"additive"), L.additive ? 1.f : 0.f) != 0.f;
+        if (!(L.rate >= 0.f && L.rate <= 3000.f)) L.rate = 0.f;
+        for (int j = 0; j < 2; ++j) {
+            if (!(L.life[j] >= 0.02f && L.life[j] <= 20.f)) L.life[j] = 1.f;
+            if (!(L.speed[j] >= 0.f && L.speed[j] <= 300.f)) L.speed[j] = 20.f;
+            if (!(L.size[j] >= 0.f && L.size[j] <= 50.f)) L.size[j] = 0.5f;
+            L.fade[j] = std::min(std::max(L.fade[j], 0.f), 1.f);
+        }
+        if (!(L.fps >= 0.f && L.fps <= 500.f)) L.fps = 0.f;
+        if (!(L.sizeEase >= 0.f && L.sizeEase <= 20.f)) L.sizeEase = 2.f;
+        if (!(L.spread >= 0.f && L.spread <= 90.f)) L.spread = 2.f;
+        IniVec2(ini, key(L"speed_ads"), L.speedAds);
+        IniVec2(ini, key(L"life_ads"), L.lifeAds);
+        IniVec2(ini, key(L"size_ads"), L.sizeAds);
+        L.rateAds = IniFloat(ini, key(L"rate_ads"), L.rateAds);
+        L.spreadAds = IniFloat(ini, key(L"spread_ads"), L.spreadAds);
+        L.dragAds = IniFloat(ini, key(L"drag_ads"), L.dragAds);
+        IniVec2(ini, key(L"fade_ads"), L.fadeAds);
+        L.alphaAds = IniFloat(ini, key(L"alpha_ads"), L.alphaAds);
+        L.brightAds = IniFloat(ini, key(L"bright_ads"), L.brightAds);
+        L.stretchAds = IniFloat(ini, key(L"stretch_ads"), L.stretchAds);
+        if (!(L.stretchAds >= 0.f && L.stretchAds <= 1.f)) L.stretchAds = -1.f;
+        for (int j = 0; j < 2; ++j) {
+            if (!(L.speedAds[j] >= 0.f && L.speedAds[j] <= 300.f)) L.speedAds[j] = -1.f;
+            if (!(L.lifeAds[j] >= 0.02f && L.lifeAds[j] <= 20.f)) L.lifeAds[j] = -1.f;
+            if (!(L.sizeAds[j] >= 0.f && L.sizeAds[j] <= 50.f)) L.sizeAds[j] = -1.f;
+            if (!(L.fadeAds[j] >= 0.f && L.fadeAds[j] <= 1.f)) L.fadeAds[j] = -1.f;
+        }
+        if (!(L.rateAds >= 0.f && L.rateAds <= 3000.f)) L.rateAds = -1.f;
+        if (!(L.spreadAds >= 0.f && L.spreadAds <= 90.f)) L.spreadAds = -1.f;
+        if (!(L.dragAds >= 0.f && L.dragAds <= 50.f)) L.dragAds = -1.f;
+        if (!(L.alphaAds >= 0.f && L.alphaAds <= 4.f)) L.alphaAds = -1.f;
+        if (!(L.brightAds >= 0.f && L.brightAds <= 20.f)) L.brightAds = -1.f;
+    }
     s.hitFx = IniFloat(ini, L"hit_fx", s.hitFx ? 1.f : 0.f) != 0.f;
     s.hitFxScale = IniFloat(ini, L"hit_fx_scale", s.hitFxScale);
     s.hitFxAlpha = IniFloat(ini, L"hit_fx_alpha", s.hitFxAlpha);
     IniVec3(ini, L"hit_fx_color", s.hitFxColor);
+    IniVec3(ini, L"tracer_tint", s.tracerTint);
+    for (float& c : s.tracerTint)
+        if (!(c >= 0.f && c <= 8.f)) c = 1.f;
     s.flashGas =IniFloat(ini, L"flash_gas", s.flashGas ? 1.f : 0.f) != 0.f;
     GetPrivateProfileStringW(L"viewmodel", L"flash_gas_fx", s.flashGasFx, s.flashGasFx, 128, ini);
     s.flashGasScale = IniFloat(ini, L"flash_gas_scale", s.flashGasScale);
@@ -1353,10 +1463,15 @@ bool ReadHvmV1(const wchar_t* path, unsigned char** out, size_t* outLen, char* e
     return true;
 }
 }
+#include "arms_override.inc"
 bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
     unsigned char* data = nullptr;
     size_t len = 0;
     if (!TakePrefetched(path, true, &data, &len) && !ReadHvmV1(path, &data, &len, err, errLen)) return false;
+    {
+        char note[300];
+        if (ApplyArmsOverride(&data, &len, note, sizeof note) || note[0]) ArmsLogAppend(path, note);
+    }
     bool ok = false;
     ID3D11Buffer* vb = nullptr;
     ID3D11Buffer* ib = nullptr;
@@ -1463,8 +1578,16 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
                 if (!strncmp(hb.name, kShieldFinger[k], sizeof hb.name)) fingerBone_[k] = static_cast<int>(b);
             if (!strncmp(hb.name, "2598db76b21b58e3", sizeof hb.name)) handTag_[0] = static_cast<int>(b);
             if (!strncmp(hb.name, "25c8bb76b2444645", sizeof hb.name)) handTag_[1] = static_cast<int>(b);
+            {
+                char nm[sizeof hb.name + 1];
+                memcpy(nm, hb.name, sizeof hb.name);
+                nm[sizeof hb.name] = 0;
+                int num = 0, sd = TwistBoneSide(nm, &num);
+                if (sd >= 0 && twistN_[sd] < kMaxTwist) twistBone_[sd][twistN_[sd]] = static_cast<int>(b), twistNum_[sd][twistN_[sd]++] = num;
+            }
         }
         cameraBone_ = (h.cameraBone >= 0 && h.cameraBone < static_cast<int>(h.boneCount)) ? h.cameraBone : -1;
+        TwistSetup();
         unsigned char* verts = data + off;
         for (uint32_t v = 0; v < h.vertexCount; ++v) {
             unsigned char* bi = verts + static_cast<size_t>(v) * kVertexStride + 48;
@@ -2305,8 +2428,64 @@ void Renderer::ShieldIk(const Look& look, const float* nInv12) {
     for (unsigned b = static_cast<unsigned>(sh); b < boneCount_; ++b)
         W[b] = bones_[b].parent >= 0 ? AffMul(W[bones_[b].parent], g_local[b]) : g_local[b];
 }
+void Renderer::TwistSetup() {
+    for (int sd = 0; sd < 2; ++sd) {
+        const int el = armBone_[sd][1], wr = armBone_[sd][2];
+        bool ok = twistN_[sd] > 0 && el >= 0 && wr >= 0 && bones_[wr].parent == el;
+        int top = 0;
+        for (int i = 0; ok && i < twistN_[sd]; ++i) {
+            ok = bones_[twistBone_[sd][i]].parent == el;
+            if (twistNum_[sd][i] > top) top = twistNum_[sd][i];
+        }
+        const float* t = ok ? bones_[wr].bind : nullptr;
+        const float al = t ? std::sqrt(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]) : 0.f;
+        const float ql = t ? std::sqrt(t[3] * t[3] + t[4] * t[4] + t[5] * t[5] + t[6] * t[6]) : 0.f;
+        if (!ok || top <= 0 || al < 1e-6f || ql < 1e-6f) {
+            twistN_[sd] = 0;
+            continue;
+        }
+        for (int k = 0; k < 3; ++k) twistAxis_[sd][k] = t[k] / al;
+        for (int k = 0; k < 4; ++k) twistBindQ_[sd][k] = t[3 + k] / ql;
+        for (int i = 0; i < twistN_[sd]; ++i) twistFrac_[sd][i] = static_cast<float>(twistNum_[sd][i]) / static_cast<float>(top);
+        twistHave_[sd] = false;
+    }
+}
+void Renderer::TwistBones() {
+    constexpr float kTwoPi = 6.28318531f, kReliableDeg = 100.f;
+    for (int sd = 0; sd < 2; ++sd) {
+        if (!twistN_[sd]) continue;
+        const int el = armBone_[sd][1], wr = armBone_[sd][2];
+        const Aff L = AffMul(AffInverse(g_world[el]), g_world[wr]);
+        float qc[4];
+        RotToQuat(L, qc);
+        const float* qb = twistBindQ_[sd];
+        const float bx = -qb[0], by = -qb[1], bz = -qb[2], bw = qb[3];
+        const float dx = qc[3] * bx + qc[0] * bw + qc[1] * bz - qc[2] * by;
+        const float dy = qc[3] * by - qc[0] * bz + qc[1] * bw + qc[2] * bx;
+        const float dz = qc[3] * bz + qc[0] * by - qc[1] * bx + qc[2] * bw;
+        const float dw = qc[3] * bw - qc[0] * bx - qc[1] * by - qc[2] * bz;
+        const float* a = twistAxis_[sd];
+        const float pr = dx * a[0] + dy * a[1] + dz * a[2];
+        float phi = std::remainder(2.f * std::atan2(pr, dw), kTwoPi);
+        float sw = std::fabs(dw * std::cos(phi * 0.5f) + pr * std::sin(phi * 0.5f));
+        const float swingDeg = 2.f * std::acos(sw > 1.f ? 1.f : sw) * 57.2957795f;
+        if (swingDeg < kReliableDeg) {
+            if (twistHave_[sd]) phi += kTwoPi * std::round((twistPrev_[sd] - phi) / kTwoPi);
+            twistPrev_[sd] = phi;
+            twistHave_[sd] = true;
+        } else {
+            phi = twistHave_[sd] ? twistPrev_[sd] : 0.f;
+        }
+        for (int i = 0; i < twistN_[sd]; ++i) {
+            const int b = twistBone_[sd][i];
+            g_local[b] = AffAxisAngle(a, phi * twistFrac_[sd][i]);
+            g_world[b] = AffMul(g_world[el], g_local[b]);
+        }
+    }
+}
 void Renderer::FinishBones(float* palette, int muzzleBone, const float* muzzleLocal, float* muzzleModel, const float* axisLocal,
                            const float* upLocal, float* axisModel, float* upModel) {
+    TwistBones();
     const Aff* world = g_world;
     for (unsigned b = 0; b < boneCount_; ++b) {
         Aff inv;
@@ -2847,6 +3026,8 @@ void Renderer::Release() {
         armBone_[sd][0] = armBone_[sd][1] = armBone_[sd][2] = -1;
         handTag_[sd] = -1;
         ikResidual_[sd] = 0.f;
+        twistN_[sd] = 0;
+        twistHave_[sd] = false;
     }
     gunBone_ = -1;
     muzzleValid_ = false;
@@ -3129,7 +3310,7 @@ bool MuzzleFlash::InitPipeline(ID3D11Device* dev) {
     SafeRelease(vsb);
     SafeRelease(psb);
     D3D11_BUFFER_DESC bd = {};
-    bd.ByteWidth = sizeof(FlashVertex) * 6 * (kMax + kMaxTracers + kMaxImpacts * kImpactQuads);
+    bd.ByteWidth = sizeof(FlashVertex) * 6 * (kMax + kMaxTracers + kMaxImpacts * kImpactQuads + kMaxFlame);
     bd.Usage = D3D11_USAGE_DYNAMIC;
     bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -3231,6 +3412,18 @@ bool MuzzleFlash::Load(ID3D11Device* dev, const wchar_t* fxDir, const wchar_t* e
         LoadSheet(path, sheet_[i]);
     }
     return true;
+}
+void MuzzleFlash::LoadFlame(const wchar_t* dir, const Settings& s) {
+    for (auto& t : flTex_) SafeRelease(t);
+    nFl_ = 0;
+    if (!dev_ || !dir || !dir[0]) return;
+    for (int li = 0; li < 4; ++li) {
+        if (!s.flame[li].tex[0]) continue;
+        wchar_t path[MAX_PATH * 2];
+        swprintf(path, MAX_PATH * 2, L"%ls\\%ls.dds", dir, s.flame[li].tex);
+        char e[256] = {};
+        flTex_[li] = LoadDdsBc(dev_, path, e, sizeof e);
+    }
 }
 float MuzzleFlash::Rand(float a, float b) {
     rng_ = rng_ * 1664525u + 1013904223u;
@@ -3701,7 +3894,7 @@ float MuzzleFlash::LightLevel(double now) const {
 bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* depth, UINT w, UINT h,
                        bool rtvEncodesSrgb, double now, const MuzzleFrame* fp, const WorldCam* cam, const Settings& s) {
     if (!Loaded() || !ctx || !rtv || w < 16 || h < 16) return false;
-    static FlashVertex verts[(kMax + kMaxTracers + kMaxImpacts * kImpactQuads) * 6];
+    static FlashVertex verts[(kMax + kMaxTracers + kMaxImpacts * kImpactQuads + kMaxFlame) * 6];
     int nv = 0;
     int trStart = nv, trCount = 0;
     if (cam && tex_[kFlashTexSpark]) {
@@ -3755,7 +3948,7 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
             float wh = kTracerHalfWidth * h * 0.5f / (hv[2] * ty), wt = kTracerHalfWidth * h * 0.5f / (tv[2] * ty);
             wh = std::max(wh, 0.75f), wt = std::max(wt, 0.75f);
             auto vtx = [&](float x, float y, float off, float u, float v) {
-                return FlashVertex{x + px * off * 2.f / w, y + py * off * 2.f / h, u, v, t.col[0], t.col[1], t.col[2], a, 1.f, 1.f, 0.f};
+                return FlashVertex{x + px * off * 2.f / w, y + py * off * 2.f / h, u, v, t.col[0] * s.tracerTint[0], t.col[1] * s.tracerTint[1], t.col[2] * s.tracerTint[2], a, 1.f, 1.f, 0.f};
             };
             FlashVertex q4[4] = {vtx(hx, hy, -wh, 0.f, 0.f), vtx(hx, hy, wh, 1.f, 0.f), vtx(tx, tyy, -wt, 0.f, 1.f),
                                  vtx(tx, tyy, wt, 1.f, 1.f)};
@@ -3825,6 +4018,142 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
         }
         nImp_ = keep;
         imCount = nv - imStart;
+    }
+    int flStart[4] = {}, flCount[4] = {};
+    if (cam && s.flameFx[0]) {
+        float dtf = tFlSim_ < 0.0 ? 0.f : static_cast<float>(now - tFlSim_);
+        if (dtf < 0.f || dtf > 0.1f) dtf = 0.f;
+        tFlSim_ = now;
+        const float ty = std::tan(cam->fovY * 0.5f), aspect = static_cast<float>(w) / static_cast<float>(h);
+        int keep = 0;
+        for (int i = 0; i < nFl_; ++i) {
+            FlameP q = fl_[i];
+            const Settings::FlameLayer& L = s.flame[q.layer];
+            q.age += dtf;
+            if (q.age >= q.life) continue;
+            float k = q.drag > 0.f ? std::exp(-q.drag * dtf) : 1.f;
+            for (int c = 0; c < 3; ++c) q.v[c] *= k;
+            q.v[1] += L.gravity * dtf;
+            for (int c = 0; c < 3; ++c) q.p[c] += q.v[c] * dtf;
+            q.rot += q.spin * dtf;
+            fl_[keep++] = q;
+        }
+        nFl_ = keep;
+        const bool on = fp && tLastShot_ >= 0.0 && now - tLastShot_ < s.flameGap && dtf > 0.f;
+        if (on) {
+            const MuzzleFrame& f = *fp;
+            const float d = std::max(f.pos[2], 0.05f);
+            const float ox = f.pos[0] * f.xs / d * ty * aspect * d, oy = f.pos[1] * f.ys / d * ty * d;
+            const float ad = Clamp01(ads_);
+            auto mix = [ad](float hip, float foc) { return foc >= 0.f ? Lerp(hip, foc, ad) : hip; };
+            const float aimD = s.flameAimAds > 0.f ? Lerp(s.flameAim, s.flameAimAds, ad) : s.flameAim;
+            const float fan = Lerp(s.flameFan, s.flameFanAds, ad) * 0.01745329f;
+            float start[3], dir[3];
+            for (int c = 0; c < 3; ++c) {
+                start[c] = cam->eye[c] + cam->right[c] * ox + cam->up[c] * oy + cam->fwd[c] * d;
+                dir[c] = cam->eye[c] + cam->fwd[c] * aimD - start[c];
+            }
+            float dl = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+            for (float& c : dir) c /= dl > 1e-6f ? dl : 1.f;
+            float a1[3] = {dir[1] * cam->right[2] - dir[2] * cam->right[1], dir[2] * cam->right[0] - dir[0] * cam->right[2],
+                           dir[0] * cam->right[1] - dir[1] * cam->right[0]};
+            float al = std::sqrt(a1[0] * a1[0] + a1[1] * a1[1] + a1[2] * a1[2]);
+            for (float& c : a1) c /= al > 1e-6f ? al : 1.f;
+            float a2[3] = {dir[1] * a1[2] - dir[2] * a1[1], dir[2] * a1[0] - dir[0] * a1[2], dir[0] * a1[1] - dir[1] * a1[0]};
+            for (int li = 0; li < 4; ++li) {
+                const Settings::FlameLayer& L = s.flame[li];
+                const float rate = mix(L.rate, L.rateAds);
+                if (!flTex_[li] || rate <= 0.f) {
+                    flAcc_[li] = 0.f;
+                    continue;
+                }
+                flAcc_[li] += rate * dtf;
+                const float spread = mix(L.spread, L.spreadAds) * 0.01745329f;
+                while (flAcc_[li] >= 1.f && nFl_ < kMaxFlame) {
+                    flAcc_[li] -= 1.f;
+                    FlameP& q = fl_[nFl_++];
+                    float u = 0.f;
+                    if (fan > 0.f) {
+                        flPh_[li] += 0.6180339887f;
+                        if (flPh_[li] >= 1.f) flPh_[li] -= 1.f;
+                        u = flPh_[li] + Rand(-0.04f, 0.04f);
+                        u = u < 0.f ? u + 1.f : u >= 1.f ? u - 1.f : u;
+                    }
+                    const float yw = fan > 0.f ? -fan + 2.f * fan * u : 0.f, cy = std::cos(yw), sy = std::sin(yw);
+                    float th = Rand(0.f, 6.2831853f), ph = spread * std::sqrt(Rand(0.f, 1.f));
+                    float sp = Rand(mix(L.speed[0], L.speedAds[0]), mix(L.speed[1], L.speedAds[1])), sub = Rand(0.f, dtf);
+                    for (int c = 0; c < 3; ++c) {
+                        const float bd = dir[c] * cy + a2[c] * sy, b2 = a2[c] * cy - dir[c] * sy;
+                        float vd = bd * std::cos(ph) + (a1[c] * std::cos(th) + b2 * std::sin(th)) * std::sin(ph);
+                        q.v[c] = vd * sp;
+                        q.p[c] = start[c] + Rand(-L.jitter, L.jitter) + q.v[c] * sub;
+                    }
+                    q.age = sub;
+                    q.life = Rand(mix(L.life[0], L.lifeAds[0]), mix(L.life[1], L.lifeAds[1]));
+                    q.drag = mix(L.drag, L.dragAds);
+                    q.s0 = mix(L.size[0], L.sizeAds[0]);
+                    q.s1 = mix(L.size[1], L.sizeAds[1]);
+                    q.ad = ad;
+                    q.rot = Rand(0.f, 6.2831853f);
+                    q.spin = Rand(-L.spin, L.spin);
+                    q.layer = static_cast<unsigned char>(li);
+                    q.f0 = static_cast<unsigned short>(L.randFrame ? Rand(0.f, static_cast<float>(L.cx * L.cy) - 0.001f) : 0.f);
+                }
+            }
+        } else {
+            for (float& a : flAcc_) a = 0.f;
+        }
+        for (int li = 0; li < 4; ++li) {
+            flStart[li] = nv;
+            const Settings::FlameLayer& L = s.flame[li];
+            if (!flTex_[li]) continue;
+            const int nfr = L.cx * L.cy;
+            for (int i = 0; i < nFl_; ++i) {
+                const FlameP& q = fl_[i];
+                if (q.layer != li) continue;
+                float dd[3] = {q.p[0] - cam->eye[0], q.p[1] - cam->eye[1], q.p[2] - cam->eye[2]};
+                float z = dd[0] * cam->fwd[0] + dd[1] * cam->fwd[1] + dd[2] * cam->fwd[2];
+                if (z < 0.15f) continue;
+                float t = Clamp01(q.age / q.life);
+                auto mq = [&q](float hip, float foc) { return foc >= 0.f ? Lerp(hip, foc, q.ad) : hip; };
+                const float fa = mq(L.fade[0], L.fadeAds[0]), fb = mq(L.fade[1], L.fadeAds[1]), bright = mq(L.bright, L.brightAds);
+                float a = mq(L.alpha, L.alphaAds) * s.flashIntensity;
+                if (fa > 0.f && t < fa) a *= t / fa;
+                if (t > fb) a *= Clamp01((1.f - t) / std::max(1.f - fb, 1e-3f));
+                if (a <= 0.002f) continue;
+                float cx = (dd[0] * cam->right[0] + dd[1] * cam->right[1] + dd[2] * cam->right[2]) / (z * ty * aspect);
+                float cy = (dd[0] * cam->up[0] + dd[1] * cam->up[1] + dd[2] * cam->up[2]) / (z * ty);
+                float ge = L.sizeEase > 0.f ? 1.f - std::pow(1.f - t, L.sizeEase) : t;
+                float r = Lerp(q.s0, q.s1, ge);
+                float hy = r / (z * ty);
+                float ang = q.rot, hl = hy;
+                const float stretch = mq(L.stretch, L.stretchAds);
+                if (stretch > 0.f) {
+                    float e[3] = {dd[0] + q.v[0] * stretch, dd[1] + q.v[1] * stretch, dd[2] + q.v[2] * stretch};
+                    float ez = std::max(e[0] * cam->fwd[0] + e[1] * cam->fwd[1] + e[2] * cam->fwd[2], 0.15f);
+                    float ex = (e[0] * cam->right[0] + e[1] * cam->right[1] + e[2] * cam->right[2]) / (ez * ty * aspect);
+                    float ey = (e[0] * cam->up[0] + e[1] * cam->up[1] + e[2] * cam->up[2]) / (ez * ty);
+                    float sx = (ex - cx) * aspect, sy = ey - cy, sl = std::sqrt(sx * sx + sy * sy);
+                    if (sl > 1e-5f) ang = std::atan2(sy, sx), hl = hy + sl * 0.5f;
+                }
+                int fr = L.fps > 0.f ? (q.f0 + static_cast<int>(q.age * L.fps)) % nfr : std::min(nfr - 1, static_cast<int>(t * nfr));
+                float u0 = static_cast<float>(fr % L.cx) / L.cx, v0 = static_cast<float>(fr / L.cx) / L.cy;
+                float u1 = u0 + 1.f / L.cx, v1 = v0 + 1.f / L.cy;
+                float col[3];
+                for (int c = 0; c < 3; ++c) col[c] = Lerp(L.col0[c], L.col1[c], t);
+                float ca = std::cos(ang), sa = std::sin(ang);
+                const float cs[4][2] = {{-1, 1}, {1, 1}, {-1, -1}, {1, -1}};
+                const float tc[4][2] = {{u0, v0}, {u1, v0}, {u0, v1}, {u1, v1}};
+                FlashVertex q4[4];
+                for (int k = 0; k < 4; ++k) {
+                    float ix = cs[k][0] * hl * ca - cs[k][1] * hy * sa, iy = cs[k][0] * hl * sa + cs[k][1] * hy * ca;
+                    q4[k] = {cx + ix / aspect, cy + iy, tc[k][0], tc[k][1], col[0], col[1], col[2], a, L.additive ? 1.f : 0.f, bright, 0.9999f};
+                }
+                const int idx[6] = {0, 1, 2, 2, 1, 3};
+                for (int k = 0; k < 6; ++k) verts[nv++] = q4[idx[k]];
+            }
+            flCount[li] = nv - flStart[li];
+        }
     }
     int counts[kFlashTexCount] = {}, starts[kFlashTexCount] = {};
     const int order[10] = {kFlashTexDistHaze, kFlashTexDistRing, kFlashTexSmoke, kFlashTexGasWisp, kFlashTexGasPuff,
@@ -4006,6 +4335,11 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
         ctx->PSSetShaderResources(0, 1, &tex_[kFlashTexSmoke]);
         ctx->Draw(static_cast<UINT>(imCount), static_cast<UINT>(imStart));
     }
+    for (int li = 0; li < 4; ++li) {
+        if (!flCount[li] || !flTex_[li]) continue;
+        ctx->PSSetShaderResources(0, 1, &flTex_[li]);
+        ctx->Draw(static_cast<UINT>(flCount[li]), static_cast<UINT>(flStart[li]));
+    }
     for (int oi = 2; oi < 10; ++oi) {
         int tx = order[oi];
         if (!counts[tx] || !tex_[tx]) continue;
@@ -4040,6 +4374,8 @@ void MuzzleFlash::Release() {
     SafeRelease(dssDepth_);
     SafeRelease(samp_);
     for (int i = 0; i < kFlashTexCount; ++i) SafeRelease(tex_[i]);
+    for (auto& t : flTex_) SafeRelease(t);
+    nFl_ = 0;
     scene_ = nullptr;
     sceneDepth_ = nullptr;
     burst_ = 0;
