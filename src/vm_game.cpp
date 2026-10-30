@@ -3738,10 +3738,11 @@ int ShotPattern(float adsW, const float fwd[3], const float right[3], const floa
     if (focus) *focus = foc;
     return n;
 }
-bool WeaponBurst(int idx, float* minDist, float* scatterAds) {
+bool WeaponBurst(int idx, float* minDist, float* scatterAds, int* pierceAds) {
     if (idx < 0 || idx >= g_modelCount || !g_w[idx].set.burst) return false;
     if (minDist) *minDist = g_w[idx].set.burstMin;
     if (scatterAds) *scatterAds = g_w[idx].set.burstScatterAds;
+    if (pierceAds) *pierceAds = g_w[idx].set.burstPierceAds;
     return true;
 }
 float BurstDistance(float minDist, float range) {

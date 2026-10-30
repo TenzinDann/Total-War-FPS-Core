@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include "shield_hit.h"
+#include "burst_pierce.h"
 #include "vm_game.h"
 #include "cast_marker.h"
 #include "game_volume.h"
@@ -1958,7 +1959,14 @@ struct AimHit {
     unsigned units = 0, ents = 0;
     unsigned snapCulled = 0;
 };
-AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispLag, bool groundOnly = false);
+struct LineHits {
+    static constexpr int kMax = 64;
+    int n = 0;
+    float t[kMax];
+    uintptr_t ent[kMax];
+    float vel[kMax][2];
+};
+AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispLag, bool groundOnly = false, LineHits* line = nullptr);
 constexpr uintptr_t kSimTickCall904 = 0x2dd393f;
 const unsigned char kSimTickCallBytes[20] = {0x48, 0x8b, 0x87, 0x30, 0x04, 0x00, 0x00, 0x48, 0x8b, 0x48,
                                              0x58, 0x48, 0x8b, 0x01, 0xff, 0x90, 0xb0, 0x01, 0x00, 0x00};
@@ -3297,6 +3305,7 @@ struct BurstStats {
     double t0 = 0;
     unsigned hip = 0, hipCut = 0, focus = 0, focusEnt = 0, refused = 0;
     float hipSum = 0, scatSum = 0;
+    unsigned lines = 0, lineSoldiers = 0, pierce = 0;
     int logs = 0;
 } g_bst;
 bool FireBurst(const float eye[3], const float dir[3], float range, bool focus, float minDist, float scatter) {
@@ -3394,15 +3403,100 @@ bool FireBurst(const float eye[3], const float dir[3], float range, bool focus, 
             low ? "ground + 0.4 m" : "in the air", c.launch[0], c.launch[1], c.launch[2]);
     if (g_bst.t0 <= 0.0) g_bst.t0 = now;
     if (now - g_bst.t0 >= 3.0) {
-        Log("fire: bursts in %.1f s: hip %u (cut by ground / wall %u, distance avg %.1f m), focus %u (on soldier %u, scatter avg %.2f m), refused %u",
+        Log("fire: bursts in %.1f s: hip %u (cut by ground / wall %u, distance avg %.1f m), focus %u (on soldier %u, scatter avg %.2f m), "
+            "pierce %u on %u lines (soldiers on line avg %.1f), refused %u",
             now - g_bst.t0, g_bst.hip, g_bst.hipCut, g_bst.hip ? g_bst.hipSum / static_cast<float>(g_bst.hip) : 0.f, g_bst.focus, g_bst.focusEnt,
-            g_bst.focus ? g_bst.scatSum / static_cast<float>(g_bst.focus) : 0.f, g_bst.refused);
+            g_bst.focus ? g_bst.scatSum / static_cast<float>(g_bst.focus) : 0.f, g_bst.pierce, g_bst.lines,
+            g_bst.lines ? static_cast<float>(g_bst.lineSoldiers) / static_cast<float>(g_bst.lines) : 0.f, g_bst.refused);
         const int logs = g_bst.logs;
         g_bst = BurstStats();
         g_bst.t0 = now;
         g_bst.logs = logs;
     }
     return ok != 0;
+}
+bool IssueBurstAt(const float eye[3], float burst[3], bool fast, uintptr_t queue) {
+    float gh = 0.f;
+    const bool low = SurfaceNear(burst[0], burst[2], eye[1] - cfg.eyeHeight, &gh) && burst[1] < gh + 2.5f && burst[1] > gh - 5.f;
+    if (low) burst[1] = gh + kMeleeBurstUp;
+    const float from[3] = {eye[0], eye[1] - 0.5f, eye[2]};
+    float v[3], vl = 0.f;
+    for (int i = 0; i < 3; ++i) {
+        v[i] = burst[i] - from[i];
+        vl += v[i] * v[i];
+    }
+    vl = std::sqrt(vl);
+    if (vl < 0.1f) return false;
+    FireCmd c;
+    memset(&c, 0, sizeof c);
+    c.vt = g_base + kVtFireCmd;
+    c.projId = S.fpProjId;
+    c.f0c = 6.2831855f;
+    for (int i = 0; i < 3; ++i) {
+        c.launch[i] = burst[i] - v[i] / vl * kMeleeFlight;
+        c.target[i] = burst[i];
+    }
+    c.tgtIsPos = 1;
+    c.shooter = S.entity;
+    using FnIssue = unsigned char (*)(uintptr_t queue, FireCmd* cmd);
+    const bool viaFast = fast && FastFireQueue(&c);
+    const unsigned char ok = viaFast ? 1 : reinterpret_cast<FnIssue>(g_base + kFnIssueCmd)(queue, &c);
+    S.lastShotFast = viaFast;
+    return ok != 0;
+}
+constexpr float kPierceGap = 1.5f;
+int FireBurstLine(const float eye[3], const float dir[3], float range, int maxBursts) {
+    uintptr_t sb = Ptr(g_base + kGlobalScript);
+    uintptr_t battle = sb ? Ptr(sb + oScriptBattle) : 0;
+    uintptr_t queue = battle ? Ptr(battle + oBattleCmdQueue) : 0;
+    unsigned char no1 = 1, no2 = 1;
+    if (battle) {
+        Rd(battle + oBattleNoCmd1, no1);
+        Rd(battle + oBattleNoCmd2, no2);
+    }
+    int32_t entId = 0;
+    if (S.entity) Rd(S.entity + oEntId, entId);
+    if (!battle || !queue || no1 || no2 || !S.fpProj || S.fpProjId < 0 || !FireOwner() || !entId || maxBursts <= 0) return 0;
+    if (!(range > 0.f)) range = cfg.fireRange;
+    const float period = StepPeriod();
+    float toNext = LastStepTime() > 0 ? static_cast<float>(LastStepTime() + period - Now()) : period * 0.5f;
+    if (toNext < 0.f) toNext = 0.f;
+    if (toNext > period) toNext = period;
+    float dispLag = cfg.displayLag - (period - toNext);
+    if (dispLag < 0.f) dispLag = 0.f;
+    const bool fast = FastFireReady(battle);
+    LineHits line;
+    AimHit hit = TraceAim(eye, dir, range, dispLag, false, &line);
+    ++g_bst.lines;
+    g_bst.lineSoldiers += static_cast<unsigned>(line.n);
+    if (!hit.ent || line.n < 2) return 0;
+    for (int i = 1; i < line.n; ++i)
+        for (int j = i; j > 0 && line.t[j] < line.t[j - 1]; --j) {
+            std::swap(line.t[j], line.t[j - 1]);
+            std::swap(line.ent[j], line.ent[j - 1]);
+            std::swap(line.vel[j][0], line.vel[j - 1][0]);
+            std::swap(line.vel[j][1], line.vel[j - 1][1]);
+        }
+    int pick[LineHits::kMax];
+    const int k = pierce::Select(line.t, line.n, hit.dist, kPierceGap, std::min(maxBursts, LineHits::kMax), pick);
+    float leadT = 0.f;
+    if (cfg.autoLead) {
+        const float steps = (fast ? 1.0f : 2.5f) - (EarlyFlightActive() || mp::EarlyFlightOn() ? 1.0f : 0.0f) -
+                            (fast && InstantFireActive(battle) ? 1.0f : 0.0f);
+        leadT = (toNext + period * steps + cfg.displayLag) * cfg.leadScale + cfg.leadExtra;
+        if (leadT < 0.f) leadT = 0.f;
+    }
+    int issued = 0;
+    for (int j = 0; j < k; ++j) {
+        const int i = pick[j];
+        float burst[3] = {eye[0] + dir[0] * line.t[i] + line.vel[i][0] * leadT, eye[1] + dir[1] * line.t[i],
+                          eye[2] + dir[2] * line.t[i] + line.vel[i][1] * leadT};
+        if (IssueBurstAt(eye, burst, fast, queue)) ++issued;
+    }
+    g_bst.pierce += static_cast<unsigned>(issued);
+    if (g_bst.logs++ < 40)
+        Log("fire: pierce line: %d soldiers up to %.1f m (first at %.1f m) -> %d of %d bursts issued", line.n, line.t[line.n - 1], hit.dist, issued, k);
+    return issued;
 }
 constexpr double kShotGuardWindow = 0.35;
 constexpr float kShotFirstLeg = 24.f;
@@ -4393,7 +4487,7 @@ void VelStep(uintptr_t battle, const float eye[3], const float fwd[3]) {
         }
     }
 }
-AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispLag, bool groundOnly) {
+AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispLag, bool groundOnly, LineHits* line) {
     AimHit h;
     h.dist = range;
     uintptr_t battle = 0;
@@ -4431,6 +4525,7 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
         if (known) prev = t;
     }
     if (groundOnly) return h;
+    const float lineEnd = h.dist;
     int heroAl = -1;
     unsigned n = CollectUnits(battle, &heroAl);
     h.units = n;
@@ -4452,7 +4547,7 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
                 float t = ((qx - eye[0]) * hx + (qz - eye[2]) * hz) / hh;
                 float px = eye[0] + fwd[0] * t - qx, pz = eye[2] + fwd[2] * t - qz;
                 const float out = 0.55f + kAimSnapSlack;
-                if (px * px + pz * pz > out * out || t < 1.f - snapT || t >= h.dist + snapT) {
+                if (px * px + pz * pz > out * out || t < 1.f - snapT || t >= (line ? lineEnd : h.dist) + snapT) {
                     ++h.ents;
                     ++h.snapCulled;
                     return;
@@ -4466,9 +4561,27 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
         float qx = q[0] - vel[0] * dispLag, qz = q[2] - vel[1] * dispLag;
         float v[3] = {qx - eye[0], q[1] - eye[1], qz - eye[2]};
         float t = hh > 1e-6f ? (v[0] * hx + v[2] * hz) / hh : v[0] * fwd[0] + v[1] * fwd[1] + v[2] * fwd[2];
-        if (t < 1.f || t >= h.dist) return;
+        if (t < 1.f || t >= (line ? lineEnd : h.dist)) return;
         float px = eye[0] + fwd[0] * t - qx, pz = eye[2] + fwd[2] * t - qz, py = eye[1] + fwd[1] * t;
         if (px * px + pz * pz > 0.55f * 0.55f || py < q[1] || py > q[1] + 2.1f) return;
+        if (line) {
+            int slot = line->n;
+            if (slot < LineHits::kMax) {
+                ++line->n;
+            } else {
+                slot = 0;
+                for (int i = 1; i < LineHits::kMax; ++i)
+                    if (line->t[i] > line->t[slot]) slot = i;
+                if (t >= line->t[slot]) slot = -1;
+            }
+            if (slot >= 0) {
+                line->t[slot] = t;
+                line->ent[slot] = e;
+                line->vel[slot][0] = hasVel ? vel[0] : 0.f;
+                line->vel[slot][1] = hasVel ? vel[1] : 0.f;
+            }
+        }
+        if (t >= h.dist) return;
         h.dist = t;
         h.what = "soldier";
         h.ent = e;
@@ -4485,7 +4598,7 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
             float v[3] = {q[0] - eye[0], q[1] - eye[1], q[2] - eye[2]};
             float t = v[0] * fwd[0] + v[1] * fwd[1] + v[2] * fwd[2];
             float c[3] = {v[0] - fwd[0] * t, v[1] - fwd[1] * t, v[2] - fwd[2] * t};
-            if (t < -40.f || t > h.dist + 40.f || c[0] * c[0] + c[1] * c[1] + c[2] * c[2] > 1600.f) continue;
+            if (t < -40.f || t > (line ? lineEnd : h.dist) + 40.f || c[0] * c[0] + c[1] * c[1] + c[2] * c[2] > 1600.f) continue;
         }
         for (unsigned k = 0; k < ne; ++k) test(ents[k]);
     }
@@ -7246,12 +7359,14 @@ void Apply(uintptr_t mgr) {
         if (focus && S.fpProjAds) S.fpProj = S.fpProjAds, S.fpProjId = S.fpProjAdsId;
         int fired = 0;
         float bmin = 0.f, bscatter = 0.f;
-        const bool burstMode = vmgame::WeaponBurst(vmgame::CurrentWeapon(), &bmin, &bscatter);
+        int bpierce = 0;
+        const bool burstMode = vmgame::WeaponBurst(vmgame::CurrentWeapon(), &bmin, &bscatter, &bpierce);
         for (int k = 0; k < nShot; ++k)
             fired += (burstMode ? FireBurst(eye, sdirs[k], srange, focus, bmin, bscatter)
                                 : FireShot(eye, sdirs[k], right, camUp, bodies, nb, clearance, srange))
                          ? 1
                          : 0;
+        if (burstMode && focus && bpierce > 0 && fired) FireBurstLine(eye, sdirs[0], srange, bpierce);
         S.fpProj = hipProj;
         S.fpProjId = hipProjId;
         if (fired) {
