@@ -47,6 +47,10 @@ void* g_orig_hero_1c8;
 uintptr_t g_hero_1c8_ret1, g_hero_1c8_ret2;
 void hfps_hero_1c8_thunk();
 void hfps_hero_melee(uintptr_t self, uintptr_t pend);
+void* g_orig_after_step;
+uintptr_t g_after_step_ret;
+void hfps_after_step_thunk();
+void hfps_after_step_pre(uintptr_t self, uintptr_t battle);
 }
 namespace {
 struct CodePrint {
@@ -524,6 +528,7 @@ struct Config {
     float pinnedClearance = 1.0f;
     float tpShotGuard = 1.1f;
     bool fastFire = true;
+    bool instantFire = true;
     bool earlyFlight = true;
     bool mpForce = false;
     bool autoLead = true;
@@ -710,10 +715,16 @@ float IniF(const wchar_t* sec, const wchar_t* key, float def, const wchar_t* ini
 void LoadMeleeCats(const wchar_t* ini);
 extern float g_meleeTargetRadiusMax;
 LONG g_cfgGen = 0;
+const wchar_t* MainIniName() {
+#ifdef HFPS_PACK_ASSETS
+    return packx::MainIniName();
+#else
+    return L"tenzin_fps.ini";
+#endif
+}
 void LoadConfig() {
     wchar_t ini[MAX_PATH];
-    wcscpy(ini, g_dir);
-    wcscat(ini, L"\\tenzin_fps.ini");
+    swprintf(ini, MAX_PATH, L"%ls\\%ls", g_dir, MainIniName());
     InterlockedIncrement(&g_cfgGen);
     cfg.enabled = GetPrivateProfileIntW(L"general", L"enabled", 1, ini) != 0;
     UINT key = GetPrivateProfileIntW(L"general", L"toggle_key", VK_F6, ini);
@@ -805,6 +816,7 @@ void LoadConfig() {
     cfg.tpShotGuard = IniF(L"fire", L"teleport_guard", cfg.tpShotGuard, ini);
     cfg.fastFire = GetPrivateProfileIntW(L"fire", L"fast_fire", 1, ini) != 0;
     cfg.earlyFlight = GetPrivateProfileIntW(L"fire", L"early_flight", 1, ini) != 0;
+    cfg.instantFire = GetPrivateProfileIntW(L"fire", L"instant", 1, ini) != 0;
     cfg.mpForce = GetPrivateProfileIntW(L"mp", L"force_mp_mode", 0, ini) != 0;
     cfg.autoLead = GetPrivateProfileIntW(L"fire", L"auto_lead", 1, ini) != 0;
     cfg.leadExtra = IniF(L"fire", L"lead_extra", cfg.leadExtra, ini);
@@ -1218,6 +1230,7 @@ struct State {
     double tLastTp = 0;
     unsigned tpSent = 0, tpFailed = 0, tpLogs = 0, leashHits = 0;
     int lastMode = -1;
+    float eyeHeight = 1.75f;
     bool flyer = false;
     TpRec tpHist[32] = {};
     unsigned tpHead = 0;
@@ -1512,6 +1525,9 @@ void EarlyFlightUninstall(const char* why);
 long EarlyFlightCalls();
 long EarlyFlightPromoted();
 void FastFireStats(bool force);
+bool InstantFireInstall(uintptr_t battle);
+void InstantFireUninstall(const char* why);
+bool InstantFireActive(uintptr_t battle);
 const char* ModeName(int m);
 void ReleaseHero(int mode, const char* why);
 void ExitSequenceStep(uintptr_t mgr);
@@ -1519,6 +1535,7 @@ void LauncherReset();
 void Exit(uintptr_t mgr, const char* why, bool release = true) {
     if (!S.active) return;
     LauncherReset();
+    InstantFireUninstall(why);
     FastFireUninstall(why);
     EarlyFlightUninstall(why);
     herofx::Uninstall(why);
@@ -1557,6 +1574,36 @@ void Exit(uintptr_t mgr, const char* why, bool release = true) {
     vmgame::SetFirstPerson(false);
     Log("FPS exit reason=%s restoredPrev=%d active=%p prev=%p", why, restored, (void*)active,
         (void*)S.prevActive);
+}
+struct UnitKeyRec {
+    uintptr_t unit;
+    char key[48];
+};
+UnitKeyRec g_unitKeyTab[64];
+int g_unitKeyNext = 0;
+SRWLOCK g_unitKeyLock = SRWLOCK_INIT;
+void RememberUnitKey(uintptr_t unit, const char* key) {
+    AcquireSRWLockExclusive(&g_unitKeyLock);
+    int slot = -1;
+    for (int i = 0; i < 64 && slot < 0; ++i)
+        if (g_unitKeyTab[i].unit == unit) slot = i;
+    if (slot < 0) slot = g_unitKeyNext, g_unitKeyNext = (g_unitKeyNext + 1) % 64;
+    g_unitKeyTab[slot].unit = unit;
+    snprintf(g_unitKeyTab[slot].key, sizeof g_unitKeyTab[slot].key, "%s", key);
+    ReleaseSRWLockExclusive(&g_unitKeyLock);
+}
+void ForgetUnitKeys() {
+    AcquireSRWLockExclusive(&g_unitKeyLock);
+    memset(g_unitKeyTab, 0, sizeof g_unitKeyTab);
+    g_unitKeyNext = 0;
+    ReleaseSRWLockExclusive(&g_unitKeyLock);
+}
+void UnitKeyOf(uintptr_t unit, char* out, size_t n) {
+    out[0] = 0;
+    AcquireSRWLockShared(&g_unitKeyLock);
+    for (int i = 0; i < 64; ++i)
+        if (unit && g_unitKeyTab[i].unit == unit) snprintf(out, n, "%s", g_unitKeyTab[i].key);
+    ReleaseSRWLockShared(&g_unitKeyLock);
 }
 bool HeroRouting(uintptr_t unit, int* state = nullptr) {
     int32_t st = -1;
@@ -1620,6 +1667,14 @@ void Enter(uintptr_t mgr) {
             return;
         }
         Log("enter: lord / hero check passed (IsCharacter key len %d, IsGeneral %d)", keyLen, general ? 1 : 0);
+    }
+    char heroKey[48];
+    UnitKeyOf(unit, heroKey, sizeof heroKey);
+    if (!vmgame::UnitAllowed(heroKey)) {
+        Refuse(kRefuseNotOwner);
+        Log("enter refused: unit %p (unit key '%s') is not a weapon pack's hero - without hero_fps.pack only those heroes may enter (allowed: %s)",
+            (void*)unit, heroKey, vmgame::UnitKeys());
+        return;
     }
     int moraleState = -1;
     if (HeroRouting(unit, &moraleState)) {
@@ -1749,6 +1804,9 @@ void Enter(uintptr_t mgr) {
     SetupMouse();
     CastReset();
     S.active = true;
+    vmgame::SetHeroKey(heroKey);
+    S.eyeHeight = vmgame::EyeHeightFor(heroKey, cfg.eyeHeight);
+    if (S.eyeHeight != cfg.eyeHeight) Log("enter: eye height %.3f m for '%s' (weapon pack [character]; config %.2f)", S.eyeHeight, heroKey, cfg.eyeHeight);
     if (S.mpMode) mp::QueueOn(S.unit);
     vmgame::SetFirstPerson(true);
     if (S.exitStage == 2) {
@@ -1774,6 +1832,7 @@ void Enter(uintptr_t mgr) {
         uintptr_t sbf = Ptr(g_base + kGlobalScript);
         if (cfg.fastFire && g_shotOk && !S.mpMode) FastFireInstall(sbf ? Ptr(sbf + oScriptBattle) : 0);
         if (cfg.earlyFlight && g_shotOk && cfg.fireShooter && !S.mpMode) EarlyFlightInstall(sbf ? Ptr(sbf + oScriptBattle) : 0, entity);
+        if (cfg.instantFire && g_shotOk && !S.mpMode) InstantFireInstall(sbf ? Ptr(sbf + oScriptBattle) : 0);
         if (S.mpMode)
             Log("mp: multiplayer path - ammo flags, shield / no-knockdown / super armor, melee by message (FPS_ON / KEEP / SHIELD / MELEE / FPS_OFF); "
                 "off until they are message-driven: fast fire, ghost mode, bullet speed rewrite, "
@@ -2145,6 +2204,100 @@ bool EarlyFlightActive() {
     QueryPerformanceCounter(&q);
     return q.QuadPart - g_ef.lastQpc < g_qpf.QuadPart / 2;
 }
+constexpr uintptr_t kAfterStepCall904 = 0x2dd3618, kAfterStepRet904 = 0x2dd3628, kExecCmdBlock904 = 0x2f041c0, kVtCmdReader904 = 0x3904438,
+                    kProjStep904 = 0x30ba364, oBattleAfterObj = 0x64558, oBattleWorld = 0x440, kAfterStepSlot = 0x288;
+const unsigned char kAfterStepCallBytes[16] = {0x48, 0x8b, 0x8f, 0x58, 0x45, 0x06, 0x00, 0x48, 0x8b, 0x01, 0xff, 0x90, 0x88, 0x02, 0x00, 0x00};
+struct InstantFire {
+    int siteState = 0;
+    uintptr_t obj = 0, origVt = 0, battle = 0;
+    uintptr_t* vtCopy = nullptr;
+    uintptr_t vtCopyOf = 0;
+    volatile LONG calls = 0, shots = 0, bullets = 0;
+    volatile LONG64 lastQpc = 0;
+    double latSum = 0, latMax = 0, tStat = 0;
+    unsigned latN = 0;
+} g_if;
+alignas(16) unsigned char g_ifBuf[0x5010];
+bool InstantFireInstall(uintptr_t battle) {
+    if (!cfg.instantFire || !battle) return false;
+    if (!g_ff.obj || g_ff.battle != battle || !g_ef.obj) {
+        Log("instant-fire: needs fast fire + early flight hooked first (fast fire %p, early flight %p) - off", (void*)g_ff.obj, (void*)g_ef.obj);
+        return false;
+    }
+    if (g_if.siteState == 0) {
+        unsigned char b[16] = {};
+        for (int i = 0; i < 16; ++i) Rd(g_base + kAfterStepCall904 + i, b[i]);
+        g_if.siteState = memcmp(b, kAfterStepCallBytes, 16) ? -1 : 1;
+        if (g_if.siteState > 0) g_after_step_ret = g_base + kAfterStepRet904;
+        Log("instant-fire: after_step call site %s (+%llx)", g_if.siteState > 0 ? "verified" : "NOT matching (other game version) - instant fire off",
+            (unsigned long long)kAfterStepCall904);
+    }
+    if (g_if.siteState < 0) return false;
+    uintptr_t obj = Ptr(battle + oBattleAfterObj), vt = obj ? Ptr(obj) : 0;
+    uintptr_t lo = 0, hi = 0;
+    if (!vt || !CodeRange(&lo, &hi)) {
+        Log("instant-fire: after_step object not found (obj %p vt %p)", (void*)obj, (void*)vt);
+        return false;
+    }
+    if (g_if.vtCopy && vt == reinterpret_cast<uintptr_t>(g_if.vtCopy + 1)) {
+        g_if.obj = obj;
+        g_if.battle = battle;
+        return true;
+    }
+    size_t slots = 0;
+    while (slots < 2048) {
+        uintptr_t f = Ptr(vt + 8 * slots);
+        if (f < lo || f >= hi) break;
+        ++slots;
+    }
+    if (slots <= kAfterStepSlot / 8) {
+        Log("instant-fire: after_step object %p vtable %p has only %zu slots - not hooking", (void*)obj, (void*)vt, slots);
+        return false;
+    }
+    if (!g_if.vtCopy || g_if.vtCopyOf != vt) {
+        size_t copyN = slots + 16 > 256 ? slots + 16 : 256;
+        auto* c = static_cast<uintptr_t*>(VirtualAlloc(nullptr, (copyN + 1) * sizeof(uintptr_t), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!c) return false;
+        c[0] = Ptr(vt - 8);
+        for (size_t i = 0; i < copyN; ++i) c[1 + i] = Ptr(vt + 8 * i);
+        g_orig_after_step = reinterpret_cast<void*>(c[1 + kAfterStepSlot / 8]);
+        c[1 + kAfterStepSlot / 8] = reinterpret_cast<uintptr_t>(&hfps_after_step_thunk);
+        DWORD old;
+        VirtualProtect(c, (copyN + 1) * sizeof(uintptr_t), PAGE_READONLY, &old);
+        g_if.vtCopy = c;
+        g_if.vtCopyOf = vt;
+    }
+    g_if.battle = battle;
+    g_if.calls = g_if.shots = g_if.bullets = 0;
+    g_if.latSum = g_if.latMax = 0;
+    g_if.latN = 0;
+    g_if.tStat = Now();
+    if (!Wr(obj, reinterpret_cast<uintptr_t>(g_if.vtCopy + 1))) {
+        Log("instant-fire: vtable write failed on %p", (void*)obj);
+        g_if.battle = 0;
+        return false;
+    }
+    g_if.obj = obj;
+    g_if.origVt = vt;
+    Log("instant-fire: hooked after_step object %p (vt +%llx, %zu slots, [+0x288] = +%llx) via vtable copy %p", (void*)obj,
+        (unsigned long long)(vt - g_base), slots, (unsigned long long)(reinterpret_cast<uintptr_t>(g_orig_after_step) - g_base),
+        (void*)(g_if.vtCopy + 1));
+    return true;
+}
+void InstantFireUninstall(const char* why) {
+    if (!g_if.obj) return;
+    if (g_if.vtCopy && Ptr(g_if.obj) == reinterpret_cast<uintptr_t>(g_if.vtCopy + 1)) Wr(g_if.obj, g_if.origVt);
+    Log("instant-fire: unhooked after_step object %p (%s): after_step calls %ld, shots executed there %ld, bullets stepped %ld", (void*)g_if.obj,
+        why, g_if.calls, g_if.shots, g_if.bullets);
+    g_if.battle = 0;
+    g_if.obj = 0;
+}
+bool InstantFireActive(uintptr_t battle) {
+    if (!g_if.obj || g_if.battle != battle) return false;
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    return q.QuadPart - g_if.lastQpc < g_qpf.QuadPart / 2;
+}
 bool FastFireQueue(FireCmd* c) {
     using FnIssue = unsigned char (*)(uintptr_t queue, FireCmd* cmd);
     *reinterpret_cast<uint32_t*>(g_fakeQueue + 0x5008) = 0;
@@ -2326,6 +2479,42 @@ float ShieldAngleNow() {
     }
     return cfg.shieldAngle;
 }
+static_assert(vmgame::kStrikeKinds * 7 + 5 == vmgame::kMeleeOwnN, "meleeOwn 下标 = 种类 × 7 + 项，再 5 项类别级");
+bool MeleeCatOwn(int cat, MeleeCatCfg* out) {
+    float o[vmgame::kMeleeOwnN];
+    if (!vmgame::MeleeOwnNow(o)) return false;
+    MeleeCatCfg m = MeleeCatEff(cat);
+    for (int k = 0; k < vmgame::kStrikeKinds; ++k) {
+        const float* f = o + k * 7;
+        MeleeKindCfg& x = m.k[k];
+        if (f[0] >= 0.f) {
+            x.reach = f[0] + g_meleeReachAdd[cat];
+            if (x.reach < 0.3f) x.reach = 0.3f;
+        }
+        if (f[1] >= 0.f) x.halfDeg = f[1] * 0.5f;
+        if (f[2] >= 0.f) x.dmg = f[2], x.damage = f[2] > 0.f;
+        if (f[3] >= 0.f) x.maxHit = static_cast<int>(f[3] + 0.5f);
+        if (f[4] >= 0.f) x.splashR = f[4];
+        if (f[5] >= 0.f) x.splashDmg = f[5];
+        if (f[6] >= 0.f) x.splashMax = static_cast<int>(f[6] + 0.5f);
+    }
+    const float* c = o + vmgame::kStrikeKinds * 7;
+    if (c[0] >= 0.f) m.damageScale = c[0] * g_meleeDmgMul[cat];
+    if (c[1] >= 0.f) m.fallback = c[1];
+    if (c[2] >= 0.f) m.alwaysHit = c[2] > 0.5f;
+    if (c[4] >= 0.f) m.blockAngle = c[4];
+    *out = m;
+    return true;
+}
+MeleeCatCfg MeleeCatNow(int cat) {
+    MeleeCatCfg m = {};
+    return MeleeCatOwn(cat, &m) ? m : MeleeCatEff(cat);
+}
+float ShieldAngleNowOwn() {
+    float o[vmgame::kMeleeOwnN];
+    if (vmgame::MeleeActive() && vmgame::MeleeOwnNow(o) && o[vmgame::kStrikeKinds * 7 + 4] >= 0.f) return o[vmgame::kStrikeKinds * 7 + 4];
+    return ShieldAngleNow();
+}
 struct MeleeReq {
     int kind;
     int cat;
@@ -2339,6 +2528,8 @@ struct MeleeReq {
     bool quiet = false;
     uint32_t mpFrom = 0, mpSeq = 0;
     uintptr_t mpUnit = 0;
+    bool own = false;
+    MeleeCatCfg ownCc = {};
 };
 struct MeleeQueue {
     SRWLOCK lock = SRWLOCK_INIT;
@@ -2365,6 +2556,7 @@ bool MeleeEngineQueue(int kind, int cat, const float eye[3], const float fwd[3])
     float hx = fwd[0], hz = fwd[2], hl = std::sqrt(hx * hx + hz * hz);
     if (kind < 0 || kind >= vmgame::kStrikeKinds || hl < 1e-3f || !S.entity) return false;
     MeleeReq r = {kind, cat, eye[0], eye[1], eye[2], hx / hl, hz / hl, S.entity, Now()};
+    r.own = MeleeCatOwn(cat, &r.ownCc);
     AcquireSRWLockExclusive(&g_mq.lock);
     bool ok = g_mq.n < 8;
     if (ok) g_mq.q[g_mq.n++] = r;
@@ -2614,7 +2806,7 @@ void MeleeEngineRun(uintptr_t world, uintptr_t hero, const MeleeReq* reqs, int n
         const MeleeReq& rq = reqs[ri];
         if (rq.hero != hero || (!rq.cc && Now() - rq.t > 0.6)) continue;
         const int cat = rq.cat >= 0 && rq.cat < vmgame::kMeleeCats ? rq.cat : vmgame::kMeleeCatSword;
-        const MeleeKindCfg arc = (rq.cc ? *rq.cc : MeleeCatEff(cat)).k[rq.kind];
+        const MeleeKindCfg arc = (rq.cc ? *rq.cc : rq.own ? rq.ownCc : MeleeCatEff(cat)).k[rq.kind];
         org[no][0] = rq.ox, org[no][1] = rq.oz;
         org[no][2] = arc.reach + (arc.splashR > 0.f && arc.splashMax > 0 ? arc.splashR : 0.f) + MeleeBigSlack(rq.cc ? rq.rmax : g_meleeTargetRadiusMax);
         if (rq.cc) anyMp = true;
@@ -2632,7 +2824,7 @@ void MeleeEngineRun(uintptr_t world, uintptr_t hero, const MeleeReq* reqs, int n
         }
         const int cat = rq.cat >= 0 && rq.cat < vmgame::kMeleeCats ? rq.cat : vmgame::kMeleeCatSword;
         const float rmax = rq.cc ? rq.rmax : g_meleeTargetRadiusMax;
-        const MeleeCatCfg cc = rq.cc ? *rq.cc : MeleeCatEff(cat);
+        const MeleeCatCfg cc = rq.cc ? *rq.cc : rq.own ? rq.ownCc : MeleeCatEff(cat);
         const MeleeKindCfg& arc = cc.k[rq.kind];
         const bool heavy = rq.kind == vmgame::kStrikeHeavySweep || rq.kind == vmgame::kStrikeHeavy;
         const float splashR = arc.splashR, splashDmg = arc.splashDmg;
@@ -2770,9 +2962,9 @@ void MeleeEngineRun(uintptr_t world, uintptr_t hero, const MeleeReq* reqs, int n
         InterlockedExchangeAdd(&g_mq.kills, kills + sKills);
         if (!rq.quiet) vmgame::MeleeHitFeedback(hits + sHits);
         if (g_mq.logs++ < 200)
-            Log("melee-engine: cat %d kind %d %s (reach %.2f m, arc %.0f, splash %.1f m x%d) (%.0f ms after queue) scanned %u (units %u, %u skipped far, %.2f ms), "
+            Log("melee-engine: cat %d%s kind %d %s (reach %.2f m, arc %.0f, splash %.1f m x%d) (%.0f ms after queue) scanned %u (units %u, %u skipped far, %.2f ms), "
                 "in arc %d (candidates: %d mounts, %d big), hit %d, killed %d, damage [%s] | splash hit %d, killed %d [%s] (forced hits so far %ld, fallback damage so far %ld)",
-                cat, rq.kind, heavy ? "heavy" : "light", reach, arc.halfDeg * 2.f, splashR, splashMax, (Now() - rq.t) * 1000.0, scanned, unitsAll,
+                cat, rq.own ? " own" : "", rq.kind, heavy ? "heavy" : "light", reach, arc.halfDeg * 2.f, splashR, splashMax, (Now() - rq.t) * 1000.0, scanned, unitsAll,
                 unitsSkipped, gatherMs, inArc, nMount, nBig, hits, kills, dl, sHits, sKills, sl, g_mq.forced, g_mq.fallback);
         if (rq.cc) mp::MeleeResult(rq.mpFrom, rq.mpSeq, rq.mpUnit, rq.kind, hits, kills, sHits, sKills, dl, sl);
     }
@@ -3055,7 +3247,8 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     float aim[3] = {eye[0] + fwd[0] * hit.dist, eye[1] + fwd[1] * hit.dist, eye[2] + fwd[2] * hit.dist};
     float leadT = 0.f, lead[2] = {0.f, 0.f};
     if (cfg.autoLead && hit.ent && (hit.vel[0] != 0.f || hit.vel[1] != 0.f)) {
-        float steps = (fast ? 1.0f : 2.5f) - (EarlyFlightActive() || mp::EarlyFlightOn() ? 1.0f : 0.0f) ;
+        float steps = (fast ? 1.0f : 2.5f) - (EarlyFlightActive() || mp::EarlyFlightOn() ? 1.0f : 0.0f) -
+                      (fast && InstantFireActive(battle) ? 1.0f : 0.0f) ;
         leadT = (toNext + period * steps + cfg.displayLag + hit.dist / (cfg.bulletSpeed > 100.f ? cfg.bulletSpeed : 2000.f)) * cfg.leadScale +
                 cfg.leadExtra;
         if (leadT < 0.f) leadT = 0.f;
@@ -4567,7 +4760,7 @@ uint64_t HeroProjHit(uintptr_t self, uintptr_t proj, uintptr_t list, uintptr_t f
         if (shooter ? ReadVec(shooter + oEntPos, src) : ReadVec(proj + 0xf4, src)) dx = src[0] - h[0], dz = src[2] - h[2];
     }
     float ang = 0.f;
-    const float half = mpHero ? mv.angle : ShieldAngleNow();
+    const float half = mpHero ? mv.angle : ShieldAngleNowOwn();
     bool front = shieldhit::Frontal(mpHero ? mv.yaw : S.yaw, dx, dz, half, &ang);
     float m[4] = {}, rec[2] = {};
     for (int i = 0; i < 4; ++i) Rd(proj + 0x78 + 4 * i, m[i]);
@@ -4633,7 +4826,7 @@ extern "C" void hfps_hero_melee(uintptr_t self, uintptr_t pend) {
     ReadVec(attacker + oEntPos, a);
     ReadVec(self + oEntPos, h);
     float ang = 0.f;
-    const float half = mpHero ? mv.angle : ShieldAngleNow();
+    const float half = mpHero ? mv.angle : ShieldAngleNowOwn();
     if (!shieldhit::Frontal(mpHero ? mv.yaw : S.yaw, a[0] - h[0], a[2] - h[2], half, &ang)) {
         InterlockedIncrement(&g_sb.side);
         if (mpHero) mp::Count(self, mp::kCntSide);
@@ -4684,7 +4877,7 @@ uint64_t HeroStagger(uintptr_t self, uintptr_t info) {
         float v[3] = {};
         for (int i = 0; i < 3; ++i) Rd(info + 8 + 4 * i, v[i]);
         float ang = 0.f;
-        if (shieldhit::Frontal(mpHero ? mv.yaw : S.yaw, -v[0], -v[2], mpHero ? mv.angle : ShieldAngleNow(), &ang)) {
+        if (shieldhit::Frontal(mpHero ? mv.yaw : S.yaw, -v[0], -v[2], mpHero ? mv.angle : ShieldAngleNowOwn(), &ang)) {
             InterlockedIncrement(&g_sb.stagger);
             if (mpHero) mp::Count(self, mp::kCntStagger);
             uint8_t flag = 0;
@@ -6786,7 +6979,7 @@ void Apply(uintptr_t mgr) {
     const float* vRight = kv.right;
     const float* vUp = kv.up;
     vmgame::PublishView(S.yaw, S.pitch, (S.flyer || (mode == 0 && S.air)) ? 0.f : S.camSpeed);
-    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : cfg.eyeHeight * CrouchEyeScale(S.crouchT, cfg.crouchEye)),
+    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : S.eyeHeight * CrouchEyeScale(S.crouchT, cfg.crouchEye)),
                     camPos[2] + cy * cfg.eyeForward};
     float target[3] = {eye[0] + vFwd[0] * 10.f, eye[1] + vFwd[1] * 10.f, eye[2] + vFwd[2] * 10.f};
     float up[3] = {0.f, 1.f, 0.f};
@@ -7009,6 +7202,7 @@ bool InstallHook() {
     uintptr_t vt = Ptr(mgr);
     uintptr_t ours = g_vtCopy ? reinterpret_cast<uintptr_t>(g_vtCopy + 2) : 0;
     if (ours && vt == ours) return true;
+    if (ours && g_if.vtCopy && vt == reinterpret_cast<uintptr_t>(g_if.vtCopy + 1) && g_if.vtCopyOf == ours) return true;
     if (vt != g_base + kVtCamMgr) {
         Refuse(kRefuseOther);
         Log("camera manager %p has unexpected vtable %p; not hooking", (void*)mgr, (void*)vt);
@@ -7577,12 +7771,23 @@ DWORD WINAPI InitThread(LPVOID) {
         Log("loader: version.dll = %ls (%s), module dir %ls", vp[0] ? vp : L"(none)",
             inDir ? "in the game folder, another tool's (no tenzin_fps / tenzin_fps proxy signature) - carrying on" : "not ours", g_dir);
     }
+    {
+        wchar_t name[64];
+        swprintf(name, 64, L"Local\\tenzin_fps_native_%lu", GetCurrentProcessId());
+        HANDLE mx = CreateMutexW(nullptr, FALSE, name);
+        if (mx && GetLastError() == ERROR_ALREADY_EXISTS) {
+            Log("loader: another tenzin_fps_native is already running in this process - this copy stays idle");
+            g_status = kStatusOtherCopy;
+            return 0;
+        }
+    }
 #ifdef HFPS_PACK_ASSETS
     if (!packx::ExtractFromPack(g_dir, &Log)) {
         Log("onepack: assets not available - first person stays off");
         g_status = kStatusAssets;
         return 0;
     }
+    vmgame::SetPayloads(packx::MainIniName(), packx::FullMod(), packx::AddonIds());
 #endif
 #else
     Log("==== tenzin_fps native M1 + viewmodel test loaded (version.dll proxy) pid=%lu", GetCurrentProcessId());
@@ -7591,7 +7796,7 @@ DWORD WINAPI InitThread(LPVOID) {
     if (!VerifyGame()) return 0;
     LoadConfig();
     if (!cfg.enabled) {
-        Log("disabled by tenzin_fps.ini");
+        Log("disabled by %ls", MainIniName());
         g_status = kStatusDisabled;
         return 0;
     }
@@ -7752,6 +7957,59 @@ extern "C" void hfps_sim_tick(uintptr_t self, uintptr_t packet, uintptr_t battle
         g_ff.nPend = 0;
     }
     ReleaseSRWLockExclusive(&g_ff.lock);
+}
+extern "C" void hfps_after_step_pre(uintptr_t self, uintptr_t battle) {
+    (void)self;
+    InterlockedIncrement(&g_if.calls);
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    g_if.lastQpc = q.QuadPart;
+    if (!battle || battle != g_if.battle || battle != g_ff.battle || !g_ef.hero || g_ff.multiBlock) return;
+    const uintptr_t world = *reinterpret_cast<uintptr_t*>(battle + oBattleWorld);
+    if (!world || world != g_ef.world) return;
+    uint32_t n = 0;
+    int np = 0;
+    double tp[64];
+    AcquireSRWLockExclusive(&g_ff.lock);
+    if (g_ff.n && g_ff.n <= 0x5000) {
+        n = g_ff.n;
+        np = g_ff.nPend;
+        memcpy(g_ifBuf + 8, g_ff.buf, n);
+        memcpy(tp, g_ff.tPend, sizeof(double) * static_cast<size_t>(np));
+        g_ff.n = 0;
+        g_ff.nPend = 0;
+    }
+    ReleaseSRWLockExclusive(&g_ff.lock);
+    if (n) {
+        *reinterpret_cast<uintptr_t*>(g_ifBuf) = g_base + kVtCmdReader904;
+        *reinterpret_cast<uint32_t*>(g_ifBuf + 0x5008) = n;
+        using FnExec = void (*)(uintptr_t buf, uintptr_t world);
+        reinterpret_cast<FnExec>(g_base + kExecCmdBlock904)(reinterpret_cast<uintptr_t>(g_ifBuf), world);
+        *reinterpret_cast<uint32_t*>(g_ifBuf + 0x5008) = 0;
+        uintptr_t ours[64];
+        unsigned k = PromoteHeroBullets(world, ours, g_ef.hero);
+        hitprobe::Arm(world, g_ef.hero, ours, k);
+        using FnStep = void (*)(uintptr_t bullet);
+        for (unsigned i = 0; i < k; ++i) reinterpret_cast<FnStep>(g_base + kProjStep904)(ours[i]);
+        InterlockedExchangeAdd(&g_if.shots, np);
+        InterlockedExchangeAdd(&g_if.bullets, static_cast<LONG>(k));
+        const double t = Now();
+        for (int i = 0; i < np; ++i) {
+            const double l = (t - tp[i]) * 1000.0;
+            g_if.latSum += l;
+            if (l > g_if.latMax) g_if.latMax = l;
+            ++g_if.latN;
+        }
+    }
+    const double now = Now();
+    if (now - g_if.tStat >= 3.0) {
+        g_if.tStat = now;
+        if (g_if.latN || n)
+            Log("instant-fire: after_step %ld, shots executed there %ld (fire -> executed avg %.0f ms, max %.0f ms over %u), bullets stepped %ld",
+                g_if.calls, g_if.shots, g_if.latN ? g_if.latSum / g_if.latN : 0.0, g_if.latMax, g_if.latN, g_if.bullets);
+        g_if.latSum = g_if.latMax = 0;
+        g_if.latN = 0;
+    }
 }
 constexpr uintptr_t oBattleVisRoot = 0x64600, oVisRootMgr = 0x1a0, oVisMgrUnitCount = 0x164, oVisMgrUnits = 0x168, oUnitVisUnit = 0xf8,
                     oUnitVisSoldierCount = 0x34, oUnitVisSoldiers = 0x38, oSoldierVisEntity = 0x18, oSoldierVisInstance = 0xf8,
@@ -8112,6 +8370,7 @@ struct Fns {
     float (*tonumber)(void*, int);
     int (*type)(void*, int);
     size_t (*objlen)(void*, int);
+    const char* (*tolstring)(void*, int, size_t*);
 } f;
 int g_state = -1;
 char g_missing[48] = "";
@@ -8133,12 +8392,44 @@ bool Resolve() {
         }
         memcpy(e.slot, &p, sizeof p);
     }
+    if (FARPROC p = exe ? GetProcAddress(exe, "lua_tolstring") : nullptr) memcpy(&f.tolstring, &p, sizeof p);
     g_state = 1;
     return true;
 }
 int Api(void* L) {
     f.pushnumber(L, 5.f);
     return 1;
+}
+int UnitKeysFn(void* L) {
+    f.pushstring(L, vmgame::UnitKeys());
+    return 1;
+}
+int AccessAll(void* L) {
+    f.pushboolean(L, vmgame::UnitAllowed("") ? 1 : 0);
+    return 1;
+}
+int SetUnit(void* L) {
+    bool ok = false;
+    if (f.tolstring && f.type(L, 1) == kTUserdata && f.objlen(L, 1) >= sizeof(uintptr_t)) {
+        const void* blk = f.touserdata(L, 1);
+        uintptr_t wrap = 0;
+        if (blk) memcpy(&wrap, blk, sizeof wrap);
+        const uintptr_t p = wrap ? Ptr(wrap + 8) : 0;
+        size_t n = 0;
+        const char* key = f.tolstring(L, 2, &n);
+        if (p && key && n > 0 && n < 48) {
+            RememberUnitKey(p, key);
+            ok = true;
+        }
+    }
+    f.pushboolean(L, ok ? 1 : 0);
+    return 1;
+}
+int BattleStarted(void*) {
+    ForgetUnitKeys();
+    vmgame::NoteNewBattle();
+    Log("lua-api: battle started (unit keys cleared)");
+    return 0;
 }
 int Active(void* L) {
     f.pushboolean(L, S.active && S.unit ? 1 : 0);
@@ -8358,13 +8649,13 @@ int PushTable(void* L) {
         Log("lua-api: %s not exported by the game - no interface table (luaopen #%ld)", g_missing, n);
         return 0;
     }
-    f.createtable(L, 0, 11);
+    f.createtable(L, 0, 24);
     const struct { const char* name; CFn fn; } fns[] = {{"api", Api}, {"active", Active}, {"is_hero", IsHero}, {"hud_enabled", HudEnabled},
-                                                        {"set_hud_rect", SetHudRect}, {"set_ui_covers", SetUiCoversApi}, {"ammo", Ammo}, {"cast_event", CastEvent},
-                                                        {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson},
-                                                        {"tac_stamina", TacStaminaApi}, {"refill_ammo", RefillAmmoApi}, {"prompt", Prompt}, {"refused", Refused}, {"status", Status},
-                                                        {"cast_marker", CastMarkerApi}, {"cast_target", CastTargetApi}, {"cast_point", CastPointApi},
-                                                        {"cast_hold", CastHoldApi}};
+                                                        {"set_hud_rect", SetHudRect}, {"ammo", Ammo}, {"unit_keys", UnitKeysFn}, {"access_all", AccessAll},
+                                                        {"set_unit", SetUnit}, {"battle_started", BattleStarted}, {"set_ui_covers", SetUiCoversApi}, {"cast_event", CastEvent},
+                                                        {"set_armed", SetArmed}, {"view", View}, {"exit_first_person", ExitFirstPerson}, {"tac_stamina", TacStaminaApi},
+                                                        {"refill_ammo", RefillAmmoApi}, {"prompt", Prompt}, {"refused", Refused}, {"status", Status},
+                                                        {"cast_marker", CastMarkerApi}, {"cast_target", CastTargetApi}, {"cast_point", CastPointApi}, {"cast_hold", CastHoldApi}};
     for (const auto& e : fns) {
         f.pushcclosure(L, e.fn, 0);
         f.setfield(L, -2, e.name);
@@ -8376,7 +8667,7 @@ int PushTable(void* L) {
             f.setfield(L, -2, e.name);
         }
     }
-    Log("lua-api: interface table v4 returned (luaopen #%ld, lua state %p)", n, L);
+    Log("lua-api: interface table v4 returned (luaopen #%ld, lua state %p%s)", n, L, f.tolstring ? "" : ", lua_tolstring missing - set_unit off");
     return 1;
 }
 }
