@@ -88,6 +88,8 @@ struct Settings {
     float burstScatterAds = 0.f;
     int burstPierceAds = 0;
     float burstReachAds = 0.55f;
+    float burstCover = 0.f;
+    int burstCoverMax = 64;
     float fireRange = 0.f;
     wchar_t animSounds[128] = L"";
     float animSoundVolume = 0.7f;
