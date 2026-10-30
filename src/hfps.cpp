@@ -47,6 +47,10 @@ void* g_orig_hero_1c8;
 uintptr_t g_hero_1c8_ret1, g_hero_1c8_ret2;
 void hfps_hero_1c8_thunk();
 void hfps_hero_melee(uintptr_t self, uintptr_t pend);
+void* g_orig_after_step;
+uintptr_t g_after_step_ret;
+void hfps_after_step_thunk();
+void hfps_after_step_pre(uintptr_t self, uintptr_t battle);
 }
 namespace {
 struct CodePrint {
@@ -524,6 +528,7 @@ struct Config {
     float pinnedClearance = 1.0f;
     float tpShotGuard = 1.1f;
     bool fastFire = true;
+    bool instantFire = true;
     bool earlyFlight = true;
     bool mpForce = false;
     bool autoLead = true;
@@ -805,6 +810,7 @@ void LoadConfig() {
     cfg.tpShotGuard = IniF(L"fire", L"teleport_guard", cfg.tpShotGuard, ini);
     cfg.fastFire = GetPrivateProfileIntW(L"fire", L"fast_fire", 1, ini) != 0;
     cfg.earlyFlight = GetPrivateProfileIntW(L"fire", L"early_flight", 1, ini) != 0;
+    cfg.instantFire = GetPrivateProfileIntW(L"fire", L"instant", 1, ini) != 0;
     cfg.mpForce = GetPrivateProfileIntW(L"mp", L"force_mp_mode", 0, ini) != 0;
     cfg.autoLead = GetPrivateProfileIntW(L"fire", L"auto_lead", 1, ini) != 0;
     cfg.leadExtra = IniF(L"fire", L"lead_extra", cfg.leadExtra, ini);
@@ -1512,6 +1518,9 @@ void EarlyFlightUninstall(const char* why);
 long EarlyFlightCalls();
 long EarlyFlightPromoted();
 void FastFireStats(bool force);
+bool InstantFireInstall(uintptr_t battle);
+void InstantFireUninstall(const char* why);
+bool InstantFireActive(uintptr_t battle);
 const char* ModeName(int m);
 void ReleaseHero(int mode, const char* why);
 void ExitSequenceStep(uintptr_t mgr);
@@ -1519,6 +1528,7 @@ void LauncherReset();
 void Exit(uintptr_t mgr, const char* why, bool release = true) {
     if (!S.active) return;
     LauncherReset();
+    InstantFireUninstall(why);
     FastFireUninstall(why);
     EarlyFlightUninstall(why);
     herofx::Uninstall(why);
@@ -1774,6 +1784,7 @@ void Enter(uintptr_t mgr) {
         uintptr_t sbf = Ptr(g_base + kGlobalScript);
         if (cfg.fastFire && g_shotOk && !S.mpMode) FastFireInstall(sbf ? Ptr(sbf + oScriptBattle) : 0);
         if (cfg.earlyFlight && g_shotOk && cfg.fireShooter && !S.mpMode) EarlyFlightInstall(sbf ? Ptr(sbf + oScriptBattle) : 0, entity);
+        if (cfg.instantFire && g_shotOk && !S.mpMode) InstantFireInstall(sbf ? Ptr(sbf + oScriptBattle) : 0);
         if (S.mpMode)
             Log("mp: multiplayer path - ammo flags, shield / no-knockdown / super armor, melee by message (FPS_ON / KEEP / SHIELD / MELEE / FPS_OFF); "
                 "off until they are message-driven: fast fire, ghost mode, bullet speed rewrite, "
@@ -2144,6 +2155,100 @@ bool EarlyFlightActive() {
     LARGE_INTEGER q;
     QueryPerformanceCounter(&q);
     return q.QuadPart - g_ef.lastQpc < g_qpf.QuadPart / 2;
+}
+constexpr uintptr_t kAfterStepCall904 = 0x2dd3618, kAfterStepRet904 = 0x2dd3628, kExecCmdBlock904 = 0x2f041c0, kVtCmdReader904 = 0x3904438,
+                    kProjStep904 = 0x30ba364, oBattleAfterObj = 0x64558, oBattleWorld = 0x440, kAfterStepSlot = 0x288;
+const unsigned char kAfterStepCallBytes[16] = {0x48, 0x8b, 0x8f, 0x58, 0x45, 0x06, 0x00, 0x48, 0x8b, 0x01, 0xff, 0x90, 0x88, 0x02, 0x00, 0x00};
+struct InstantFire {
+    int siteState = 0;
+    uintptr_t obj = 0, origVt = 0, battle = 0;
+    uintptr_t* vtCopy = nullptr;
+    uintptr_t vtCopyOf = 0;
+    volatile LONG calls = 0, shots = 0, bullets = 0;
+    volatile LONG64 lastQpc = 0;
+    double latSum = 0, latMax = 0, tStat = 0;
+    unsigned latN = 0;
+} g_if;
+alignas(16) unsigned char g_ifBuf[0x5010];
+bool InstantFireInstall(uintptr_t battle) {
+    if (!cfg.instantFire || !battle) return false;
+    if (!g_ff.obj || g_ff.battle != battle || !g_ef.obj) {
+        Log("instant-fire: needs fast fire + early flight hooked first (fast fire %p, early flight %p) - off", (void*)g_ff.obj, (void*)g_ef.obj);
+        return false;
+    }
+    if (g_if.siteState == 0) {
+        unsigned char b[16] = {};
+        for (int i = 0; i < 16; ++i) Rd(g_base + kAfterStepCall904 + i, b[i]);
+        g_if.siteState = memcmp(b, kAfterStepCallBytes, 16) ? -1 : 1;
+        if (g_if.siteState > 0) g_after_step_ret = g_base + kAfterStepRet904;
+        Log("instant-fire: after_step call site %s (+%llx)", g_if.siteState > 0 ? "verified" : "NOT matching (other game version) - instant fire off",
+            (unsigned long long)kAfterStepCall904);
+    }
+    if (g_if.siteState < 0) return false;
+    uintptr_t obj = Ptr(battle + oBattleAfterObj), vt = obj ? Ptr(obj) : 0;
+    uintptr_t lo = 0, hi = 0;
+    if (!vt || !CodeRange(&lo, &hi)) {
+        Log("instant-fire: after_step object not found (obj %p vt %p)", (void*)obj, (void*)vt);
+        return false;
+    }
+    if (g_if.vtCopy && vt == reinterpret_cast<uintptr_t>(g_if.vtCopy + 1)) {
+        g_if.obj = obj;
+        g_if.battle = battle;
+        return true;
+    }
+    size_t slots = 0;
+    while (slots < 2048) {
+        uintptr_t f = Ptr(vt + 8 * slots);
+        if (f < lo || f >= hi) break;
+        ++slots;
+    }
+    if (slots <= kAfterStepSlot / 8) {
+        Log("instant-fire: after_step object %p vtable %p has only %zu slots - not hooking", (void*)obj, (void*)vt, slots);
+        return false;
+    }
+    if (!g_if.vtCopy || g_if.vtCopyOf != vt) {
+        size_t copyN = slots + 16 > 256 ? slots + 16 : 256;
+        auto* c = static_cast<uintptr_t*>(VirtualAlloc(nullptr, (copyN + 1) * sizeof(uintptr_t), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!c) return false;
+        c[0] = Ptr(vt - 8);
+        for (size_t i = 0; i < copyN; ++i) c[1 + i] = Ptr(vt + 8 * i);
+        g_orig_after_step = reinterpret_cast<void*>(c[1 + kAfterStepSlot / 8]);
+        c[1 + kAfterStepSlot / 8] = reinterpret_cast<uintptr_t>(&hfps_after_step_thunk);
+        DWORD old;
+        VirtualProtect(c, (copyN + 1) * sizeof(uintptr_t), PAGE_READONLY, &old);
+        g_if.vtCopy = c;
+        g_if.vtCopyOf = vt;
+    }
+    g_if.battle = battle;
+    g_if.calls = g_if.shots = g_if.bullets = 0;
+    g_if.latSum = g_if.latMax = 0;
+    g_if.latN = 0;
+    g_if.tStat = Now();
+    if (!Wr(obj, reinterpret_cast<uintptr_t>(g_if.vtCopy + 1))) {
+        Log("instant-fire: vtable write failed on %p", (void*)obj);
+        g_if.battle = 0;
+        return false;
+    }
+    g_if.obj = obj;
+    g_if.origVt = vt;
+    Log("instant-fire: hooked after_step object %p (vt +%llx, %zu slots, [+0x288] = +%llx) via vtable copy %p", (void*)obj,
+        (unsigned long long)(vt - g_base), slots, (unsigned long long)(reinterpret_cast<uintptr_t>(g_orig_after_step) - g_base),
+        (void*)(g_if.vtCopy + 1));
+    return true;
+}
+void InstantFireUninstall(const char* why) {
+    if (!g_if.obj) return;
+    if (g_if.vtCopy && Ptr(g_if.obj) == reinterpret_cast<uintptr_t>(g_if.vtCopy + 1)) Wr(g_if.obj, g_if.origVt);
+    Log("instant-fire: unhooked after_step object %p (%s): after_step calls %ld, shots executed there %ld, bullets stepped %ld", (void*)g_if.obj,
+        why, g_if.calls, g_if.shots, g_if.bullets);
+    g_if.battle = 0;
+    g_if.obj = 0;
+}
+bool InstantFireActive(uintptr_t battle) {
+    if (!g_if.obj || g_if.battle != battle) return false;
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    return q.QuadPart - g_if.lastQpc < g_qpf.QuadPart / 2;
 }
 bool FastFireQueue(FireCmd* c) {
     using FnIssue = unsigned char (*)(uintptr_t queue, FireCmd* cmd);
@@ -3055,7 +3160,8 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     float aim[3] = {eye[0] + fwd[0] * hit.dist, eye[1] + fwd[1] * hit.dist, eye[2] + fwd[2] * hit.dist};
     float leadT = 0.f, lead[2] = {0.f, 0.f};
     if (cfg.autoLead && hit.ent && (hit.vel[0] != 0.f || hit.vel[1] != 0.f)) {
-        float steps = (fast ? 1.0f : 2.5f) - (EarlyFlightActive() || mp::EarlyFlightOn() ? 1.0f : 0.0f) ;
+        float steps = (fast ? 1.0f : 2.5f) - (EarlyFlightActive() || mp::EarlyFlightOn() ? 1.0f : 0.0f) -
+                      (fast && InstantFireActive(battle) ? 1.0f : 0.0f) ;
         leadT = (toNext + period * steps + cfg.displayLag + hit.dist / (cfg.bulletSpeed > 100.f ? cfg.bulletSpeed : 2000.f)) * cfg.leadScale +
                 cfg.leadExtra;
         if (leadT < 0.f) leadT = 0.f;
@@ -7009,6 +7115,7 @@ bool InstallHook() {
     uintptr_t vt = Ptr(mgr);
     uintptr_t ours = g_vtCopy ? reinterpret_cast<uintptr_t>(g_vtCopy + 2) : 0;
     if (ours && vt == ours) return true;
+    if (ours && g_if.vtCopy && vt == reinterpret_cast<uintptr_t>(g_if.vtCopy + 1) && g_if.vtCopyOf == ours) return true;
     if (vt != g_base + kVtCamMgr) {
         Refuse(kRefuseOther);
         Log("camera manager %p has unexpected vtable %p; not hooking", (void*)mgr, (void*)vt);
@@ -7752,6 +7859,59 @@ extern "C" void hfps_sim_tick(uintptr_t self, uintptr_t packet, uintptr_t battle
         g_ff.nPend = 0;
     }
     ReleaseSRWLockExclusive(&g_ff.lock);
+}
+extern "C" void hfps_after_step_pre(uintptr_t self, uintptr_t battle) {
+    (void)self;
+    InterlockedIncrement(&g_if.calls);
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    g_if.lastQpc = q.QuadPart;
+    if (!battle || battle != g_if.battle || battle != g_ff.battle || !g_ef.hero || g_ff.multiBlock) return;
+    const uintptr_t world = *reinterpret_cast<uintptr_t*>(battle + oBattleWorld);
+    if (!world || world != g_ef.world) return;
+    uint32_t n = 0;
+    int np = 0;
+    double tp[64];
+    AcquireSRWLockExclusive(&g_ff.lock);
+    if (g_ff.n && g_ff.n <= 0x5000) {
+        n = g_ff.n;
+        np = g_ff.nPend;
+        memcpy(g_ifBuf + 8, g_ff.buf, n);
+        memcpy(tp, g_ff.tPend, sizeof(double) * static_cast<size_t>(np));
+        g_ff.n = 0;
+        g_ff.nPend = 0;
+    }
+    ReleaseSRWLockExclusive(&g_ff.lock);
+    if (n) {
+        *reinterpret_cast<uintptr_t*>(g_ifBuf) = g_base + kVtCmdReader904;
+        *reinterpret_cast<uint32_t*>(g_ifBuf + 0x5008) = n;
+        using FnExec = void (*)(uintptr_t buf, uintptr_t world);
+        reinterpret_cast<FnExec>(g_base + kExecCmdBlock904)(reinterpret_cast<uintptr_t>(g_ifBuf), world);
+        *reinterpret_cast<uint32_t*>(g_ifBuf + 0x5008) = 0;
+        uintptr_t ours[64];
+        unsigned k = PromoteHeroBullets(world, ours, g_ef.hero);
+        hitprobe::Arm(world, g_ef.hero, ours, k);
+        using FnStep = void (*)(uintptr_t bullet);
+        for (unsigned i = 0; i < k; ++i) reinterpret_cast<FnStep>(g_base + kProjStep904)(ours[i]);
+        InterlockedExchangeAdd(&g_if.shots, np);
+        InterlockedExchangeAdd(&g_if.bullets, static_cast<LONG>(k));
+        const double t = Now();
+        for (int i = 0; i < np; ++i) {
+            const double l = (t - tp[i]) * 1000.0;
+            g_if.latSum += l;
+            if (l > g_if.latMax) g_if.latMax = l;
+            ++g_if.latN;
+        }
+    }
+    const double now = Now();
+    if (now - g_if.tStat >= 3.0) {
+        g_if.tStat = now;
+        if (g_if.latN || n)
+            Log("instant-fire: after_step %ld, shots executed there %ld (fire -> executed avg %.0f ms, max %.0f ms over %u), bullets stepped %ld",
+                g_if.calls, g_if.shots, g_if.latN ? g_if.latSum / g_if.latN : 0.0, g_if.latMax, g_if.latN, g_if.bullets);
+        g_if.latSum = g_if.latMax = 0;
+        g_if.latN = 0;
+    }
 }
 constexpr uintptr_t oBattleVisRoot = 0x64600, oVisRootMgr = 0x1a0, oVisMgrUnitCount = 0x164, oVisMgrUnits = 0x168, oUnitVisUnit = 0xf8,
                     oUnitVisSoldierCount = 0x34, oUnitVisSoldiers = 0x38, oSoldierVisEntity = 0x18, oSoldierVisInstance = 0xf8,
