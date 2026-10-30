@@ -80,6 +80,14 @@ struct Settings {
     wchar_t weaponId[64] = L"";
     bool weaponDefault = false;
     char projectile[64] = "";
+    int pellets = 1, pelletsAds = 1;
+    float pelletFan = 0.f, pelletFanAds = 0.f, fireRangeAds = 0.f;
+    char projectileAds[64] = "";
+    int burst = 0;
+    float burstMin = 2.f;
+    float burstScatterAds = 0.f;
+    int burstPierceAds = 0;
+    float burstReachAds = 0.55f;
     float fireRange = 0.f;
     wchar_t animSounds[128] = L"";
     float animSoundVolume = 0.7f;
@@ -101,6 +109,7 @@ struct Settings {
     float spinKeep = 0.8f;
     wchar_t spinUpSound[512] = L"", spinLoopSound[512] = L"", spinDownSound[512] = L"";
     float spinVolume = 0.5f;
+    float spinLoopStart = 0.f;
     float spinBarrels = 6.0f;
     float spinDownTime = 1.6f;
     int spinBone = -2;
@@ -118,10 +127,39 @@ struct Settings {
     float flashLight = 1.0f;
     bool flashSmoke = true;
     bool flashFlame = true;
+    wchar_t flameFx[128] = L"";
+    float flameAim = 30.f, flameGap = 0.09f;
+    float flameFan = 0.f, flameFanAds = 0.f, flameAimAds = 0.f;
+    struct FlameLayer {
+        wchar_t tex[64] = L"";
+        int cx = 1, cy = 1;
+        float fps = 0.f;
+        bool randFrame = false;
+        float rate = 0.f;
+        float speed[2] = {20.f, 20.f};
+        float life[2] = {1.f, 1.f};
+        float size[2] = {0.2f, 1.f};
+        float sizeEase = 2.f;
+        float gravity = 0.f;
+        float drag = 0.f;
+        float spread = 2.f;
+        float jitter = 0.f;
+        float col0[3] = {1.f, 1.f, 1.f};
+        float col1[3] = {1.f, 1.f, 1.f};
+        float alpha = 1.f;
+        float fade[2] = {0.1f, 0.6f};
+        float bright = 1.f;
+        float stretch = 0.f;
+        float spin = 0.f;
+        bool additive = true;
+        float speedAds[2] = {-1.f, -1.f}, lifeAds[2] = {-1.f, -1.f}, sizeAds[2] = {-1.f, -1.f}, fadeAds[2] = {-1.f, -1.f};
+        float rateAds = -1.f, spreadAds = -1.f, dragAds = -1.f, alphaAds = -1.f, brightAds = -1.f, stretchAds = -1.f;
+    } flame[4];
     bool hitFx = true;
     float hitFxScale = 1.0f;
     float hitFxAlpha = 0.85f;
     float hitFxColor[3] = {0.42f, 0.03f, 0.02f};
+    float tracerTint[3] = {1.f, 1.f, 1.f};
     bool flashGas = false;
     wchar_t flashGasFx[128] = L"";
     float flashGasScale = 1.0f;
@@ -309,6 +347,8 @@ public:
     bool GasLoaded() const { return tex_[5] && tex_[6]; }
     int LiveTracers() const { return nTr_; }
     int LiveImpacts() const { return nImp_; }
+    void LoadFlame(const wchar_t* dir, const Settings& s);
+    int LiveFlame() const { return nFl_; }
     int Live() const { return n_; }
     void Dump(double now) const;
     void Seed(unsigned seed) { rng_ = seed ? seed : 1u; }
@@ -391,6 +431,21 @@ private:
     static constexpr int kImpactQuads = 10;
     Impact imps_[kMaxImpacts];
     int nImp_ = 0;
+    struct FlameP {
+        float p[3], v[3];
+        float age, life, rot, spin;
+        float drag, s0, s1;
+        float ad;
+        unsigned short f0;
+        unsigned char layer;
+    };
+    static constexpr int kMaxFlame = 1500;
+    FlameP fl_[kMaxFlame];
+    int nFl_ = 0;
+    float flAcc_[4] = {};
+    float flPh_[4] = {};
+    double tFlSim_ = -1.0;
+    ID3D11ShaderResourceView* flTex_[4] = {};
     static constexpr int kMax = 160;
     P parts_[kMax];
     int n_ = 0;
@@ -665,6 +720,8 @@ private:
     void EnsureDistDepth(UINT w, UINT h);
     void EvalBones(const Look& look);
     void ArmIk(const Settings& s, const float* k12);
+    void TwistSetup();
+    void TwistBones();
     void ShieldIk(const Look& look, const float* nInv12);
     void FinishBones(float* palette , int muzzleBone, const float* muzzleLocal, float* muzzleModel,
                      const float* axisLocal, const float* upLocal, float* axisModel, float* upModel);
@@ -712,6 +769,10 @@ private:
     float barrelDir_ = -1.f;
     int armBone_[2][3] = {{-1, -1, -1}, {-1, -1, -1}};
     int gunBone_ = -1, handTag_[2] = {-1, -1};
+    static constexpr int kMaxTwist = 16;
+    int twistN_[2] = {0, 0}, twistBone_[2][kMaxTwist] = {}, twistNum_[2][kMaxTwist] = {};
+    float twistFrac_[2][kMaxTwist] = {}, twistAxis_[2][3] = {}, twistBindQ_[2][4] = {}, twistPrev_[2] = {0.f, 0.f};
+    bool twistHave_[2] = {false, false};
     int fingerBone_[19] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
     float ikResidual_[2] = {-1.f, -1.f}, ikShift_[2] = {0.f, 0.f};
     bool shieldViewValid_ = false;
@@ -729,6 +790,9 @@ private:
 };
 void AnimStatePush();
 void AnimStatePop();
+void SetArmsOverride(const wchar_t* list);
+int ArmsOverrideCount();
+const char* ArmsOverrideLog();
 namespace prefetch {
 bool Model(int tag, const wchar_t* hvmPath, int* files, size_t* bytes, char* err, size_t errLen);
 void Drop(int tag);
