@@ -2366,6 +2366,12 @@ bool FastFireQueue(FireCmd* c) {
     ReleaseSRWLockExclusive(&g_ff.lock);
     return queued;
 }
+int FastFireRoom() {
+    AcquireSRWLockShared(&g_ff.lock);
+    const int r = 64 - g_ff.nPend;
+    ReleaseSRWLockShared(&g_ff.lock);
+    return r > 0 ? r : 0;
+}
 struct MeleeKind {
     const char* proj;
     float reach;
@@ -3358,6 +3364,7 @@ struct BurstStats {
     float offSum = 0;
     unsigned hipAir = 0;
     unsigned cover = 0, coverIn = 0, coverIssued = 0, coverOver = 0, coverBlocked = 0, coverHeight = 0;
+    unsigned coverDue = 0;
     float coverMs = 0, coverMsMax = 0;
     int logs = 0;
 } g_bst;
@@ -3366,10 +3373,12 @@ void BurstStatsLog(double now) {
     if (g_bst.t0 <= 0.0) g_bst.t0 = now;
     if (now - g_bst.t0 < 3.0) return;
     const float nc = g_bst.cover ? static_cast<float>(g_bst.cover) : 1.f;
-    Log("fire: bursts in %.1f s: cover %u (in flame avg %.1f, issued %u, over cap %u, blocked by ground / wall avg %.1f, height miss avg %.1f, "
+    Log("fire: bursts in %.1f s: cover %u (in flame avg %.1f, due avg %.1f, issued %u, due left for the next shot %u, blocked by ground / wall avg %.1f, "
+        "height miss avg %.1f, "
         "scan avg %.2f / max %.2f ms), hip %u (cut by ground / wall %u, in the air %u, distance avg %.1f m), "
         "focus %u (on soldier %u, off line avg %.2f m, scatter avg %.2f m), pierce %u on %u lines (soldiers on line avg %.1f), refused %u",
-        now - g_bst.t0, g_bst.cover, static_cast<float>(g_bst.coverIn) / nc, g_bst.coverIssued, g_bst.coverOver,
+        now - g_bst.t0, g_bst.cover, static_cast<float>(g_bst.coverIn) / nc, static_cast<float>(g_bst.coverDue) / nc, g_bst.coverIssued,
+        g_bst.coverOver,
         static_cast<float>(g_bst.coverBlocked) / nc, static_cast<float>(g_bst.coverHeight) / nc, g_bst.coverMs / nc, g_bst.coverMsMax, g_bst.hip,
         g_bst.hipCut, g_bst.hipAir,
         g_bst.hip ? g_bst.hipSum / static_cast<float>(g_bst.hip) : 0.f, g_bst.focus, g_bst.focusEnt,
@@ -4685,11 +4694,11 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
 }
 constexpr int kCoverMaxCand = 512;
 struct CoverState {
-    double next = 0.0;
-    unsigned rot = 0;
+    uintptr_t battle = 0;
+    cover::BurnLog burn;
     int logs = 0;
 } g_cov;
-bool FireBurstCover(const float eye[3], const float fwd[3], const float right[3], float range, float fanDeg, float tick, int cap) {
+bool FireBurstCover(const float eye[3], const float fwd[3], const float right[3], float range, float fanDeg, float tick, int cap, bool clip) {
     uintptr_t sb = Ptr(g_base + kGlobalScript);
     uintptr_t battle = sb ? Ptr(sb + oScriptBattle) : 0;
     uintptr_t queue = battle ? Ptr(battle + oBattleCmdQueue) : 0;
@@ -4709,8 +4718,7 @@ bool FireBurstCover(const float eye[3], const float fwd[3], const float right[3]
     }
     if (!(range > 0.f)) range = cfg.fireRange;
     const double now = Now();
-    if (now < g_cov.next) return true;
-    g_cov.next = (now - g_cov.next > tick ? now : g_cov.next) + tick;
+    if (g_cov.battle != battle) g_cov.burn.Clear(), g_cov.battle = battle;
     const float period = StepPeriod();
     float toNext = LastStepTime() > 0 ? static_cast<float>(LastStepTime() + period - now) : period * 0.5f;
     if (toNext < 0.f) toNext = 0.f;
@@ -4732,7 +4740,8 @@ bool FireBurstCover(const float eye[3], const float fwd[3], const float right[3]
     const float rx = rxz > 1e-3f ? right[0] / rxz : cz, rz = rxz > 1e-3f ? right[2] / rxz : -cx;
     const float fan = fanDeg * 0.01745329f, hmax = range * fxz;
     float cut[cover::kRays];
-    for (int i = 0; i < cover::kRays; ++i) {
+    for (float& c : cut) c = hmax;
+    for (int i = 0; clip && i < cover::kRays; ++i) {
         const float yw = -fan + 2.f * fan * static_cast<float>(i) / static_cast<float>(cover::kRays - 1), c = std::cos(yw), s = std::sin(yw);
         float d[3] = {fwd[0] * c + right[0] * s, fwd[1] * c + right[1] * s, fwd[2] * c + right[2] * s};
         float dl = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
@@ -4743,6 +4752,7 @@ bool FireBurstCover(const float eye[3], const float fwd[3], const float right[3]
     constexpr float kCoverSnapSlack = 2.5f, kCoverUnitSlack = 35.f;
     struct Cand {
         float p[3], v[2];
+        uintptr_t e;
     };
     static Cand cand[kCoverMaxCand];
     static uintptr_t ents[1024];
@@ -4784,7 +4794,7 @@ bool FireBurstCover(const float eye[3], const float fwd[3], const float right[3]
             const bool hasVel = VelOf(e, vel);
             if (!hasVel) vel[0] = vel[1] = 0.f;
             const float qx = q[0] - vel[0] * dispLag, qz = q[2] - vel[1] * dispLag;
-            const cover::Result r = cover::Test(cx, cz, rx, rz, slope, fan, hmax, cut, qx - eye[0], q[1] - eye[1], qz - eye[2]);
+            const cover::Result r = cover::Test(cx, cz, rx, rz, slope, fan, hmax, clip ? cut : nullptr, qx - eye[0], q[1] - eye[1], qz - eye[2]);
             if (r == cover::kBlocked) ++blocked;
             if (r == cover::kHeight) ++height;
             if (r != cover::kIn) continue;
@@ -4796,16 +4806,21 @@ bool FireBurstCover(const float eye[3], const float fwd[3], const float right[3]
             c.p[2] = qz;
             c.v[0] = vel[0];
             c.v[1] = vel[1];
+            c.e = e;
         }
     }
     QueryPerformanceCounter(&q1);
     static int pick[kCoverMaxCand];
-    const int k = cover::Rotate(nc, std::min(cap, kCoverMaxCand), &g_cov.rot, pick);
+    static double last[kCoverMaxCand];
+    for (int j = 0; j < nc; ++j) last[j] = g_cov.burn.Last(cand[j].e, now);
+    const int room = fast ? FastFireRoom() : cap;
+    int nDue = 0;
+    const int k = cover::PickDue(last, nc, now, tick - 0.5 * period, std::min(std::min(cap, room), kCoverMaxCand), pick, &nDue);
     int issued = 0;
     for (int j = 0; j < k; ++j) {
         const Cand& c = cand[pick[j]];
         float burst[3] = {c.p[0] + c.v[0] * leadT, c.p[1], c.p[2] + c.v[1] * leadT};
-        if (IssueBurstAt(eye, burst, fast, queue)) ++issued;
+        if (IssueBurstAt(eye, burst, fast, queue)) ++issued, g_cov.burn.Mark(c.e, now);
     }
     const double ms = (q1.QuadPart - q0.QuadPart) * 1000.0 / static_cast<double>(g_qpf.QuadPart);
     g_bst.coverMs += static_cast<float>(ms);
@@ -4815,12 +4830,13 @@ bool FireBurstCover(const float eye[3], const float fwd[3], const float right[3]
     g_bst.coverIssued += static_cast<unsigned>(issued);
     g_bst.coverBlocked += blocked;
     g_bst.coverHeight += height;
-    if (nc > k) ++g_bst.coverOver;
-    if (g_cov.logs++ < 30)
-        Log("fire: cover: %d enemy soldiers in flame (blocked by ground / wall %u, height miss %u) -> %d of %d bursts issued via %s (cap %d), "
-            "pitch slope %.2f, cut left / mid / right %.1f / %.1f / %.1f m of %.1f; read %u, snapshot-culled %u (scan %.2f ms)",
-            nc, blocked, height, issued, k, fast ? "fast queue" : "command queue", cap, slope, cut[0], cut[cover::kRays / 2], cut[cover::kRays - 1], hmax,
-            read, culled, ms);
+    g_bst.coverDue += static_cast<unsigned>(nDue);
+    if (nDue > k) ++g_bst.coverOver;
+    if (g_cov.logs++ < 60)
+        Log("fire: cover: %d enemy soldiers in flame (%d due, blocked by ground / wall %u%s, height miss %u) -> %d of %d bursts issued via %s "
+            "(cap %d, fast room %d), pitch slope %.2f, cut left / mid / right %.1f / %.1f / %.1f m of %.1f; read %u, snapshot-culled %u (scan %.2f ms)",
+            nc, nDue, blocked, clip ? "" : " - clip off", height, issued, k, fast ? "fast queue" : "command queue", cap, room, slope, cut[0],
+            cut[cover::kRays / 2], cut[cover::kRays - 1], hmax, read, culled, ms);
     BurstStatsLog(now);
     return true;
 }
@@ -7839,9 +7855,9 @@ void Apply(uintptr_t mgr) {
         float breach = 0.55f;
         const bool burstMode = vmgame::WeaponBurst(vmgame::CurrentWeapon(), &bmin, &bscatter, &bpierce, &breach);
         float ctick = 0.f, cfan = 0.f;
-        int ccap = 0;
-        if (burstMode && !focus && vmgame::WeaponBurstCover(vmgame::CurrentWeapon(), &ctick, &ccap, &cfan))
-            fired = FireBurstCover(eye, fwd, right, srange, cfan, ctick, ccap) ? 1 : 0;
+        int ccap = 0, cclip = 1;
+        if (burstMode && !focus && vmgame::WeaponBurstCover(vmgame::CurrentWeapon(), &ctick, &ccap, &cfan, &cclip))
+            fired = FireBurstCover(eye, fwd, right, srange, cfan, ctick, ccap, cclip != 0) ? 1 : 0;
         else
             for (int k = 0; k < nShot; ++k)
                 fired += (burstMode ? FireBurst(eye, sdirs[k], srange, focus, bmin, bscatter, breach)

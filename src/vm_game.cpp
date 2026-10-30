@@ -3759,11 +3759,12 @@ bool WeaponBurst(int idx, float* minDist, float* scatterAds, int* pierceAds, flo
     if (reachAds) *reachAds = g_w[idx].set.burstReachAds;
     return true;
 }
-bool WeaponBurstCover(int idx, float* tick, int* cap, float* fanDeg) {
+bool WeaponBurstCover(int idx, float* tick, int* cap, float* fanDeg, int* clip) {
     if (idx < 0 || idx >= g_modelCount || !g_w[idx].set.burst || !(g_w[idx].set.burstCover > 0.f)) return false;
     *tick = g_w[idx].set.burstCover;
     *cap = g_w[idx].set.burstCoverMax;
     *fanDeg = g_w[idx].set.pelletFan;
+    if (clip) *clip = g_w[idx].set.burstCoverClip;
     return true;
 }
 float BurstDistance(float minDist, float range) {
