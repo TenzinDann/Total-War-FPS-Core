@@ -1176,6 +1176,8 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (!(s.burstScatterAds >= 0.f && s.burstScatterAds <= 10.f)) s.burstScatterAds = 0.f;
     s.burstPierceAds = static_cast<int>(IniFloat(ini, L"burst_pierce_ads", static_cast<float>(s.burstPierceAds)) + 0.5f);
     if (s.burstPierceAds < 0 || s.burstPierceAds > 32) s.burstPierceAds = 0;
+    s.burstReachAds = IniFloat(ini, L"burst_reach_ads", s.burstReachAds);
+    if (!(s.burstReachAds >= 0.55f && s.burstReachAds <= 5.f)) s.burstReachAds = 0.55f;
     if (!(s.fireLfeVolume >= 0.f && s.fireLfeVolume <= 2.f)) s.fireLfeVolume = 0.7f;
     if (!(s.fireAtmoVolume >= 0.f && s.fireAtmoVolume <= 2.f)) s.fireAtmoVolume = 0.7f;
     if (!(s.fireTailVolume >= 0.f && s.fireTailVolume <= 2.f)) s.fireTailVolume = 0.7f;
