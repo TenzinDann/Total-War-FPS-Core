@@ -85,6 +85,7 @@ struct Settings {
     char projectileAds[64] = "";
     int burst = 0;
     float burstMin = 2.f;
+    float burstScatterAds = 0.f;
     float fireRange = 0.f;
     wchar_t animSounds[128] = L"";
     float animSoundVolume = 0.7f;

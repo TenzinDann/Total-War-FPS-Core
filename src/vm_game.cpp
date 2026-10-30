@@ -3738,9 +3738,10 @@ int ShotPattern(float adsW, const float fwd[3], const float right[3], const floa
     if (focus) *focus = foc;
     return n;
 }
-bool WeaponBurst(int idx, float* minDist) {
+bool WeaponBurst(int idx, float* minDist, float* scatterAds) {
     if (idx < 0 || idx >= g_modelCount || !g_w[idx].set.burst) return false;
     if (minDist) *minDist = g_w[idx].set.burstMin;
+    if (scatterAds) *scatterAds = g_w[idx].set.burstScatterAds;
     return true;
 }
 float BurstDistance(float minDist, float range) {
@@ -3748,6 +3749,15 @@ float BurstDistance(float minDist, float range) {
     g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
     const float u = static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
     return std::sqrt(minDist * minDist + u * (range * range - minDist * minDist));
+}
+void BurstScatter(float radius, float* dx, float* dz) {
+    g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
+    const float u = static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
+    g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
+    const float th = 6.2831853f * static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
+    const float r = radius > 0.f ? radius * std::sqrt(u) : 0.f;
+    *dx = r * std::cos(th);
+    *dz = r * std::sin(th);
 }
 bool CurveAdsState(float* frac, float* adsFovAlt) {
     LONG f = g_curveFracMicro;

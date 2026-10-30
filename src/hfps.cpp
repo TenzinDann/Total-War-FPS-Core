@@ -3296,10 +3296,10 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
 struct BurstStats {
     double t0 = 0;
     unsigned hip = 0, hipCut = 0, focus = 0, focusEnt = 0, refused = 0;
-    float hipSum = 0;
+    float hipSum = 0, scatSum = 0;
     int logs = 0;
 } g_bst;
-bool FireBurst(const float eye[3], const float dir[3], float range, bool focus, float minDist) {
+bool FireBurst(const float eye[3], const float dir[3], float range, bool focus, float minDist, float scatter) {
     uintptr_t sb = Ptr(g_base + kGlobalScript);
     uintptr_t battle = sb ? Ptr(sb + oScriptBattle) : 0;
     uintptr_t queue = battle ? Ptr(battle + oBattleCmdQueue) : 0;
@@ -3345,6 +3345,14 @@ bool FireBurst(const float eye[3], const float dir[3], float range, bool focus, 
             burst[2] += hit.vel[1] * leadT;
         }
     }
+    float scat = 0.f;
+    if (focus && scatter > 0.f) {
+        float ox = 0.f, oz = 0.f;
+        vmgame::BurstScatter(scatter, &ox, &oz);
+        burst[0] += ox;
+        burst[2] += oz;
+        scat = std::sqrt(ox * ox + oz * oz);
+    }
     float gh = 0.f;
     const bool low = SurfaceNear(burst[0], burst[2], eye[1] - cfg.eyeHeight, &gh) && burst[1] < gh + 2.5f && burst[1] > gh - 5.f;
     if (low) burst[1] = gh + kMeleeBurstUp;
@@ -3374,6 +3382,7 @@ bool FireBurst(const float eye[3], const float dir[3], float range, bool focus, 
     if (ok && focus) {
         ++g_bst.focus;
         if (hit.ent) ++g_bst.focusEnt;
+        g_bst.scatSum += scat;
     } else if (ok) {
         ++g_bst.hip;
         g_bst.hipSum += d;
@@ -3385,8 +3394,9 @@ bool FireBurst(const float eye[3], const float dir[3], float range, bool focus, 
             low ? "ground + 0.4 m" : "in the air", c.launch[0], c.launch[1], c.launch[2]);
     if (g_bst.t0 <= 0.0) g_bst.t0 = now;
     if (now - g_bst.t0 >= 3.0) {
-        Log("fire: bursts in %.1f s: hip %u (cut by ground / wall %u, distance avg %.1f m), focus %u (on soldier %u), refused %u", now - g_bst.t0,
-            g_bst.hip, g_bst.hipCut, g_bst.hip ? g_bst.hipSum / static_cast<float>(g_bst.hip) : 0.f, g_bst.focus, g_bst.focusEnt, g_bst.refused);
+        Log("fire: bursts in %.1f s: hip %u (cut by ground / wall %u, distance avg %.1f m), focus %u (on soldier %u, scatter avg %.2f m), refused %u",
+            now - g_bst.t0, g_bst.hip, g_bst.hipCut, g_bst.hip ? g_bst.hipSum / static_cast<float>(g_bst.hip) : 0.f, g_bst.focus, g_bst.focusEnt,
+            g_bst.focus ? g_bst.scatSum / static_cast<float>(g_bst.focus) : 0.f, g_bst.refused);
         const int logs = g_bst.logs;
         g_bst = BurstStats();
         g_bst.t0 = now;
@@ -7235,10 +7245,10 @@ void Apply(uintptr_t mgr) {
         const int32_t hipProjId = S.fpProjId;
         if (focus && S.fpProjAds) S.fpProj = S.fpProjAds, S.fpProjId = S.fpProjAdsId;
         int fired = 0;
-        float bmin = 0.f;
-        const bool burstMode = vmgame::WeaponBurst(vmgame::CurrentWeapon(), &bmin);
+        float bmin = 0.f, bscatter = 0.f;
+        const bool burstMode = vmgame::WeaponBurst(vmgame::CurrentWeapon(), &bmin, &bscatter);
         for (int k = 0; k < nShot; ++k)
-            fired += (burstMode ? FireBurst(eye, sdirs[k], srange, focus, bmin)
+            fired += (burstMode ? FireBurst(eye, sdirs[k], srange, focus, bmin, bscatter)
                                 : FireShot(eye, sdirs[k], right, camUp, bodies, nb, clearance, srange))
                          ? 1
                          : 0;
