@@ -80,6 +80,8 @@ bool CurveAdsFovScaling();
 float HipSpreadCone();
 void SpreadDir(const float fwd[3], const float right[3], const float up[3], float out[3]);
 void SpreadSeed(unsigned seed);
+int Pellets();
+void PelletDir(const float dir[3], const float right[3], const float up[3], float out[3]);
 void PublishCamera(const float eye[3], const float right[3], const float up[3], const float fwd[3], float fovY);
 void Tracer(const float from[3], const float to[3]);
 void CastMarkerSet(const cm::Frame* f);

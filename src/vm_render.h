@@ -105,6 +105,8 @@ struct Settings {
     float adsFovAlt = 0.f, adsVmFovAlt = 0.f;
     bool adsFovScaling = true;
     float hipSpreadMin = 0.f, hipSpreadMax = 1.5f;
+    int pellets = 1;
+    float pelletSpread = 0.f, pelletSpreadAds = 0.f;
     bool crossHip = true, crossAds = false;
     float crossScale = 1.f;
     wchar_t flashFx[128] = L"";
@@ -438,7 +440,7 @@ private:
     int nLand_ = 0;
     unsigned rng_ = 0x2545f491u;
     UINT indexCount_ = 0;
-    UINT kindIdx_[3] = {}, kindFirst_[3] = {}, kindCount_[3] = {};
+    UINT kindIdx_[4] = {}, kindFirst_[4] = {}, kindCount_[4] = {};
     ID3D11VertexShader* vs_ = nullptr;
     ID3D11PixelShader* ps_ = nullptr;
     ID3D11InputLayout* layout_ = nullptr;

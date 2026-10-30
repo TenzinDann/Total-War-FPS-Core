@@ -472,6 +472,7 @@ volatile LONG g_adsTimeUs[3] = {250000, 250000, 250000}, g_curAdsUs[3] = {0, 0, 
 volatile LONG g_curveFracMicro = -1, g_curveFovMilli = 0, g_curveFovScaling = 1;
 volatile LONG g_spreadMicro = 0;
 unsigned g_spreadRng = 0x2545f491u;
+volatile LONG g_pelletN = 1, g_pelletMicro = 0;
 volatile LONG64 g_hudCover = 0;
 ID3D11Texture2D* g_hudTex = nullptr;
 UINT g_hudTexW = 0, g_hudTexH = 0;
@@ -688,6 +689,10 @@ vm::Look ComputeLook() {
         float k = g_crossSet.spreadMax > 0.f ? std::fmin((g_mo.crossKick + g_mo.crossMove) / g_crossSet.spreadMax, 1.f) : 0.f;
         float deg = (s.hipSpreadMin + (s.hipSpreadMax - s.hipSpreadMin) * k) * (1.f - std::fmin(std::fmax(g_mo.adsW, 0.f), 1.f));
         InterlockedExchange(&g_spreadMicro, (!g_fp || MeleeWeapon()) ? 0 : static_cast<LONG>(deg * 17453.2925f + 0.5f));
+        const float aw = std::fmin(std::fmax(g_mo.adsW, 0.f), 1.f), pd = s.pelletSpread + (s.pelletSpreadAds - s.pelletSpread) * aw;
+        const bool gun = g_fp && !MeleeWeapon();
+        InterlockedExchange(&g_pelletN, gun ? s.pellets : 1);
+        InterlockedExchange(&g_pelletMicro, gun ? static_cast<LONG>(pd * 17453.2925f + 0.5f) : 0);
     }
     vm::Look l;
     AnimStep(l, now);
@@ -3123,6 +3128,24 @@ void SpreadDir(const float fwd[3], const float right[3], const float up[3], floa
     float a = r * std::cos(th), b = r * std::sin(th), n = 0.f;
     for (int i = 0; i < 3; ++i) {
         out[i] = fwd[i] + right[i] * a + up[i] * b;
+        n += out[i] * out[i];
+    }
+    n = 1.f / std::sqrt(n);
+    for (int i = 0; i < 3; ++i) out[i] *= n;
+}
+int Pellets() { return g_pelletN >= 1 ? static_cast<int>(g_pelletN) : 1; }
+void PelletDir(const float dir[3], const float right[3], const float up[3], float out[3]) {
+    float cone = g_pelletMicro * 1e-6f;
+    for (int i = 0; i < 3; ++i) out[i] = dir[i];
+    if (!(cone > 0.f)) return;
+    auto rnd = [] {
+        g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
+        return static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
+    };
+    float r = std::tan(cone * std::sqrt(rnd())), th = 6.2831853f * rnd();
+    float a = r * std::cos(th), b = r * std::sin(th), n = 0.f;
+    for (int i = 0; i < 3; ++i) {
+        out[i] = dir[i] + right[i] * a + up[i] * b;
         n += out[i] * out[i];
     }
     n = 1.f / std::sqrt(n);

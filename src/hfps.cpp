@@ -6333,7 +6333,13 @@ void Apply(uintptr_t mgr) {
         }
         float sfwd[3];
         vmgame::SpreadDir(fwd, right, camUp, sfwd);
-        if (FireShot(eye, sfwd, right, camUp, bodies, nb, clearance)) {
+        bool fired = false;
+        for (int k = 0, np = vmgame::Pellets(); k < np; ++k) {
+            float pdir[3];
+            vmgame::PelletDir(sfwd, right, camUp, pdir);
+            if (FireShot(eye, pdir, right, camUp, bodies, nb, clearance)) fired = true;
+        }
+        if (fired) {
             ++S.shots;
             vmgame::Fire();
             S.camKick.OnShot(kp, adsW, now, &S.pitch, &S.yaw, lim);
