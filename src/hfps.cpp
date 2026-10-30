@@ -6,7 +6,6 @@
 #include <cstdio>
 #include <cstring>
 #include "shield_hit.h"
-#include "burst_pierce.h"
 #include "vm_game.h"
 #include "cast_marker.h"
 #include "game_volume.h"
@@ -48,10 +47,6 @@ void* g_orig_hero_1c8;
 uintptr_t g_hero_1c8_ret1, g_hero_1c8_ret2;
 void hfps_hero_1c8_thunk();
 void hfps_hero_melee(uintptr_t self, uintptr_t pend);
-void* g_orig_after_step;
-uintptr_t g_after_step_ret;
-void hfps_after_step_thunk();
-void hfps_after_step_pre(uintptr_t self, uintptr_t battle);
 }
 namespace {
 struct CodePrint {
@@ -529,7 +524,6 @@ struct Config {
     float pinnedClearance = 1.0f;
     float tpShotGuard = 1.1f;
     bool fastFire = true;
-    bool instantFire = true;
     bool earlyFlight = true;
     bool mpForce = false;
     bool autoLead = true;
@@ -811,7 +805,6 @@ void LoadConfig() {
     cfg.tpShotGuard = IniF(L"fire", L"teleport_guard", cfg.tpShotGuard, ini);
     cfg.fastFire = GetPrivateProfileIntW(L"fire", L"fast_fire", 1, ini) != 0;
     cfg.earlyFlight = GetPrivateProfileIntW(L"fire", L"early_flight", 1, ini) != 0;
-    cfg.instantFire = GetPrivateProfileIntW(L"fire", L"instant", 1, ini) != 0;
     cfg.mpForce = GetPrivateProfileIntW(L"mp", L"force_mp_mode", 0, ini) != 0;
     cfg.autoLead = GetPrivateProfileIntW(L"fire", L"auto_lead", 1, ini) != 0;
     cfg.leadExtra = IniF(L"fire", L"lead_extra", cfg.leadExtra, ini);
@@ -1168,8 +1161,6 @@ struct State {
     unsigned tpGuarded = 0, tpGuardSkipped = 0, guardLogs = 0;
     uintptr_t fpProj = 0;
     int32_t fpProjId = -1;
-    uintptr_t fpProjAds = 0;
-    int32_t fpProjAdsId = -1;
     int projFor = -1;
     int32_t meleeProjId[vmgame::kStrikeKinds] = {-1, -1, -1, -1, -1};
     unsigned meleeStrikes = 0, meleeFailed = 0, strikeLogs = 0;
@@ -1517,27 +1508,10 @@ bool Install(uintptr_t battle, uintptr_t heroEntity, uintptr_t projRecord);
 void Uninstall(const char* why);
 void Track(uintptr_t projRecord);
 }
-void LookupFocusProjectile() {
-    S.fpProjAds = 0;
-    S.fpProjAdsId = -1;
-    const char* key = vmgame::WeaponProjectileAds(S.projFor);
-    if (!g_shotOk || !key[0]) return;
-    int32_t id = -1;
-    uintptr_t rec = FindProjectile(key, &id);
-    if (rec && id >= 0) {
-        S.fpProjAds = rec;
-        S.fpProjAdsId = id;
-        herofx::Track(rec);
-    }
-    Log("fire: weapon %d focus projectile '%s' -> %s (id %d)", S.projFor, key, S.fpProjAds ? "found" : "NOT FOUND (same as hip)", id);
-}
 void EarlyFlightUninstall(const char* why);
 long EarlyFlightCalls();
 long EarlyFlightPromoted();
 void FastFireStats(bool force);
-bool InstantFireInstall(uintptr_t battle);
-void InstantFireUninstall(const char* why);
-bool InstantFireActive(uintptr_t battle);
 const char* ModeName(int m);
 void ReleaseHero(int mode, const char* why);
 void ExitSequenceStep(uintptr_t mgr);
@@ -1545,7 +1519,6 @@ void LauncherReset();
 void Exit(uintptr_t mgr, const char* why, bool release = true) {
     if (!S.active) return;
     LauncherReset();
-    InstantFireUninstall(why);
     FastFireUninstall(why);
     EarlyFlightUninstall(why);
     herofx::Uninstall(why);
@@ -1592,36 +1565,6 @@ bool HeroRouting(uintptr_t unit, int* state = nullptr) {
     if (state) *state = st;
     using FnRouting = char (*)(uintptr_t morale);
     return reinterpret_cast<FnRouting>(g_base + kFnUnitRouting904)(unit + oUnitMorale) != 0;
-}
-struct UnitKeyRec {
-    uintptr_t unit;
-    char key[48];
-};
-UnitKeyRec g_unitKeyTab[64];
-int g_unitKeyNext = 0;
-SRWLOCK g_unitKeyLock = SRWLOCK_INIT;
-void RememberUnitKey(uintptr_t unit, const char* key) {
-    AcquireSRWLockExclusive(&g_unitKeyLock);
-    int slot = -1;
-    for (int i = 0; i < 64 && slot < 0; ++i)
-        if (g_unitKeyTab[i].unit == unit) slot = i;
-    if (slot < 0) slot = g_unitKeyNext, g_unitKeyNext = (g_unitKeyNext + 1) % 64;
-    g_unitKeyTab[slot].unit = unit;
-    snprintf(g_unitKeyTab[slot].key, sizeof g_unitKeyTab[slot].key, "%s", key);
-    ReleaseSRWLockExclusive(&g_unitKeyLock);
-}
-void ForgetUnitKeys() {
-    AcquireSRWLockExclusive(&g_unitKeyLock);
-    memset(g_unitKeyTab, 0, sizeof g_unitKeyTab);
-    g_unitKeyNext = 0;
-    ReleaseSRWLockExclusive(&g_unitKeyLock);
-}
-void UnitKeyOf(uintptr_t unit, char* out, size_t n) {
-    out[0] = 0;
-    AcquireSRWLockShared(&g_unitKeyLock);
-    for (int i = 0; i < 64; ++i)
-        if (unit && g_unitKeyTab[i].unit == unit) snprintf(out, n, "%s", g_unitKeyTab[i].key);
-    ReleaseSRWLockShared(&g_unitKeyLock);
 }
 void Enter(uintptr_t mgr) {
     uintptr_t battle = Ptr(mgr + oMgrBattle);
@@ -1807,12 +1750,6 @@ void Enter(uintptr_t mgr) {
     CastReset();
     S.active = true;
     if (S.mpMode) mp::QueueOn(S.unit);
-    {
-        char heroKey[48];
-        UnitKeyOf(unit, heroKey, sizeof heroKey);
-        vmgame::SetHeroKey(heroKey);
-        Log("enter: unit key '%s'%s", heroKey, heroKey[0] ? "" : " (not reported by the battle script yet - weapon's own arms)");
-    }
     vmgame::SetFirstPerson(true);
     if (S.exitStage == 2) {
         Log("ghost: pending release cancelled - first person entered again");
@@ -1837,7 +1774,6 @@ void Enter(uintptr_t mgr) {
         uintptr_t sbf = Ptr(g_base + kGlobalScript);
         if (cfg.fastFire && g_shotOk && !S.mpMode) FastFireInstall(sbf ? Ptr(sbf + oScriptBattle) : 0);
         if (cfg.earlyFlight && g_shotOk && cfg.fireShooter && !S.mpMode) EarlyFlightInstall(sbf ? Ptr(sbf + oScriptBattle) : 0, entity);
-        if (cfg.instantFire && g_shotOk && !S.mpMode) InstantFireInstall(sbf ? Ptr(sbf + oScriptBattle) : 0);
         if (S.mpMode)
             Log("mp: multiplayer path - ammo flags, shield / no-knockdown / super armor, melee by message (FPS_ON / KEEP / SHIELD / MELEE / FPS_OFF); "
                 "off until they are message-driven: fast fire, ghost mode, bullet speed rewrite, "
@@ -1890,7 +1826,6 @@ void Enter(uintptr_t mgr) {
         uintptr_t sb3 = Ptr(g_base + kGlobalScript);
         herofx::Install(sb3 ? Ptr(sb3 + oScriptBattle) : 0, entity, S.fpProj);
     }
-    LookupFocusProjectile();
     if (FireOwner() && entity) {
         uintptr_t evt = Ptr(entity), f48 = evt ? Ptr(evt + 0x48) : 0;
         Log("fire: shooter = hero entity (kills counted, own bullets pass through it); muzzle launch point %s "
@@ -1956,21 +1891,10 @@ struct AimHit {
     const char* what = "range";
     uintptr_t ent = 0;
     float vel[2] = {0, 0};
-    float pos[3] = {0, 0, 0};
-    float off = 0;
     unsigned units = 0, ents = 0;
     unsigned snapCulled = 0;
 };
-struct LineHits {
-    static constexpr int kMax = 64;
-    int n = 0;
-    float t[kMax];
-    uintptr_t ent[kMax];
-    float vel[kMax][2];
-    float pos[kMax][3];
-};
-AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispLag, bool groundOnly = false, LineHits* line = nullptr,
-                float hitR = 0.55f, float headSlack = 0.f);
+AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispLag);
 constexpr uintptr_t kSimTickCall904 = 0x2dd393f;
 const unsigned char kSimTickCallBytes[20] = {0x48, 0x8b, 0x87, 0x30, 0x04, 0x00, 0x00, 0x48, 0x8b, 0x48,
                                              0x58, 0x48, 0x8b, 0x01, 0xff, 0x90, 0xb0, 0x01, 0x00, 0x00};
@@ -2220,100 +2144,6 @@ bool EarlyFlightActive() {
     LARGE_INTEGER q;
     QueryPerformanceCounter(&q);
     return q.QuadPart - g_ef.lastQpc < g_qpf.QuadPart / 2;
-}
-constexpr uintptr_t kAfterStepCall904 = 0x2dd3618, kAfterStepRet904 = 0x2dd3628, kExecCmdBlock904 = 0x2f041c0, kVtCmdReader904 = 0x3904438,
-                    kProjStep904 = 0x30ba364, oBattleAfterObj = 0x64558, oBattleWorld = 0x440, kAfterStepSlot = 0x288;
-const unsigned char kAfterStepCallBytes[16] = {0x48, 0x8b, 0x8f, 0x58, 0x45, 0x06, 0x00, 0x48, 0x8b, 0x01, 0xff, 0x90, 0x88, 0x02, 0x00, 0x00};
-struct InstantFire {
-    int siteState = 0;
-    uintptr_t obj = 0, origVt = 0, battle = 0;
-    uintptr_t* vtCopy = nullptr;
-    uintptr_t vtCopyOf = 0;
-    volatile LONG calls = 0, shots = 0, bullets = 0;
-    volatile LONG64 lastQpc = 0;
-    double latSum = 0, latMax = 0, tStat = 0;
-    unsigned latN = 0;
-} g_if;
-alignas(16) unsigned char g_ifBuf[0x5010];
-bool InstantFireInstall(uintptr_t battle) {
-    if (!cfg.instantFire || !battle) return false;
-    if (!g_ff.obj || g_ff.battle != battle || !g_ef.obj) {
-        Log("instant-fire: needs fast fire + early flight hooked first (fast fire %p, early flight %p) - off", (void*)g_ff.obj, (void*)g_ef.obj);
-        return false;
-    }
-    if (g_if.siteState == 0) {
-        unsigned char b[16] = {};
-        for (int i = 0; i < 16; ++i) Rd(g_base + kAfterStepCall904 + i, b[i]);
-        g_if.siteState = memcmp(b, kAfterStepCallBytes, 16) ? -1 : 1;
-        if (g_if.siteState > 0) g_after_step_ret = g_base + kAfterStepRet904;
-        Log("instant-fire: after_step call site %s (+%llx)", g_if.siteState > 0 ? "verified" : "NOT matching (other game version) - instant fire off",
-            (unsigned long long)kAfterStepCall904);
-    }
-    if (g_if.siteState < 0) return false;
-    uintptr_t obj = Ptr(battle + oBattleAfterObj), vt = obj ? Ptr(obj) : 0;
-    uintptr_t lo = 0, hi = 0;
-    if (!vt || !CodeRange(&lo, &hi)) {
-        Log("instant-fire: after_step object not found (obj %p vt %p)", (void*)obj, (void*)vt);
-        return false;
-    }
-    if (g_if.vtCopy && vt == reinterpret_cast<uintptr_t>(g_if.vtCopy + 1)) {
-        g_if.obj = obj;
-        g_if.battle = battle;
-        return true;
-    }
-    size_t slots = 0;
-    while (slots < 2048) {
-        uintptr_t f = Ptr(vt + 8 * slots);
-        if (f < lo || f >= hi) break;
-        ++slots;
-    }
-    if (slots <= kAfterStepSlot / 8) {
-        Log("instant-fire: after_step object %p vtable %p has only %zu slots - not hooking", (void*)obj, (void*)vt, slots);
-        return false;
-    }
-    if (!g_if.vtCopy || g_if.vtCopyOf != vt) {
-        size_t copyN = slots + 16 > 256 ? slots + 16 : 256;
-        auto* c = static_cast<uintptr_t*>(VirtualAlloc(nullptr, (copyN + 1) * sizeof(uintptr_t), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-        if (!c) return false;
-        c[0] = Ptr(vt - 8);
-        for (size_t i = 0; i < copyN; ++i) c[1 + i] = Ptr(vt + 8 * i);
-        g_orig_after_step = reinterpret_cast<void*>(c[1 + kAfterStepSlot / 8]);
-        c[1 + kAfterStepSlot / 8] = reinterpret_cast<uintptr_t>(&hfps_after_step_thunk);
-        DWORD old;
-        VirtualProtect(c, (copyN + 1) * sizeof(uintptr_t), PAGE_READONLY, &old);
-        g_if.vtCopy = c;
-        g_if.vtCopyOf = vt;
-    }
-    g_if.battle = battle;
-    g_if.calls = g_if.shots = g_if.bullets = 0;
-    g_if.latSum = g_if.latMax = 0;
-    g_if.latN = 0;
-    g_if.tStat = Now();
-    if (!Wr(obj, reinterpret_cast<uintptr_t>(g_if.vtCopy + 1))) {
-        Log("instant-fire: vtable write failed on %p", (void*)obj);
-        g_if.battle = 0;
-        return false;
-    }
-    g_if.obj = obj;
-    g_if.origVt = vt;
-    Log("instant-fire: hooked after_step object %p (vt +%llx, %zu slots, [+0x288] = +%llx) via vtable copy %p", (void*)obj,
-        (unsigned long long)(vt - g_base), slots, (unsigned long long)(reinterpret_cast<uintptr_t>(g_orig_after_step) - g_base),
-        (void*)(g_if.vtCopy + 1));
-    return true;
-}
-void InstantFireUninstall(const char* why) {
-    if (!g_if.obj) return;
-    if (g_if.vtCopy && Ptr(g_if.obj) == reinterpret_cast<uintptr_t>(g_if.vtCopy + 1)) Wr(g_if.obj, g_if.origVt);
-    Log("instant-fire: unhooked after_step object %p (%s): after_step calls %ld, shots executed there %ld, bullets stepped %ld", (void*)g_if.obj,
-        why, g_if.calls, g_if.shots, g_if.bullets);
-    g_if.battle = 0;
-    g_if.obj = 0;
-}
-bool InstantFireActive(uintptr_t battle) {
-    if (!g_if.obj || g_if.battle != battle) return false;
-    LARGE_INTEGER q;
-    QueryPerformanceCounter(&q);
-    return q.QuadPart - g_if.lastQpc < g_qpf.QuadPart / 2;
 }
 bool FastFireQueue(FireCmd* c) {
     using FnIssue = unsigned char (*)(uintptr_t queue, FireCmd* cmd);
@@ -3128,7 +2958,7 @@ void ShotPenRestore(const char* why) {
     if (n) Log("fire: custom penetration - %d projectile record(s) pointed back to their own penetration row (%s)", n, why);
 }
 bool FireShot(const float eye[3], const float fwd[3], const float right[3], const float up[3], const float (*bodies)[3],
-              int nBodies, float clearance, float rangeOverride = 0.f) {
+              int nBodies, float clearance) {
     uintptr_t sb = Ptr(g_base + kGlobalScript);
     uintptr_t battle = sb ? Ptr(sb + oScriptBattle) : 0;
     unsigned char no1 = 1, no2 = 1;
@@ -3176,8 +3006,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     } else {
         for (int i = 0; i < 3; ++i) ray[i] = fwd[i];
     }
-    const float wRange = rangeOverride > 0.f ? rangeOverride : vmgame::WeaponFireRange(vmgame::CurrentWeapon()),
-                range = wRange > 0.f ? wRange : cfg.fireRange;
+    const float wRange = vmgame::WeaponFireRange(vmgame::CurrentWeapon()), range = wRange > 0.f ? wRange : cfg.fireRange;
     for (int i = 0; i < 3; ++i) c.target[i] = eye[i] + fwd[i] * range;
     float d = muzzle ? cfg.muzzleDepth : cfg.fireForward, minGap = 0;
     bool clear = FireOwner() || nBodies == 0;
@@ -3226,8 +3055,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     float aim[3] = {eye[0] + fwd[0] * hit.dist, eye[1] + fwd[1] * hit.dist, eye[2] + fwd[2] * hit.dist};
     float leadT = 0.f, lead[2] = {0.f, 0.f};
     if (cfg.autoLead && hit.ent && (hit.vel[0] != 0.f || hit.vel[1] != 0.f)) {
-        float steps = (fast ? 1.0f : 2.5f) - (EarlyFlightActive() || mp::EarlyFlightOn() ? 1.0f : 0.0f) -
-                      (fast && InstantFireActive(battle) ? 1.0f : 0.0f) ;
+        float steps = (fast ? 1.0f : 2.5f) - (EarlyFlightActive() || mp::EarlyFlightOn() ? 1.0f : 0.0f) ;
         leadT = (toNext + period * steps + cfg.displayLag + hit.dist / (cfg.bulletSpeed > 100.f ? cfg.bulletSpeed : 2000.f)) * cfg.leadScale +
                 cfg.leadExtra;
         if (leadT < 0.f) leadT = 0.f;
@@ -3304,212 +3132,6 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
             c.launch[0], c.launch[1], c.launch[2], c.target[0], c.target[1], c.target[2], nBodies ? bodies[0][0] : 0.f,
             nBodies ? bodies[0][1] : 0.f, nBodies ? bodies[0][2] : 0.f);
     return ok != 0;
-}
-struct BurstStats {
-    double t0 = 0;
-    unsigned hip = 0, hipCut = 0, focus = 0, focusEnt = 0, refused = 0;
-    float hipSum = 0, scatSum = 0;
-    unsigned lines = 0, lineSoldiers = 0, pierce = 0;
-    float offSum = 0;
-    unsigned hipAir = 0;
-    int logs = 0;
-} g_bst;
-constexpr float kFocusHeadSlack = 1.5f, kHipPressUp = 6.f;
-bool FireBurst(const float eye[3], const float dir[3], float range, bool focus, float minDist, float scatter, float reach) {
-    uintptr_t sb = Ptr(g_base + kGlobalScript);
-    uintptr_t battle = sb ? Ptr(sb + oScriptBattle) : 0;
-    uintptr_t queue = battle ? Ptr(battle + oBattleCmdQueue) : 0;
-    unsigned char no1 = 1, no2 = 1;
-    if (battle) {
-        Rd(battle + oBattleNoCmd1, no1);
-        Rd(battle + oBattleNoCmd2, no2);
-    }
-    int32_t entId = 0;
-    if (S.entity) Rd(S.entity + oEntId, entId);
-    if (!battle || !queue || no1 || no2 || !S.fpProj || S.fpProjId < 0 || !FireOwner() || !entId) {
-        ++g_bst.refused;
-        if (g_bst.logs++ < 40)
-            Log("fire: burst refused: battle=%p queue=%p blocked=%u/%u projectile=%p id=%d owner=%d entityId=%d", (void*)battle, (void*)queue, no1,
-                no2, (void*)S.fpProj, S.fpProjId, FireOwner() ? 1 : 0, entId);
-        return false;
-    }
-    if (!(range > 0.f)) range = cfg.fireRange;
-    const double now = Now();
-    const float period = StepPeriod();
-    float toNext = LastStepTime() > 0 ? static_cast<float>(LastStepTime() + period - now) : period * 0.5f;
-    if (toNext < 0.f) toNext = 0.f;
-    if (toNext > period) toNext = period;
-    float dispLag = cfg.displayLag - (period - toNext);
-    if (dispLag < 0.f) dispLag = 0.f;
-    const bool fast = FastFireReady(battle);
-    AimHit hit;
-    float d = range;
-    if (focus) {
-        hit = TraceAim(eye, dir, range, dispLag, false, nullptr, reach, kFocusHeadSlack);
-        d = hit.dist + (hit.ent ? 0.4f : 0.f);
-    } else {
-        hit = TraceAim(eye, dir, vmgame::BurstDistance(minDist, range), dispLag, true);
-        d = hit.dist;
-    }
-    float burst[3] = {eye[0] + dir[0] * d, eye[1] + dir[1] * d, eye[2] + dir[2] * d};
-    if (focus && hit.ent)
-        for (int i = 0; i < 3; ++i) burst[i] = hit.pos[i];
-    if (focus && cfg.autoLead && hit.ent && (hit.vel[0] != 0.f || hit.vel[1] != 0.f)) {
-        const float steps = (fast ? 1.0f : 2.5f) - (EarlyFlightActive() || mp::EarlyFlightOn() ? 1.0f : 0.0f) -
-                            (fast && InstantFireActive(battle) ? 1.0f : 0.0f);
-        const float leadT = (toNext + period * steps + cfg.displayLag) * cfg.leadScale + cfg.leadExtra;
-        if (leadT > 0.f) {
-            burst[0] += hit.vel[0] * leadT;
-            burst[2] += hit.vel[1] * leadT;
-        }
-    }
-    float scat = 0.f;
-    if (focus && scatter > 0.f) {
-        float ox = 0.f, oz = 0.f;
-        vmgame::BurstScatter(scatter, &ox, &oz);
-        burst[0] += ox;
-        burst[2] += oz;
-        scat = std::sqrt(ox * ox + oz * oz);
-    }
-    float gh = 0.f;
-    const bool low = SurfaceNear(burst[0], burst[2], eye[1] - cfg.eyeHeight, &gh) && burst[1] < gh + (focus ? 2.5f : kHipPressUp) &&
-                     burst[1] > gh - 5.f;
-    if (low) burst[1] = gh + kMeleeBurstUp;
-    const float from[3] = {eye[0], eye[1] - 0.5f, eye[2]};
-    float v[3], vl = 0.f;
-    for (int i = 0; i < 3; ++i) {
-        v[i] = burst[i] - from[i];
-        vl += v[i] * v[i];
-    }
-    vl = std::sqrt(vl);
-    if (vl < 0.1f) return false;
-    FireCmd c;
-    memset(&c, 0, sizeof c);
-    c.vt = g_base + kVtFireCmd;
-    c.projId = S.fpProjId;
-    c.f0c = 6.2831855f;
-    for (int i = 0; i < 3; ++i) {
-        c.launch[i] = burst[i] - v[i] / vl * kMeleeFlight;
-        c.target[i] = burst[i];
-    }
-    c.tgtIsPos = 1;
-    c.shooter = S.entity;
-    using FnIssue = unsigned char (*)(uintptr_t queue, FireCmd* cmd);
-    const bool viaFast = fast && FastFireQueue(&c);
-    const unsigned char ok = viaFast ? 1 : reinterpret_cast<FnIssue>(g_base + kFnIssueCmd)(queue, &c);
-    S.lastShotFast = viaFast;
-    if (ok && focus) {
-        ++g_bst.focus;
-        if (hit.ent) ++g_bst.focusEnt;
-        g_bst.scatSum += scat;
-        if (hit.ent) g_bst.offSum += hit.off;
-    } else if (ok) {
-        ++g_bst.hip;
-        g_bst.hipSum += d;
-        if (hit.what[0] == 'g') ++g_bst.hipCut;
-        if (!low) ++g_bst.hipAir;
-    }
-    if (g_bst.logs++ < 40)
-        Log("fire: burst %s %s via %s: %s at %.1f m -> burst %.2f,%.2f,%.2f (%s), launch %.2f,%.2f,%.2f", focus ? "focus" : "hip",
-            ok ? "issued" : "REJECTED", viaFast ? "fast queue" : "command queue", hit.what, d, burst[0], burst[1], burst[2],
-            low ? "ground + 0.4 m" : "in the air", c.launch[0], c.launch[1], c.launch[2]);
-    if (g_bst.t0 <= 0.0) g_bst.t0 = now;
-    if (now - g_bst.t0 >= 3.0) {
-        Log("fire: bursts in %.1f s: hip %u (cut by ground / wall %u, in the air %u, distance avg %.1f m), "
-            "focus %u (on soldier %u, off line avg %.2f m, scatter avg %.2f m), pierce %u on %u lines (soldiers on line avg %.1f), refused %u",
-            now - g_bst.t0, g_bst.hip, g_bst.hipCut, g_bst.hipAir, g_bst.hip ? g_bst.hipSum / static_cast<float>(g_bst.hip) : 0.f, g_bst.focus,
-            g_bst.focusEnt, g_bst.focusEnt ? g_bst.offSum / static_cast<float>(g_bst.focusEnt) : 0.f,
-            g_bst.focus ? g_bst.scatSum / static_cast<float>(g_bst.focus) : 0.f, g_bst.pierce, g_bst.lines,
-            g_bst.lines ? static_cast<float>(g_bst.lineSoldiers) / static_cast<float>(g_bst.lines) : 0.f, g_bst.refused);
-        const int logs = g_bst.logs;
-        g_bst = BurstStats();
-        g_bst.t0 = now;
-        g_bst.logs = logs;
-    }
-    return ok != 0;
-}
-bool IssueBurstAt(const float eye[3], float burst[3], bool fast, uintptr_t queue) {
-    float gh = 0.f;
-    const bool low = SurfaceNear(burst[0], burst[2], eye[1] - cfg.eyeHeight, &gh) && burst[1] < gh + 2.5f && burst[1] > gh - 5.f;
-    if (low) burst[1] = gh + kMeleeBurstUp;
-    const float from[3] = {eye[0], eye[1] - 0.5f, eye[2]};
-    float v[3], vl = 0.f;
-    for (int i = 0; i < 3; ++i) {
-        v[i] = burst[i] - from[i];
-        vl += v[i] * v[i];
-    }
-    vl = std::sqrt(vl);
-    if (vl < 0.1f) return false;
-    FireCmd c;
-    memset(&c, 0, sizeof c);
-    c.vt = g_base + kVtFireCmd;
-    c.projId = S.fpProjId;
-    c.f0c = 6.2831855f;
-    for (int i = 0; i < 3; ++i) {
-        c.launch[i] = burst[i] - v[i] / vl * kMeleeFlight;
-        c.target[i] = burst[i];
-    }
-    c.tgtIsPos = 1;
-    c.shooter = S.entity;
-    using FnIssue = unsigned char (*)(uintptr_t queue, FireCmd* cmd);
-    const bool viaFast = fast && FastFireQueue(&c);
-    const unsigned char ok = viaFast ? 1 : reinterpret_cast<FnIssue>(g_base + kFnIssueCmd)(queue, &c);
-    S.lastShotFast = viaFast;
-    return ok != 0;
-}
-constexpr float kPierceGap = 1.5f;
-int FireBurstLine(const float eye[3], const float dir[3], float range, int maxBursts, float reach) {
-    uintptr_t sb = Ptr(g_base + kGlobalScript);
-    uintptr_t battle = sb ? Ptr(sb + oScriptBattle) : 0;
-    uintptr_t queue = battle ? Ptr(battle + oBattleCmdQueue) : 0;
-    unsigned char no1 = 1, no2 = 1;
-    if (battle) {
-        Rd(battle + oBattleNoCmd1, no1);
-        Rd(battle + oBattleNoCmd2, no2);
-    }
-    int32_t entId = 0;
-    if (S.entity) Rd(S.entity + oEntId, entId);
-    if (!battle || !queue || no1 || no2 || !S.fpProj || S.fpProjId < 0 || !FireOwner() || !entId || maxBursts <= 0) return 0;
-    if (!(range > 0.f)) range = cfg.fireRange;
-    const float period = StepPeriod();
-    float toNext = LastStepTime() > 0 ? static_cast<float>(LastStepTime() + period - Now()) : period * 0.5f;
-    if (toNext < 0.f) toNext = 0.f;
-    if (toNext > period) toNext = period;
-    float dispLag = cfg.displayLag - (period - toNext);
-    if (dispLag < 0.f) dispLag = 0.f;
-    const bool fast = FastFireReady(battle);
-    LineHits line;
-    AimHit hit = TraceAim(eye, dir, range, dispLag, false, &line, reach, kFocusHeadSlack);
-    ++g_bst.lines;
-    g_bst.lineSoldiers += static_cast<unsigned>(line.n);
-    if (!hit.ent || line.n < 2) return 0;
-    for (int i = 1; i < line.n; ++i)
-        for (int j = i; j > 0 && line.t[j] < line.t[j - 1]; --j) {
-            std::swap(line.t[j], line.t[j - 1]);
-            std::swap(line.ent[j], line.ent[j - 1]);
-            std::swap(line.vel[j][0], line.vel[j - 1][0]);
-            std::swap(line.vel[j][1], line.vel[j - 1][1]);
-            for (int c = 0; c < 3; ++c) std::swap(line.pos[j][c], line.pos[j - 1][c]);
-        }
-    int pick[LineHits::kMax];
-    const int k = pierce::Select(line.t, line.n, hit.dist, kPierceGap, std::min(maxBursts, LineHits::kMax), pick);
-    float leadT = 0.f;
-    if (cfg.autoLead) {
-        const float steps = (fast ? 1.0f : 2.5f) - (EarlyFlightActive() || mp::EarlyFlightOn() ? 1.0f : 0.0f) -
-                            (fast && InstantFireActive(battle) ? 1.0f : 0.0f);
-        leadT = (toNext + period * steps + cfg.displayLag) * cfg.leadScale + cfg.leadExtra;
-        if (leadT < 0.f) leadT = 0.f;
-    }
-    int issued = 0;
-    for (int j = 0; j < k; ++j) {
-        const int i = pick[j];
-        float burst[3] = {line.pos[i][0] + line.vel[i][0] * leadT, line.pos[i][1], line.pos[i][2] + line.vel[i][1] * leadT};
-        if (IssueBurstAt(eye, burst, fast, queue)) ++issued;
-    }
-    g_bst.pierce += static_cast<unsigned>(issued);
-    if (g_bst.logs++ < 40)
-        Log("fire: pierce line: %d soldiers up to %.1f m (first at %.1f m) -> %d of %d bursts issued", line.n, line.t[line.n - 1], hit.dist, issued, k);
-    return issued;
 }
 constexpr double kShotGuardWindow = 0.35;
 constexpr float kShotFirstLeg = 24.f;
@@ -4500,7 +4122,7 @@ void VelStep(uintptr_t battle, const float eye[3], const float fwd[3]) {
         }
     }
 }
-AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispLag, bool groundOnly, LineHits* line, float hitR, float headSlack) {
+AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispLag) {
     AimHit h;
     h.dist = range;
     uintptr_t battle = 0;
@@ -4537,8 +4159,6 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
         }
         if (known) prev = t;
     }
-    if (groundOnly) return h;
-    const float lineEnd = h.dist;
     int heroAl = -1;
     unsigned n = CollectUnits(battle, &heroAl);
     h.units = n;
@@ -4559,8 +4179,8 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
                 float qx = x->p[0] - vel[0] * dispLag, qz = x->p[2] - vel[1] * dispLag;
                 float t = ((qx - eye[0]) * hx + (qz - eye[2]) * hz) / hh;
                 float px = eye[0] + fwd[0] * t - qx, pz = eye[2] + fwd[2] * t - qz;
-                const float out = hitR + kAimSnapSlack;
-                if (px * px + pz * pz > out * out || t < 1.f - snapT || t >= (line ? lineEnd : h.dist) + snapT) {
+                const float out = 0.55f + kAimSnapSlack;
+                if (px * px + pz * pz > out * out || t < 1.f - snapT || t >= h.dist + snapT) {
                     ++h.ents;
                     ++h.snapCulled;
                     return;
@@ -4574,37 +4194,12 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
         float qx = q[0] - vel[0] * dispLag, qz = q[2] - vel[1] * dispLag;
         float v[3] = {qx - eye[0], q[1] - eye[1], qz - eye[2]};
         float t = hh > 1e-6f ? (v[0] * hx + v[2] * hz) / hh : v[0] * fwd[0] + v[1] * fwd[1] + v[2] * fwd[2];
-        if (t < 1.f || t >= (line ? lineEnd : h.dist)) return;
+        if (t < 1.f || t >= h.dist) return;
         float px = eye[0] + fwd[0] * t - qx, pz = eye[2] + fwd[2] * t - qz, py = eye[1] + fwd[1] * t;
-        if (px * px + pz * pz > hitR * hitR || py < q[1] || py > q[1] + 2.1f + headSlack) return;
-        if (line) {
-            int slot = line->n;
-            if (slot < LineHits::kMax) {
-                ++line->n;
-            } else {
-                slot = 0;
-                for (int i = 1; i < LineHits::kMax; ++i)
-                    if (line->t[i] > line->t[slot]) slot = i;
-                if (t >= line->t[slot]) slot = -1;
-            }
-            if (slot >= 0) {
-                line->t[slot] = t;
-                line->ent[slot] = e;
-                line->vel[slot][0] = hasVel ? vel[0] : 0.f;
-                line->vel[slot][1] = hasVel ? vel[1] : 0.f;
-                line->pos[slot][0] = qx;
-                line->pos[slot][1] = q[1];
-                line->pos[slot][2] = qz;
-            }
-        }
-        if (t >= h.dist) return;
+        if (px * px + pz * pz > 0.55f * 0.55f || py < q[1] || py > q[1] + 2.1f) return;
         h.dist = t;
         h.what = "soldier";
         h.ent = e;
-        h.pos[0] = qx;
-        h.pos[1] = q[1];
-        h.pos[2] = qz;
-        h.off = std::sqrt(px * px + pz * pz);
         h.vel[0] = hasVel ? vel[0] : 0.f;
         h.vel[1] = hasVel ? vel[1] : 0.f;
     };
@@ -4618,7 +4213,7 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
             float v[3] = {q[0] - eye[0], q[1] - eye[1], q[2] - eye[2]};
             float t = v[0] * fwd[0] + v[1] * fwd[1] + v[2] * fwd[2];
             float c[3] = {v[0] - fwd[0] * t, v[1] - fwd[1] * t, v[2] - fwd[2] * t};
-            if (t < -40.f || t > (line ? lineEnd : h.dist) + 40.f || c[0] * c[0] + c[1] * c[1] + c[2] * c[2] > 1600.f) continue;
+            if (t < -40.f || t > h.dist + 40.f || c[0] * c[0] + c[1] * c[1] + c[2] * c[2] > 1600.f) continue;
         }
         for (unsigned k = 0; k < ne; ++k) test(ents[k]);
     }
@@ -5602,9 +5197,8 @@ void ShotRestoreSpeed(const char* why) {
 }
 void ShotStep() {
     bool active = S.active && g_shotOk && g_fireOk && cfg.fireEnabled;
-    uintptr_t rec = active && !S.mpMode && cfg.bulletSpeed > 0.f && S.unit && !S.fpProj ? Ptr(S.unit + oUnitProjectile) : 0;
-    if (S.speedApplied && rec != S.speedRec)
-        ShotRestoreSpeed(rec ? "weapon changed" : active && S.fpProj ? "weapon uses its own projectile" : "first person ended");
+    uintptr_t rec = active && !S.mpMode && cfg.bulletSpeed > 0.f && S.unit ? (S.fpProj ? S.fpProj : Ptr(S.unit + oUnitProjectile)) : 0;
+    if (S.speedApplied && rec != S.speedRec) ShotRestoreSpeed(rec ? "weapon changed" : "first person ended");
     if (!active) ShotDamageRestore("first person ended");
     if (!active) ShotPenRestore("first person ended");
     WeaponParamsSync();
@@ -7369,28 +6963,10 @@ void Apply(uintptr_t mgr) {
             S.fpProjId = S.fpProj ? id : -1;
             herofx::Track(S.fpProj);
             Log("fire: weapon %d projectile '%s' -> %s (id %d)", S.projFor, want, S.fpProj ? "found" : "NOT FOUND (hero's own)", S.fpProjId);
-            LookupFocusProjectile();
         }
-        float sdirs[8][3], srange = 0.f;
-        bool focus = false;
-        const int nShot = vmgame::ShotPattern(adsW, fwd, right, camUp, sdirs, 8, &srange, &focus);
-        const uintptr_t hipProj = S.fpProj;
-        const int32_t hipProjId = S.fpProjId;
-        if (focus && S.fpProjAds) S.fpProj = S.fpProjAds, S.fpProjId = S.fpProjAdsId;
-        int fired = 0;
-        float bmin = 0.f, bscatter = 0.f;
-        int bpierce = 0;
-        float breach = 0.55f;
-        const bool burstMode = vmgame::WeaponBurst(vmgame::CurrentWeapon(), &bmin, &bscatter, &bpierce, &breach);
-        for (int k = 0; k < nShot; ++k)
-            fired += (burstMode ? FireBurst(eye, sdirs[k], srange, focus, bmin, bscatter, breach)
-                                : FireShot(eye, sdirs[k], right, camUp, bodies, nb, clearance, srange))
-                         ? 1
-                         : 0;
-        if (burstMode && focus && bpierce > 0 && fired) FireBurstLine(eye, sdirs[0], srange, bpierce, breach);
-        S.fpProj = hipProj;
-        S.fpProjId = hipProjId;
-        if (fired) {
+        float sfwd[3];
+        vmgame::SpreadDir(fwd, right, camUp, sfwd);
+        if (FireShot(eye, sfwd, right, camUp, bodies, nb, clearance)) {
             ++S.shots;
             vmgame::Fire();
             S.camKick.OnShot(kp, adsW, now, &S.pitch, &S.yaw, lim);
@@ -7433,7 +7009,6 @@ bool InstallHook() {
     uintptr_t vt = Ptr(mgr);
     uintptr_t ours = g_vtCopy ? reinterpret_cast<uintptr_t>(g_vtCopy + 2) : 0;
     if (ours && vt == ours) return true;
-    if (ours && g_if.vtCopy && vt == reinterpret_cast<uintptr_t>(g_if.vtCopy + 1) && g_if.vtCopyOf == ours) return true;
     if (vt != g_base + kVtCamMgr) {
         Refuse(kRefuseOther);
         Log("camera manager %p has unexpected vtable %p; not hooking", (void*)mgr, (void*)vt);
@@ -8178,59 +7753,6 @@ extern "C" void hfps_sim_tick(uintptr_t self, uintptr_t packet, uintptr_t battle
     }
     ReleaseSRWLockExclusive(&g_ff.lock);
 }
-extern "C" void hfps_after_step_pre(uintptr_t self, uintptr_t battle) {
-    (void)self;
-    InterlockedIncrement(&g_if.calls);
-    LARGE_INTEGER q;
-    QueryPerformanceCounter(&q);
-    g_if.lastQpc = q.QuadPart;
-    if (!battle || battle != g_if.battle || battle != g_ff.battle || !g_ef.hero || g_ff.multiBlock) return;
-    const uintptr_t world = *reinterpret_cast<uintptr_t*>(battle + oBattleWorld);
-    if (!world || world != g_ef.world) return;
-    uint32_t n = 0;
-    int np = 0;
-    double tp[64];
-    AcquireSRWLockExclusive(&g_ff.lock);
-    if (g_ff.n && g_ff.n <= 0x5000) {
-        n = g_ff.n;
-        np = g_ff.nPend;
-        memcpy(g_ifBuf + 8, g_ff.buf, n);
-        memcpy(tp, g_ff.tPend, sizeof(double) * static_cast<size_t>(np));
-        g_ff.n = 0;
-        g_ff.nPend = 0;
-    }
-    ReleaseSRWLockExclusive(&g_ff.lock);
-    if (n) {
-        *reinterpret_cast<uintptr_t*>(g_ifBuf) = g_base + kVtCmdReader904;
-        *reinterpret_cast<uint32_t*>(g_ifBuf + 0x5008) = n;
-        using FnExec = void (*)(uintptr_t buf, uintptr_t world);
-        reinterpret_cast<FnExec>(g_base + kExecCmdBlock904)(reinterpret_cast<uintptr_t>(g_ifBuf), world);
-        *reinterpret_cast<uint32_t*>(g_ifBuf + 0x5008) = 0;
-        uintptr_t ours[64];
-        unsigned k = PromoteHeroBullets(world, ours, g_ef.hero);
-        hitprobe::Arm(world, g_ef.hero, ours, k);
-        using FnStep = void (*)(uintptr_t bullet);
-        for (unsigned i = 0; i < k; ++i) reinterpret_cast<FnStep>(g_base + kProjStep904)(ours[i]);
-        InterlockedExchangeAdd(&g_if.shots, np);
-        InterlockedExchangeAdd(&g_if.bullets, static_cast<LONG>(k));
-        const double t = Now();
-        for (int i = 0; i < np; ++i) {
-            const double l = (t - tp[i]) * 1000.0;
-            g_if.latSum += l;
-            if (l > g_if.latMax) g_if.latMax = l;
-            ++g_if.latN;
-        }
-    }
-    const double now = Now();
-    if (now - g_if.tStat >= 3.0) {
-        g_if.tStat = now;
-        if (g_if.latN || n)
-            Log("instant-fire: after_step %ld, shots executed there %ld (fire -> executed avg %.0f ms, max %.0f ms over %u), bullets stepped %ld",
-                g_if.calls, g_if.shots, g_if.latN ? g_if.latSum / g_if.latN : 0.0, g_if.latMax, g_if.latN, g_if.bullets);
-        g_if.latSum = g_if.latMax = 0;
-        g_if.latN = 0;
-    }
-}
 constexpr uintptr_t oBattleVisRoot = 0x64600, oVisRootMgr = 0x1a0, oVisMgrUnitCount = 0x164, oVisMgrUnits = 0x168, oUnitVisUnit = 0xf8,
                     oUnitVisSoldierCount = 0x34, oUnitVisSoldiers = 0x38, oSoldierVisEntity = 0x18, oSoldierVisInstance = 0xf8,
                     oInstPartCount = 0x8, oInstParts = 0x10, kInstPartStride = 0x48;
@@ -8590,7 +8112,6 @@ struct Fns {
     float (*tonumber)(void*, int);
     int (*type)(void*, int);
     size_t (*objlen)(void*, int);
-    const char* (*tolstring)(void*, int, size_t*);
 } f;
 int g_state = -1;
 char g_missing[48] = "";
@@ -8612,7 +8133,6 @@ bool Resolve() {
         }
         memcpy(e.slot, &p, sizeof p);
     }
-    if (FARPROC p = exe ? GetProcAddress(exe, "lua_tolstring") : nullptr) memcpy(&f.tolstring, &p, sizeof p);
     g_state = 1;
     return true;
 }
@@ -8646,31 +8166,6 @@ int IsHero(void* L) {
     }
     f.pushboolean(L, how ? 1 : 0);
     return 1;
-}
-int UnitKeysFn(void* L) {
-    f.pushstring(L, vmgame::UnitKeys());
-    return 1;
-}
-int SetUnit(void* L) {
-    bool ok = false;
-    if (f.tolstring && f.type(L, 1) == kTUserdata && f.objlen(L, 1) >= sizeof(uintptr_t)) {
-        const void* blk = f.touserdata(L, 1);
-        uintptr_t wrap = 0;
-        if (blk) memcpy(&wrap, blk, sizeof wrap);
-        const uintptr_t p = wrap ? Ptr(wrap + 8) : 0;
-        size_t n = 0;
-        const char* key = f.tolstring(L, 2, &n);
-        if (p && key && n > 0 && n < 48) {
-            RememberUnitKey(p, key);
-            ok = true;
-        }
-    }
-    f.pushboolean(L, ok ? 1 : 0);
-    return 1;
-}
-int BattleStarted(void*) {
-    ForgetUnitKeys();
-    return 0;
 }
 int HudEnabled(void* L) {
     f.pushboolean(L, cfg.hudEnabled ? 1 : 0);
@@ -8875,13 +8370,11 @@ int PushTable(void* L) {
         f.setfield(L, -2, e.name);
     }
     {
-        const struct { const char* name; CFn fn; } more[] = {{"unit_keys", UnitKeysFn}, {"set_unit", SetUnit}, {"battle_started", BattleStarted},
-                                                             {"set_mp_players", SetMpPlayers}};
-        for (const auto& e : more) {
+        const struct { const char* name; CFn fn; } mp[] = {{"set_mp_players", SetMpPlayers}};
+        for (const auto& e : mp) {
             f.pushcclosure(L, e.fn, 0);
             f.setfield(L, -2, e.name);
         }
-        if (!f.tolstring) Log("lua-api: lua_tolstring not exported - set_unit off (character arms stay the weapon's own)");
     }
     Log("lua-api: interface table v4 returned (luaopen #%ld, lua state %p)", n, L);
     return 1;
