@@ -232,6 +232,22 @@ const CodePrint kArmorPrints904[] = {
 const CodePrint kMoraleLockPrints904[] = {
     {0x3033e40, 0x31, 0x9c69c6976f544645ull},
     {0x304c190, 0x1cd, 0x618f86e8ee295c36ull}};
+const CodePrint kAggroPrints904[] = {
+    {0x2ef045c, 0x3a, 0x088f6732f2da7a66ull},
+    {0x2ef0364, 0x47, 0x97ae22b45236fc06ull},
+    {0x2e9e120, 0x2a, 0xb258d47a050392d0ull},
+    {0x2eef220, 0x64, 0xf7cc40673f07f94dull},
+    {0x2ed82a8, 0x161, 0xb9fd6bbfc251b866ull},
+    {0x2ea92f0, 0x68, 0xf4a40fe567f7a719ull},
+    {0x2df5a24, 0x6e, 0xcaebcada910c3c0aull},
+    {0x2eed600, 0xb0, 0x232219452cb3c735ull},
+    {0x3020c84, 0x6c, 0x39d92f464aa456f5ull},
+    {0x2f37be4, 0x30, 0xbf8797fca15661d1ull}};
+constexpr uintptr_t kVtUnitControlCmd904 = 0x3907198, kFnUnitControlWrite904 = 0x2eef220, kFnScriptIssueControl904 = 0x2e9e120;
+constexpr uintptr_t kVtAttackUnitCmd904 = 0x3aba528, kFnAttackUnitWrite904 = 0x2eed600, kFnAttackUnitCtor904 = 0x2ea92f0,
+                    kFnIssueAttackUnit904 = 0x2df5a24, kFnCurrentTarget904 = 0x3020c84;
+constexpr uintptr_t oUnitArmy = 0x70, oArmyAiOwned = 0x2a8;
+constexpr int32_t kControlScript = 2;
 const CodePrint kAbilityPrints904[] = {
     {0x2f008d0, 0x27b, 0x594cd05ca9272710ull},
     {0x2ea94e8, 0xa0, 0x744ebda3b94ebcedull},
@@ -490,6 +506,7 @@ constexpr int32_t kAttrMeleeDisabled = 0x2a;
 bool g_meleeOk = false;
 constexpr int32_t kAttrUnbreakable = 0x15;
 bool g_moraleLockOk = false;
+bool g_aggroOk = false;
 bool g_shotOk = false;
 bool g_projLookupOk = false;
 bool g_meleeHitOk = false;
@@ -581,6 +598,9 @@ struct Config {
     bool revealEnemies = true;
     bool noMelee = true;
     bool lockMorale = true;
+    bool aggro = true;
+    float aggroRadius = 60.f, aggroRelease = 80.f, aggroHitHold = 20.f, aggroInterval = 2.f;
+    int aggroMax = 4;
     bool noKnock = true;
     bool superArmor = true;
     bool heroesOnly = true;
@@ -900,6 +920,19 @@ void LoadConfig() {
     cfg.revealEnemies = GetPrivateProfileIntW(L"hero", L"reveal_enemies", 1, ini) != 0;
     cfg.noMelee = GetPrivateProfileIntW(L"hero", L"no_melee", 1, ini) != 0;
     cfg.lockMorale = GetPrivateProfileIntW(L"hero", L"lock_morale", 1, ini) != 0;
+    cfg.aggro = GetPrivateProfileIntW(L"aggro", L"enabled", 1, ini) != 0;
+    cfg.aggroRadius = IniF(L"aggro", L"radius", 60.f, ini);
+    cfg.aggroRelease = IniF(L"aggro", L"release_radius", 80.f, ini);
+    cfg.aggroMax = GetPrivateProfileIntW(L"aggro", L"max_units", 4, ini);
+    cfg.aggroHitHold = IniF(L"aggro", L"hit_hold", 20.f, ini);
+    cfg.aggroInterval = IniF(L"aggro", L"interval", 2.f, ini);
+    if (!(cfg.aggroRadius >= 0.f && cfg.aggroRadius <= 500.f)) cfg.aggroRadius = 60.f;
+    if (!(cfg.aggroRelease >= cfg.aggroRadius && cfg.aggroRelease <= 1000.f)) cfg.aggroRelease = cfg.aggroRadius + 20.f;
+    if (cfg.aggroMax < 0 || cfg.aggroMax > 16) cfg.aggroMax = 4;
+    if (!(cfg.aggroHitHold >= 0.f && cfg.aggroHitHold <= 600.f)) cfg.aggroHitHold = 20.f;
+    if (!(cfg.aggroInterval >= 0.5f && cfg.aggroInterval <= 30.f)) cfg.aggroInterval = 2.f;
+    Log("aggro: enabled=%d radius=%.0f release_radius=%.0f max_units=%d hit_hold=%.0f interval=%.1f", cfg.aggro, cfg.aggroRadius,
+        cfg.aggroRelease, cfg.aggroMax, cfg.aggroHitHold, cfg.aggroInterval);
     cfg.noKnock = GetPrivateProfileIntW(L"hero", L"no_knockdown", 1, ini) != 0;
     cfg.superArmor = GetPrivateProfileIntW(L"hero", L"super_armor", 1, ini) != 0;
     cfg.heroesOnly = GetPrivateProfileIntW(L"hero", L"heroes_only", 1, ini) != 0;
@@ -2541,6 +2574,15 @@ bool MeleeEngineQueue(int kind, int cat, const float eye[3], const float fwd[3])
     ReleaseSRWLockExclusive(&g_mq.lock);
     return ok;
 }
+volatile LONG g_agHitN = 0;
+uintptr_t g_agHitRing[64];
+void AggroNoteHit(uintptr_t victimEnt) {
+    if (!cfg.aggro || !Plausible(victimEnt)) return;
+    const uintptr_t u = Ptr(victimEnt + oEntUnit);
+    if (!Plausible(u)) return;
+    const LONG i = InterlockedIncrement(&g_agHitN) - 1;
+    g_agHitRing[i & 63] = u;
+}
 int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const MeleeKindCfg& arc, const MeleeCatCfg& cc, float frac, int* dmgOut,
                    int mpFlags = -1) {
     using FnCalc = int32_t* (*)(uintptr_t combat, int32_t* out, uintptr_t attacker, uintptr_t victim, uint32_t splitTargets);
@@ -2575,6 +2617,7 @@ int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const Mele
             InterlockedIncrement(&g_mq.forced);
         }
     }
+    if (mpFlags < 0) AggroNoteHit(victim);
     alignas(16) unsigned char hi[0x100];
     memset(hi, 0, sizeof hi);
     reinterpret_cast<FnCtor>(g_base + kFnHitInfoCtor904)(hi, victim);
@@ -2958,6 +3001,7 @@ void HitFeedback(const AimHit& hit, const float eye[3], const float fwd[3]) {
     if (!hit.ent || !Rd(hit.ent + 0xb1c, hp) || !hp) return;
     uintptr_t side = Ptr(hit.ent + 0x80);
     if (!side || side == Ptr(S.entity + 0x80)) return;
+    AggroNoteHit(hit.ent);
     int32_t dmg = 0, ap = 0;
     if (S.fpProj) {
         Rd(S.fpProj + 0x70, dmg);
@@ -4897,6 +4941,262 @@ void MoraleStep() {
     if (S.moraleLogs++ < 20)
         Log("morale: hero %p unbreakable set (morale locked in first person: no wavering / routing; [hero] lock_morale=0 turns it off) issued %d",
             (void*)S.unit, ok);
+}
+struct ControlCmd {
+    uintptr_t vt;
+    uintptr_t unit;
+    int32_t mode;
+    uint8_t pad[12];
+};
+struct alignas(16) AttackCmdBuf {
+    unsigned char b[0xa0];
+};
+struct AggroCand {
+    uintptr_t unit;
+    float dist;
+    bool held;
+    double hitUntil;
+    bool want;
+    bool aura;
+};
+void AggroChoose(AggroCand* c, unsigned n, float radius, float release, int maxUnits, double now) {
+    int aura = 0;
+    for (unsigned i = 0; i < n; ++i) {
+        c[i].want = c[i].aura = false;
+        if (c[i].hitUntil > now && c[i].dist <= release * 2.f) c[i].want = true;
+    }
+    for (unsigned i = 0; i < n && aura < maxUnits; ++i)
+        if (c[i].held && !c[i].want && c[i].dist <= release) {
+            c[i].want = c[i].aura = true;
+            ++aura;
+        }
+    for (unsigned i = 0; i < n && aura < maxUnits; ++i)
+        if (!c[i].held && !c[i].want && c[i].dist <= radius) {
+            c[i].want = c[i].aura = true;
+            ++aura;
+        }
+}
+struct AggroHeld {
+    uintptr_t unit;
+    double since;
+    bool aura;
+};
+struct AggroGrudgeRec {
+    uintptr_t unit;
+    double until;
+};
+constexpr unsigned kAggroCap = 32;
+struct AggroState {
+    AggroHeld h[kAggroCap];
+    unsigned n = 0;
+    AggroGrudgeRec grudge[kAggroCap];
+    unsigned nGrudge = 0;
+    uintptr_t battle = 0, hero = 0;
+    double nextScan = 0;
+    LONG hitRead = 0;
+    unsigned logs = 0, takes = 0, reorders = 0, releases = 0, hits = 0;
+    bool mpLogged = false;
+} g_ag;
+bool IssueUnitControl(uintptr_t unit, int32_t mode) {
+    const uintptr_t sb = Ptr(g_base + kGlobalScript);
+    if (!sb || !Plausible(unit) || !CmdQueue(nullptr)) return false;
+    ControlCmd c;
+    memset(&c, 0, sizeof c);
+    c.vt = g_base + kVtUnitControlCmd904;
+    c.unit = unit;
+    c.mode = mode;
+    using Fn = void (*)(uintptr_t battleField, ControlCmd* cmd);
+    reinterpret_cast<Fn>(g_base + kFnScriptIssueControl904)(sb + oScriptBattle, &c);
+    return true;
+}
+int32_t AggroReleaseMode(uintptr_t unit) {
+    uint8_t aiOwned = 0;
+    const uintptr_t army = Ptr(unit + oUnitArmy);
+    if (army) Rd(army + oArmyAiOwned, aiOwned);
+    return aiOwned == 0 ? 1 : 0;
+}
+bool IssueAttackUnit(uintptr_t unit, uintptr_t target) {
+    const uintptr_t queue = CmdQueue(nullptr);
+    if (!queue || !Plausible(unit) || !Plausible(target)) return false;
+    SelBuf sel;
+    using FnCtor = void* (*)(void*);
+    using FnAdd = void (*)(void*, uintptr_t, char);
+    reinterpret_cast<FnCtor>(g_base + kFnSelCtor)(&sel);
+    reinterpret_cast<FnAdd>(g_base + kFnSelAdd)(&sel, unit, 0);
+    unsigned n = 0;
+    memcpy(&n, sel.b + oSelUnitCount, 4);
+    bool ok = false;
+    if (n) {
+        AttackCmdBuf cmd;
+        memset(&cmd, 0, sizeof cmd);
+        using FnAtk = void* (*)(void* cmd, void* sel, uintptr_t target, char run, char queued, char z);
+        using FnIssue = unsigned char (*)(uintptr_t queue, void* cmd);
+        reinterpret_cast<FnAtk>(g_base + kFnAttackUnitCtor904)(cmd.b, &sel, target, 1, 0, 0);
+        ok = reinterpret_cast<FnIssue>(g_base + kFnIssueAttackUnit904)(queue, cmd.b) != 0;
+        FreeSelection(cmd.b + 8);
+    }
+    FreeSelection(&sel);
+    return ok;
+}
+uintptr_t AggroCurrentTarget(uintptr_t unit) {
+    using Fn = uintptr_t (*)(uintptr_t unit);
+    return reinterpret_cast<Fn>(g_base + kFnCurrentTarget904)(unit);
+}
+int AggroFind(uintptr_t u) {
+    for (unsigned j = 0; j < g_ag.n; ++j)
+        if (g_ag.h[j].unit == u) return static_cast<int>(j);
+    return -1;
+}
+double AggroGrudgeOf(uintptr_t u, double now) {
+    for (unsigned j = 0; j < g_ag.nGrudge; ++j)
+        if (g_ag.grudge[j].unit == u) return g_ag.grudge[j].until > now ? g_ag.grudge[j].until : 0.0;
+    return 0.0;
+}
+bool AggroGrudge(uintptr_t u, double until) {
+    unsigned at = g_ag.nGrudge, oldest = 0;
+    for (unsigned j = 0; j < g_ag.nGrudge; ++j) {
+        if (g_ag.grudge[j].unit == u) at = j;
+        if (g_ag.grudge[j].until < g_ag.grudge[oldest].until) oldest = j;
+    }
+    const bool fresh = at == g_ag.nGrudge;
+    if (fresh && g_ag.nGrudge >= kAggroCap) at = oldest;
+    else if (fresh) ++g_ag.nGrudge;
+    g_ag.grudge[at] = {u, until};
+    return fresh;
+}
+void AggroReleaseAll(const char* why, bool sendCommands) {
+    unsigned issued = 0;
+    if (sendCommands)
+        for (unsigned j = 0; j < g_ag.n; ++j) issued += IssueUnitControl(g_ag.h[j].unit, AggroReleaseMode(g_ag.h[j].unit));
+    if (g_ag.n || g_ag.takes)
+        Log("aggro: %u taken units %s (%s, issued %u); this first-person session: taken %u, attack re-orders %u, released %u, hits noted %u", g_ag.n,
+            sendCommands ? "released back to their army AI" : "forgotten without commands", why, issued, g_ag.takes, g_ag.reorders,
+            g_ag.releases + (sendCommands ? g_ag.n : 0), g_ag.hits);
+    g_ag.n = g_ag.nGrudge = 0;
+    g_ag.takes = g_ag.reorders = g_ag.releases = g_ag.hits = g_ag.logs = 0;
+    g_ag.hero = 0;
+    g_ag.nextScan = 0;
+}
+void AggroStep() {
+    const bool want = S.active && !S.ghostWanted && cfg.aggro && g_aggroOk && S.unit && S.entity;
+    if (!want && !g_ag.n) {
+        g_ag.hitRead = g_agHitN;
+        g_ag.nGrudge = 0;
+        if (!S.active) g_ag.mpLogged = false;
+        return;
+    }
+    uintptr_t battle = 0;
+    const uintptr_t queue = CmdQueue(&battle);
+    if (g_ag.n && battle != g_ag.battle) AggroReleaseAll("battle changed", false);
+    if (!queue) return;
+    bool on = want;
+    if (on) {
+        uint64_t mp = 1;
+        if (!Rd(battle + oBattleIsMp, mp)) mp = 1;
+        if (mp) {
+            if (!g_ag.mpLogged) Log("aggro: multiplayer battle - taunt aura off (taking control of AI units from a client is not verified)");
+            g_ag.mpLogged = true;
+            on = false;
+        }
+    }
+    if (!on || (g_ag.hero && S.unit != g_ag.hero)) {
+        AggroReleaseAll(!want ? "first person off / aggro switched off" : !on ? "multiplayer" : "hero changed", true);
+        if (!on) return;
+    }
+    g_ag.battle = battle;
+    g_ag.hero = S.unit;
+    const double now = Now();
+    bool freshHit = false;
+    const LONG w = g_agHitN;
+    for (LONG i = (w - g_ag.hitRead > 64 ? w - 64 : g_ag.hitRead); i < w; ++i) {
+        const uintptr_t u = g_agHitRing[i & 63];
+        if (!u || cfg.aggroHitHold <= 0.f) continue;
+        ++g_ag.hits;
+        if (AggroGrudge(u, now + cfg.aggroHitHold) && AggroFind(u) < 0) freshHit = true;
+    }
+    g_ag.hitRead = w;
+    if (now < g_ag.nextScan && !freshHit) return;
+    g_ag.nextScan = now + cfg.aggroInterval;
+    float hp[3];
+    if (!EntPos(S.entity, hp)) return;
+    int heroAl = -1;
+    const unsigned nu = CollectUnits(battle, &heroAl);
+    if (heroAl < 0) return;
+    static AggroCand cand[256];
+    static uintptr_t ents[512];
+    unsigned nc = 0;
+    for (unsigned i = 0; i < nu && nc < 256; ++i) {
+        if (g_units[i].alliance == heroAl) continue;
+        const uintptr_t u = g_units[i].unit;
+        const int held = AggroFind(u);
+        const double grudge = AggroGrudgeOf(u, now);
+        const unsigned ne = UnitEntities(u, ents, 512);
+        float q0[3];
+        if (held < 0 && grudge <= 0.0 && ne && EntPos(ents[0], q0) &&
+            (q0[0] - hp[0]) * (q0[0] - hp[0]) + (q0[2] - hp[2]) * (q0[2] - hp[2]) > (cfg.aggroRadius + 120.f) * (cfg.aggroRadius + 120.f))
+            continue;
+        const unsigned stride = ne > 48 ? ne / 48 : 1;
+        float best = 1e9f;
+        unsigned alive = 0;
+        for (unsigned k = 0; k < ne; k += stride) {
+            uint32_t ehp = 0;
+            float q[3];
+            if (!Rd(ents[k] + 0xb1c, ehp) || !ehp || !EntPos(ents[k], q)) continue;
+            ++alive;
+            const float dx = q[0] - hp[0], dz = q[2] - hp[2], d = std::sqrt(dx * dx + dz * dz);
+            if (d < best) best = d;
+        }
+        if (!alive || HeroRouting(u)) continue;
+        if (held < 0 && grudge <= 0.0 && best > cfg.aggroRadius) continue;
+        cand[nc++] = {u, best, held >= 0, grudge, false, false};
+    }
+    for (unsigned i = 1; i < nc; ++i)
+        for (unsigned j = i; j > 0 && cand[j].dist < cand[j - 1].dist; --j) {
+            const AggroCand t = cand[j];
+            cand[j] = cand[j - 1];
+            cand[j - 1] = t;
+        }
+    AggroChoose(cand, nc, cfg.aggroRadius, cfg.aggroRelease, cfg.aggroMax, now);
+    for (unsigned j = 0; j < g_ag.n;) {
+        const uintptr_t u = g_ag.h[j].unit;
+        int ci = -1;
+        for (unsigned i = 0; i < nc && ci < 0; ++i)
+            if (cand[i].unit == u) ci = static_cast<int>(i);
+        if (ci >= 0 && cand[ci].want) {
+            ++j;
+            continue;
+        }
+        bool present = false;
+        for (unsigned i = 0; i < nu && !present; ++i) present = g_units[i].unit == u;
+        const bool ok = present && IssueUnitControl(u, AggroReleaseMode(u));
+        ++g_ag.releases;
+        if (g_ag.logs++ < 60)
+            Log("aggro: unit %p released back to its army AI (%s) issued %d", (void*)u,
+                !present ? "gone" : ci < 0 ? "dead / routing / out of range" : "out of the aura and no grudge", ok);
+        g_ag.h[j] = g_ag.h[--g_ag.n];
+    }
+    for (unsigned i = 0; i < nc; ++i) {
+        if (!cand[i].want) continue;
+        const uintptr_t u = cand[i].unit;
+        const int j = AggroFind(u);
+        if (j < 0) {
+            if (g_ag.n >= kAggroCap) continue;
+            const bool t = IssueUnitControl(u, kControlScript);
+            const bool a = t && IssueAttackUnit(u, S.unit);
+            g_ag.h[g_ag.n++] = {u, now, cand[i].aura};
+            ++g_ag.takes;
+            if (g_ag.logs++ < 60)
+                Log("aggro: unit %p taken at %.0f m (%s) - take control %d, attack hero %d", (void*)u, cand[i].dist,
+                    cand[i].aura ? "aura" : "hit by the hero", t, a);
+            continue;
+        }
+        g_ag.h[j].aura = cand[i].aura;
+        const uintptr_t tgt = AggroCurrentTarget(u);
+        if (tgt == S.unit) continue;
+        const bool a = IssueAttackUnit(u, S.unit);
+        ++g_ag.reorders;
+        if (g_ag.logs++ < 60) Log("aggro: unit %p current target %p (not the hero) at %.0f m - attack hero again %d", (void*)u, (void*)tgt, cand[i].dist, a);
+    }
 }
 constexpr uintptr_t kVtKnockBack = 0x540, kVtKnockDown = 0x548, kVtKnockFlying = 0x550;
 struct NoKnock {
@@ -7914,6 +8214,9 @@ bool VerifyGame() {
             cfg.heroesOnly);
         g_routOk = PrintsMatch(Prints(kRoutPrints904), "hero routing check (is_routing)");
         Log("hero: leave first person when the hero routs %s", g_routOk ? "ok" : "OFF - a routing hero stays controllable");
+        g_aggroOk = g_moveOk && g_routOk && g_mpFlagOk && Ptr(g_base + kVtUnitControlCmd904) == g_base + kFnUnitControlWrite904 &&
+                    Ptr(g_base + kVtAttackUnitCmd904) == g_base + kFnAttackUnitWrite904 && PrintsMatch(Prints(kAggroPrints904), "aggro (taunt aura)");
+        Log("aggro: taunt aura in first person %s", g_aggroOk ? "ok" : "OFF - enemies are left to their army AI");
         g_arrowOk = PrintsMatch(Prints(kArrowPrints904), "stuck arrows (arrow visual manager)") &&
                     Ptr(g_base + kVtArrowMgr904) == g_base + kFnArrowUpdate904 && Ptr(g_base + kVtArrowMgr904 + 8) == g_base + kFnArrowDraw904;
         Log("arrows: hide arrows stuck in the hero %s", g_arrowOk ? "ok" : "OFF - arrows that hit the hero stay visible in first person");
@@ -8525,6 +8828,7 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     }
     const bool staleFp = InterlockedExchange(&g_staleFp, 0) != 0;
     InterlockedIncrement(&g_camBeat);
+    if (staleFp && g_ag.n) AggroReleaseAll("left over from the previous battle", false);
     if (staleFp && S.moraleUnit) {
         Log("morale: forgetting unbreakable on %p (left over from the previous battle)", (void*)S.moraleUnit);
         S.moraleUnit = 0;
@@ -8562,6 +8866,7 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     RevealStep(mgr);
     MeleeStep();
     MoraleStep();
+    AggroStep();
     NoKnockStep();
     UiStep();
     CursorStep();
