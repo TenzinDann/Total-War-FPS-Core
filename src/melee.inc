@@ -221,9 +221,9 @@ const Exit kGsExit[] = {{"draw", "idle", 0.2f},
                         {"m_gs_swing_finished", "idle", 0.2f},
                         {"m_gs_push", "idle", 0.2f},
                         {"m_gs_parry_end", "idle", 0.2f},
-                        {"m_gs_parry_end_v2", "idle", 0.2f},
-                        {"m_gs_parry_end_v3", "idle", 0.2f},
-                        {"m_gs_parry_end_v4", "idle", 0.2f}};
+                        {"m_gs_parry_end_f2", "idle", 0.2f},
+                        {"m_gs_parry_end_f3", "idle", 0.2f},
+                        {"m_gs_parry_end_f4", "idle", 0.2f}};
 const Impact kGsImpact[kActs] = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
                                  {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash},
                                  {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash},
@@ -497,7 +497,7 @@ int CycleBlock(int base) {
     int n = 1;
     char nm[64];
     for (int v = 2; v <= 4; ++v) {
-        snprintf(nm, sizeof nm, "%s_v%d", Ms().def[kBlock].clip, v);
+        snprintf(nm, sizeof nm, "%s_f%d", Ms().def[kBlock].clip, v);
         int c = Wp().rend.FindClip(nm);
         if (c < 0) break;
         idx[n++] = c;
@@ -510,7 +510,7 @@ int BlockEndClip() {
     if (!Ms().blockEnd) return -1;
     if (g_blockVar > 0) {
         char nm[64];
-        snprintf(nm, sizeof nm, "%s_v%d", Ms().blockEnd, g_blockVar + 1);
+        snprintf(nm, sizeof nm, "%s_f%d", Ms().blockEnd, g_blockVar + 1);
         int c = Wp().rend.FindClip(nm);
         if (c >= 0) return c;
     }
@@ -521,7 +521,7 @@ bool IsBlockEnd(int clip) {
     if (clip == Wp().rend.FindClip(Ms().blockEnd)) return true;
     char nm[64];
     for (int v = 2; v <= 4; ++v) {
-        snprintf(nm, sizeof nm, "%s_v%d", Ms().blockEnd, v);
+        snprintf(nm, sizeof nm, "%s_f%d", Ms().blockEnd, v);
         if (clip == Wp().rend.FindClip(nm)) return true;
     }
     return false;
