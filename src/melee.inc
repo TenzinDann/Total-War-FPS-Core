@@ -220,7 +220,10 @@ const Exit kGsExit[] = {{"draw", "idle", 0.2f},
                         {"m_gs_bopp", "m_gs_swing_finished", 0.2f},
                         {"m_gs_swing_finished", "idle", 0.2f},
                         {"m_gs_push", "idle", 0.2f},
-                        {"m_gs_parry_end", "idle", 0.2f}};
+                        {"m_gs_parry_end", "idle", 0.2f},
+                        {"m_gs_parry_end_v2", "idle", 0.2f},
+                        {"m_gs_parry_end_v3", "idle", 0.2f},
+                        {"m_gs_parry_end_v4", "idle", 0.2f}};
 const Impact kGsImpact[kActs] = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
                                  {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash},
                                  {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash},
@@ -488,6 +491,65 @@ int PickVariant(int act, int base) {
     if (g_log) g_log("melee: %s variant %d of %d", Ms().def[act].name, k, n);
     return idx[k];
 }
+int g_blockVar = -1;
+int CycleBlock(int base) {
+    int idx[4] = {base};
+    int n = 1;
+    char nm[64];
+    for (int v = 2; v <= 4; ++v) {
+        snprintf(nm, sizeof nm, "%s_v%d", Ms().def[kBlock].clip, v);
+        int c = Wp().rend.FindClip(nm);
+        if (c < 0) break;
+        idx[n++] = c;
+    }
+    g_blockVar = n > 1 ? (g_blockVar + 1) % n : 0;
+    if (g_log) g_log("melee: block form %d of %d", g_blockVar + 1, n);
+    return idx[g_blockVar];
+}
+int BlockEndClip() {
+    if (!Ms().blockEnd) return -1;
+    if (g_blockVar > 0) {
+        char nm[64];
+        snprintf(nm, sizeof nm, "%s_v%d", Ms().blockEnd, g_blockVar + 1);
+        int c = Wp().rend.FindClip(nm);
+        if (c >= 0) return c;
+    }
+    return Wp().rend.FindClip(Ms().blockEnd);
+}
+bool IsBlockEnd(int clip) {
+    if (clip < 0 || !Ms().blockEnd) return false;
+    if (clip == Wp().rend.FindClip(Ms().blockEnd)) return true;
+    char nm[64];
+    for (int v = 2; v <= 4; ++v) {
+        snprintf(nm, sizeof nm, "%s_v%d", Ms().blockEnd, v);
+        if (clip == Wp().rend.FindClip(nm)) return true;
+    }
+    return false;
+}
+const int kMatchBones[3] = {23, 27, 117};
+void BlockMatchStart(int c, double now) {
+    const int prev = g_an.prev;
+    if (c < 0 || !IsBlockEnd(prev) || g_an.curRate <= 0) return;
+    const float tPrev = static_cast<float>((now - g_an.prevStart) * g_an.prevRate);
+    float cur[9], m[12];
+    for (int i = 0; i < 3; ++i) {
+        if (!Wp().rend.BoneAt(prev, tPrev, kMatchBones[i], m)) return;
+        cur[i * 3] = m[3], cur[i * 3 + 1] = m[7], cur[i * 3 + 2] = m[11];
+    }
+    const float dur = Wp().rend.ClipDuration(c);
+    float best = 1e30f, bt = 0.f;
+    for (float t = 0.f; t <= dur + 1e-4f; t += 1.f / 60.f) {
+        float d = 0.f;
+        for (int i = 0; i < 3; ++i) {
+            if (!Wp().rend.BoneAt(c, t, kMatchBones[i], m)) return;
+            const float dx = m[3] - cur[i * 3], dy = m[7] - cur[i * 3 + 1], dz = m[11] - cur[i * 3 + 2];
+            d += dx * dx + dy * dy + dz * dz;
+        }
+        if (d < best) best = d, bt = t;
+    }
+    g_an.curStart = now - bt / g_an.curRate;
+    if (g_log) g_log("melee: block form %d starts at %.3f s (closest to the lowering pose, %.1f cm)", g_blockVar + 1, bt, std::sqrt(best / 3.f) * 100.f);
+}
 void Go(int next, double now, const char* why, const char* clip = nullptr, float fade = -1.f) {
     if (g_log) g_log("melee: %.3f %s -> %s (%s)", now - g.start, Ms().def[g.act].name, Ms().def[next].name, why);
     if (g_traceN < 256) g_trace[g_traceN++] = next;
@@ -504,8 +566,9 @@ void Go(int next, double now, const char* why, const char* clip = nullptr, float
         MPlay(c, now, fade >= 0.f ? fade : nd.enter, nd.scale);
     } else {
         c = Wp().rend.FindClip(nd.clip);
-        if (c >= 0) c = PickVariant(next, c);
+        if (c >= 0) c = next == kBlock ? CycleBlock(c) : PickVariant(next, c);
         MPlay(c >= 0 ? c : g_an.idle, now, nd.enter, nd.scale);
+        if (next == kBlock) BlockMatchStart(c, now);
     }
     if (IsAttack(next) || next == kPush) {
         Swing* s = &g_sw[0];
@@ -594,7 +657,7 @@ void MeleeStep(vm::Look& l, double now) {
             if (g_traceN < 256) g_trace[g_traceN++] = kIdle;
             g.act = kIdle;
             g.start = now;
-            int be = ms.blockEnd ? Wp().rend.FindClip(ms.blockEnd) : -1;
+            int be = BlockEndClip();
             if (be >= 0) MPlay(be, now, ms.blockEndFade);
             else PlayRest(now, 0.2);
         } else if (press && t >= 0.2) {

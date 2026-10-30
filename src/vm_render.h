@@ -683,6 +683,7 @@ public:
     int FindClip(const char* name) const;
     float ClipDuration(int i) const;
     bool ClipLoops(int i) const;
+    bool BoneAt(int clip, float time, int bone, float* m34) const { return BoneWorldAt(clip, time, bone, m34); }
     bool Muzzle(float* ndcX, float* ndcY, float* aspect) const;
     bool MuzzleView(MuzzleFrame* f) const;
     ID3D11DepthStencilView* Depth(UINT w, UINT h) const {
