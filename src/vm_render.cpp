@@ -924,6 +924,31 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.scopeLensRadius = IniFloat(ini, L"scope_lens_radius", s.scopeLensRadius);
     if (!(s.scopeLensRadius > 0.001f && s.scopeLensRadius < 0.2f)) s.scopeLensRadius = 0.0178f;
     s.scopeReticle = IniFloat(ini, L"scope_reticle", s.scopeReticle);
+    {
+        wchar_t buf[128];
+        GetPrivateProfileStringW(L"viewmodel", L"scope_levels", L"", buf, 128, ini);
+        float lv[8] = {};
+        int n = 0;
+        bool ok = buf[0] != 0;
+        for (wchar_t* p = buf; ok && *p;) {
+            wchar_t* end = nullptr;
+            double x = wcstod(p, &end);
+            if (end == p || !std::isfinite(x) || x < 1.0 || x > 40.0 || n >= 8 || (n > 0 && x <= lv[n - 1])) {
+                ok = false;
+                break;
+            }
+            lv[n++] = static_cast<float>(x);
+            p = end;
+            while (*p == L' ' || *p == L',' || *p == L'\t') ++p;
+        }
+        s.scopeLevelCount = ok ? n : 0;
+        for (int k = 0; k < 8; ++k) s.scopeLevels[k] = k < s.scopeLevelCount ? lv[k] : 0.f;
+        const float def = IniFloat(ini, L"scope_level_default", 0.f);
+        int di = 0;
+        for (int k = 1; k < s.scopeLevelCount; ++k)
+            if (std::fabs(s.scopeLevels[k] - def) < std::fabs(s.scopeLevels[di] - def)) di = k;
+        s.scopeLevelDefault = di;
+    }
     s.handIk =IniFloat(ini, L"hand_ik", s.handIk ? 1.f : 0.f) != 0.f;
     IniVec3(ini, L"ik_grip_ri", s.ikGripRi);
     IniVec3(ini, L"ik_grip_le", s.ikGripLe);
@@ -959,6 +984,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (!(s.shellLandPerSec >= 0.f && s.shellLandPerSec <= 60.f)) s.shellLandPerSec = 6.f;
     if (!(s.shellGround >= 0.1f && s.shellGround <= 10.f)) s.shellGround = 1.75f;
     s.fireTailGap = IniFloat(ini, L"fire_tail_gap", s.fireTailGap);
+    s.fireSync = IniFloat(ini, L"fire_sync", s.fireSync ? 1.f : 0.f) != 0.f;
     s.meleeStrikeLead = IniFloat(ini, L"melee_strike_lead", s.meleeStrikeLead);
     if (!(s.meleeStrikeLead >= 0.f && s.meleeStrikeLead <= 0.6f)) s.meleeStrikeLead = 0.25f;
     {
@@ -1107,12 +1133,6 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.hipSpreadMax = IniFloat(ini, L"hip_spread_max", s.hipSpreadMax);
     if (!(s.hipSpreadMin >= 0.f && s.hipSpreadMin <= 30.f)) s.hipSpreadMin = 0.f;
     if (!(s.hipSpreadMax >= s.hipSpreadMin && s.hipSpreadMax <= 30.f)) s.hipSpreadMax = s.hipSpreadMin;
-    s.pellets = static_cast<int>(IniFloat(ini, L"pellets", static_cast<float>(s.pellets)));
-    if (s.pellets < 1 || s.pellets > 16) s.pellets = 1;
-    s.pelletSpread = IniFloat(ini, L"pellet_spread", s.pelletSpread);
-    s.pelletSpreadAds = IniFloat(ini, L"pellet_spread_ads", s.pelletSpread);
-    if (!(s.pelletSpread >= 0.f && s.pelletSpread <= 30.f)) s.pelletSpread = 0.f;
-    if (!(s.pelletSpreadAds >= 0.f && s.pelletSpreadAds <= 30.f)) s.pelletSpreadAds = s.pelletSpread;
     s.crossHip = IniFloat(ini, L"crosshair_hip", s.crossHip ? 1.f : 0.f) != 0.f;
     s.crossAds = IniFloat(ini, L"crosshair_ads", s.crossAds ? 1.f : 0.f) != 0.f;
     s.crossScale = IniFloat(ini, L"crosshair_scale", s.crossScale);
@@ -1185,7 +1205,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.shellFollow = static_cast<int>(IniFloat(ini, L"shell_follow", static_cast<float>(s.shellFollow)));
     if (s.shellFollow < 0 || s.shellFollow > 1) s.shellFollow = 1;
     s.shellCaliber = static_cast<int>(IniFloat(ini, L"shell_caliber", static_cast<float>(s.shellCaliber)));
-    if (s.shellCaliber != 556 && s.shellCaliber != 762 && s.shellCaliber != 12) s.shellCaliber = 556;
+    if (s.shellCaliber != 556 && s.shellCaliber != 762) s.shellCaliber = 556;
     IniVec2(ini, L"shell_out", s.shellOut);
     IniVec2(ini, L"shell_fwd", s.shellFwd);
     IniVec2(ini, L"shell_up", s.shellUp);
@@ -1724,8 +1744,7 @@ ID3D11ShaderResourceView* Renderer::CopyForDistort(ID3D11DeviceContext* ctx, ID3
     ScreenBufs& b = Sb();
     ID3D11Texture2D *&distTex_ = b.distTex, *&depthTex_ = b.depthTex, *&distDepthTex_ = b.distDepthTex;
     ID3D11ShaderResourceView *&distSrv_ = b.distSrv, *&distDepthSrv_ = b.distDepthSrv;
-    UINT &distW_ = b.distW, &distH_ = b.distH, &depthW_ = b.depthW, &depthH_ = b.depthH, &distDepthW_ = b.distDepthW, &distDepthH_ = b.distDepthH;
-    DXGI_FORMAT& distFmt_ = b.distFmt;
+    UINT &depthW_ = b.depthW, &depthH_ = b.depthH;
     D3D11_TEXTURE2D_DESC sd;
     backBuffer->GetDesc(&sd);
     if (sd.SampleDesc.Count != 1 || sd.Width != w || sd.Height != h) return nullptr;
@@ -1737,53 +1756,11 @@ ID3D11ShaderResourceView* Renderer::CopyForDistort(ID3D11DeviceContext* ctx, ID3
     case DXGI_FORMAT_R16G16B16A16_TYPELESS: f = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
     default: break;
     }
-    if (!distSrv_ || w != distW_ || h != distH_ || f != distFmt_) {
-        SafeRelease(distSrv_);
-        SafeRelease(distTex_);
-        D3D11_TEXTURE2D_DESC td = {};
-        td.Width = w;
-        td.Height = h;
-        td.MipLevels = 1;
-        td.ArraySize = 1;
-        td.Format = f;
-        td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_DEFAULT;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        if (FAILED(dev_->CreateTexture2D(&td, nullptr, &distTex_)) || FAILED(dev_->CreateShaderResourceView(distTex_, nullptr, &distSrv_))) {
-            SafeRelease(distSrv_);
-            SafeRelease(distTex_);
-            distBroken_ = true;
-            return nullptr;
-        }
-        distW_ = w;
-        distH_ = h;
-        distFmt_ = f;
-    }
+    if (!EnsureDistTex(w, h, f)) return nullptr;
     ctx->CopySubresourceRegion(distTex_, 0, 0, 0, 0, backBuffer, 0, nullptr);
     distDepthOk_ = false;
     if (depthTex_ && depthW_ == w && depthH_ == h) {
-        if (!distDepthSrv_ || distDepthW_ != w || distDepthH_ != h) {
-            SafeRelease(distDepthSrv_);
-            SafeRelease(distDepthTex_);
-            D3D11_TEXTURE2D_DESC dd = {};
-            dd.Width = w;
-            dd.Height = h;
-            dd.MipLevels = dd.ArraySize = 1;
-            dd.Format = DXGI_FORMAT_R32_TYPELESS;
-            dd.SampleDesc.Count = 1;
-            dd.Usage = D3D11_USAGE_DEFAULT;
-            dd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            D3D11_SHADER_RESOURCE_VIEW_DESC vd = {};
-            vd.Format = DXGI_FORMAT_R32_FLOAT;
-            vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-            vd.Texture2D.MipLevels = 1;
-            if (FAILED(dev_->CreateTexture2D(&dd, nullptr, &distDepthTex_)) || FAILED(dev_->CreateShaderResourceView(distDepthTex_, &vd, &distDepthSrv_))) {
-                SafeRelease(distDepthSrv_);
-                SafeRelease(distDepthTex_);
-            }
-            distDepthW_ = w;
-            distDepthH_ = h;
-        }
+        EnsureDistDepth(w, h);
         if (distDepthSrv_) {
             ctx->CopyResource(distDepthTex_, depthTex_);
             distDepthOk_ = true;
@@ -1792,6 +1769,79 @@ ID3D11ShaderResourceView* Renderer::CopyForDistort(ID3D11DeviceContext* ctx, ID3
     if (gamma)
         *gamma = !(f == DXGI_FORMAT_R16G16B16A16_FLOAT || f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
     return distSrv_;
+}
+bool Renderer::EnsureDistTex(UINT w, UINT h, DXGI_FORMAT f) {
+    if (distBroken_ || !dev_) return false;
+    ScreenBufs& b = Sb();
+    ID3D11Texture2D*& distTex_ = b.distTex;
+    ID3D11ShaderResourceView*& distSrv_ = b.distSrv;
+    UINT &distW_ = b.distW, &distH_ = b.distH;
+    DXGI_FORMAT& distFmt_ = b.distFmt;
+    if (distSrv_ && w == distW_ && h == distH_ && f == distFmt_) return true;
+    SafeRelease(distSrv_);
+    SafeRelease(distTex_);
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = w;
+    td.Height = h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = f;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(dev_->CreateTexture2D(&td, nullptr, &distTex_)) || FAILED(dev_->CreateShaderResourceView(distTex_, nullptr, &distSrv_))) {
+        SafeRelease(distSrv_);
+        SafeRelease(distTex_);
+        distBroken_ = true;
+        return false;
+    }
+    distW_ = w;
+    distH_ = h;
+    distFmt_ = f;
+    return true;
+}
+void Renderer::EnsureDistDepth(UINT w, UINT h) {
+    ScreenBufs& b = Sb();
+    ID3D11Texture2D*& distDepthTex_ = b.distDepthTex;
+    ID3D11ShaderResourceView*& distDepthSrv_ = b.distDepthSrv;
+    UINT &distDepthW_ = b.distDepthW, &distDepthH_ = b.distDepthH;
+    if (distDepthSrv_ && distDepthW_ == w && distDepthH_ == h) return;
+    SafeRelease(distDepthSrv_);
+    SafeRelease(distDepthTex_);
+    D3D11_TEXTURE2D_DESC dd = {};
+    dd.Width = w;
+    dd.Height = h;
+    dd.MipLevels = dd.ArraySize = 1;
+    dd.Format = DXGI_FORMAT_R32_TYPELESS;
+    dd.SampleDesc.Count = 1;
+    dd.Usage = D3D11_USAGE_DEFAULT;
+    dd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SHADER_RESOURCE_VIEW_DESC vd = {};
+    vd.Format = DXGI_FORMAT_R32_FLOAT;
+    vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    vd.Texture2D.MipLevels = 1;
+    if (FAILED(dev_->CreateTexture2D(&dd, nullptr, &distDepthTex_)) || FAILED(dev_->CreateShaderResourceView(distDepthTex_, &vd, &distDepthSrv_))) {
+        SafeRelease(distDepthSrv_);
+        SafeRelease(distDepthTex_);
+    }
+    distDepthW_ = w;
+    distDepthH_ = h;
+}
+bool Renderer::PrewarmScreen(const D3D11_TEXTURE2D_DESC& bb) {
+    if (!ready_ || !dev_ || bb.SampleDesc.Count != 1 || bb.Width < 16 || bb.Height < 16) return false;
+    const UINT w = bb.Width, h = bb.Height;
+    DXGI_FORMAT f = bb.Format;
+    switch (f) {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS: f = DXGI_FORMAT_R8G8B8A8_UNORM; break;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS: f = DXGI_FORMAT_B8G8R8A8_UNORM; break;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS: f = DXGI_FORMAT_R10G10B10A2_UNORM; break;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS: f = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
+    default: break;
+    }
+    const bool depth = EnsureDepth(w, h);
+    if (!sceneBroken_) EnsureScene(w, h, f);
+    if (EnsureDistTex(w, h, f) && depth) EnsureDistDepth(w, h);
+    return depth;
 }
 bool Renderer::EnsureScene(UINT w, UINT h, DXGI_FORMAT fmt) {
     if (sceneBroken_) return false;
@@ -4062,6 +4112,15 @@ void Crosshair::Release() {
     SafeRelease(dss_);
     dev_ = nullptr;
 }
+bool Crosshair::Prewarm(ID3D11Device* dev) {
+    if (failed_ || !dev) return false;
+    if (dev == dev_ && vs_) return true;
+    if (!Init(dev)) {
+        failed_ = true;
+        return false;
+    }
+    return true;
+}
 bool Crosshair::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool rtvEncodesSrgb,
                      const CrosshairSettings& s, float spread, float alpha) {
     if (!s.enabled || !ctx || !rtv || w < 16 || h < 16 || failed_ || !(alpha > 0.004f)) return false;
@@ -4174,7 +4233,6 @@ const char kShellShader[] = R"HLSL(cbuffer CShellFrame : register(b0) {
     float4 uFlashPos;
     float4 uFlashCol;
     float4 uBrass;
-    float4 uHull;
 };
 cbuffer CShellObj : register(b1) { float4 uRows[192]; };
 Texture2D tScene : register(t3);
@@ -4202,10 +4260,8 @@ float3 SrgbDecode(float3 c) {
     return float3(c.x <= 0.04045 ? lo.x : hi.x, c.y <= 0.04045 ? lo.y : hi.y, c.z <= 0.04045 ? lo.z : hi.z);
 }
 float4 PS(PSIn i) : SV_Target {
-    bool plastic = i.shade < 0;
-    float3 alb = plastic ? uHull.rgb * -i.shade : uBrass.rgb * i.shade;
-    float metal = plastic ? 0 : 1;
-    float rough = clamp(plastic ? uHull.w : uBrass.w, 0.04, 1);
+    float3 alb = uBrass.rgb * i.shade;
+    float rough = clamp(uBrass.w, 0.04, 1);
     float3 N = normalize(i.n);
     float3 V = normalize(-i.vpos);
     if (dot(N, V) < 0) N = -N;
@@ -4229,9 +4285,9 @@ float4 PS(PSIn i) : SV_Target {
     float D = a2 / (3.14159265 * d * d);
     float k = (rough + 1) * (rough + 1) / 8;
     float G = (NdL / (NdL * (1 - k) + k)) * (NdV / (NdV * (1 - k) + k));
-    float3 F0 = lerp(float3(0.04, 0.04, 0.04), alb, metal);
+    float3 F0 = alb;
     float3 F = F0 + (1 - F0) * pow(1 - VdH, 5);
-    float3 direct = (D * G * F / (4 * NdL * NdV + 1e-4) + (1 - F) * (1 - metal) * alb / 3.14159265) * lightCol * NdL;
+    float3 direct = D * G * F / (4 * NdL * NdV + 1e-4) * lightCol * NdL;
     if (uFlashCol.w > 0) {
         float3 Lp = uFlashPos.xyz - i.vpos;
         float dist = length(Lp);
@@ -4244,11 +4300,10 @@ float4 PS(PSIn i) : SV_Target {
         float Ref = a2 / (3.14159265 * df * df);
         float Gf = (NdLf / (NdLf * (1 - k) + k)) * (NdV / (NdV * (1 - k) + k));
         float3 Ff = F0 + (1 - F0) * pow(1 - saturate(dot(V, Hf)), 5);
-        direct += (Ref * Gf * Ff / (4 * NdLf * NdV + 1e-4) + (1 - Ff) * (1 - metal) * alb / 3.14159265) * uFlashCol.rgb * NdLf * att;
+        direct += Ref * Gf * Ff / (4 * NdLf * NdV + 1e-4) * uFlashCol.rgb * NdLf * att;
     }
     float3 Fa = F0 + (max(float3(1 - rough, 1 - rough, 1 - rough), F0) - F0) * pow(1 - NdV, 5);
-    float3 amb = lerp(ambGround, ambSky, N.y * 0.5 + 0.5);
-    float3 ambient = amb * (alb * (1 - metal) * (1 - Fa)) + lerp(ambGround, ambSky, saturate(reflect(-V, N).y * 0.5 + 0.5)) * Fa * (1 - rough * 0.7);
+    float3 ambient = lerp(ambGround, ambSky, saturate(reflect(-V, N).y * 0.5 + 0.5)) * Fa * (1 - rough * 0.7);
     float3 c = (direct + ambient) * uParams.x;
     if (uParams.y > 0.5) c = SrgbEncode(c);
     return float4(c, 1);
@@ -4257,9 +4312,9 @@ float4 PS(PSIn i) : SV_Target {
 struct ShellCbFrame {
     float proj[16];
     float lightDir[4], lightColor[4], ambSky[4], ambGround[4];
-    float params[4], scene[4], flashPos[4], flashCol[4], brass[4], hull[4];
+    float params[4], scene[4], flashPos[4], flashCol[4], brass[4];
 };
-static_assert(sizeof(ShellCbFrame) == 224, "shell cb");
+static_assert(sizeof(ShellCbFrame) == 208, "shell cb");
 struct ShellVtx {
     float p[3], n[3], shade;
 };
@@ -4289,23 +4344,13 @@ const ShellProfile kProfile762[] = {
     {51.18f, 4.39f, 51.18f, 3.95f, 0.90f},
     {51.18f, 3.95f, 45.00f, 3.95f, 0.22f},
 };
-const ShellProfile kProfile12[] = {
-    {0.00f, 10.90f, 1.50f, 10.90f, 0.95f},
-    {1.50f, 10.90f, 1.50f, 10.10f, 0.85f},
-    {1.50f, 10.10f, 16.50f, 10.05f, 1.00f},
-    {16.50f, 10.05f, 16.70f, 9.95f, 0.85f},
-    {16.70f, 9.95f, 66.00f, 9.90f, -1.00f},
-    {66.00f, 9.90f, 70.00f, 9.55f, -0.90f},
-    {70.00f, 9.55f, 70.00f, 9.00f, -0.80f},
-    {70.00f, 9.00f, 18.00f, 9.20f, -0.22f},
-};
-constexpr int kMeshVertCap = 1600, kMeshIdxCap = 6400;
+constexpr int kMeshVertCap = 1200, kMeshIdxCap = 4800;
 struct MeshOut {
     ShellVtx* v;
     uint32_t* ix;
     int nv, ni;
 };
-void LatheCasing(MeshOut& m, const ShellProfile* prof, int n, float len, float innerX, float innerR, float innerShade = 0.12f) {
+void LatheCasing(MeshOut& m, const ShellProfile* prof, int n, float len, float innerX, float innerR) {
     const float xc = len * 0.45f, mm = 0.001f;
     const int v0 = m.nv;
     for (int i = 0; i < n; ++i) {
@@ -4324,7 +4369,7 @@ void LatheCasing(MeshOut& m, const ShellProfile* prof, int n, float len, float i
             m.ix[m.ni++] = a1, m.ix[m.ni++] = b0, m.ix[m.ni++] = b1;
         }
     }
-    const float disk[2][4] = {{0.f, prof[0].r0, -1.f, 0.9f}, {innerX, innerR, 1.f, innerShade}};
+    const float disk[2][4] = {{0.f, prof[0].r0, -1.f, 0.9f}, {innerX, innerR, 1.f, 0.12f}};
     for (const auto& d : disk) {
         uint32_t c0 = static_cast<uint32_t>(m.nv - v0);
         m.v[m.nv++] = {{(d[0] - xc) * mm, 0.f, 0.f}, {d[2], 0.f, 0.f}, d[3]};
@@ -4441,12 +4486,11 @@ bool ShellEject::Load(ID3D11Device* dev, char* err, size_t errLen) {
     static ShellVtx verts[kMeshVertCap];
     static uint32_t idx[kMeshIdxCap];
     MeshOut mo = {verts, idx, 0, 0};
-    for (int k = 0; k < 4; ++k) {
+    for (int k = 0; k < 3; ++k) {
         kindIdx_[k] = static_cast<UINT>(mo.nv);
         kindFirst_[k] = static_cast<UINT>(mo.ni);
         if (k == 0) LatheCasing(mo, kProfile556, sizeof kProfile556 / sizeof *kProfile556, 44.7f, 40.0f, 2.86f);
         else if (k == 1) LatheCasing(mo, kProfile762, sizeof kProfile762 / sizeof *kProfile762, 51.18f, 45.0f, 3.95f);
-        else if (k == 3) LatheCasing(mo, kProfile12, sizeof kProfile12 / sizeof *kProfile12, 70.0f, 18.0f, 9.20f, -0.12f);
         else BuildLink(mo);
         kindCount_[k] = static_cast<UINT>(mo.ni) - kindFirst_[k];
     }
@@ -4605,7 +4649,7 @@ bool ShellEject::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3
         e.landed = false;
     };
     for (; pending_ > 0; --pending_) {
-        spawnOne(s.shellCaliber == 762 ? 1 : s.shellCaliber == 12 ? 3 : 0);
+        spawnOne(s.shellCaliber == 762 ? 1 : 0);
         if (s.shellLink) spawnOne(2);
     }
     int keep = 0;
@@ -4641,8 +4685,8 @@ bool ShellEject::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3
     n_ = keep;
     lastMinX_ = 1e9f;
     if (!n_ || !f) return false;
-    static float rowsK[4][kMax * 12];
-    int ndK[4] = {}, nd = 0;
+    static float rowsK[3][kMax * 12];
+    int ndK[3] = {}, nd = 0;
     for (int i = 0; i < n_; ++i) {
         const Shell& e = sh_[i];
         float lf = e.age / e.life;
@@ -4665,7 +4709,7 @@ bool ShellEject::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3
         }
         if (pv[2] < f->zn + 0.005f || pv[2] > f->zf) continue;
         if (pv[0] < lastMinX_) lastMinX_ = pv[0];
-        const int k = e.kind < 4 ? e.kind : 0;
+        const int k = e.kind < 3 ? e.kind : 0;
         float* o = rowsK[k] + ndK[k] * 12;
         for (int r = 0; r < 3; ++r)
             o[r * 4] = mv[r * 3] * sc, o[r * 4 + 1] = mv[r * 3 + 1] * sc, o[r * 4 + 2] = mv[r * 3 + 2] * sc, o[r * 4 + 3] = pv[r];
@@ -4708,9 +4752,7 @@ bool ShellEject::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3
         for (int k = 0; k < 3; ++k) cf.flashCol[k] = c[k] * 2.5f * s.flashLight * flashLight;
         cf.flashCol[3] = 1.f;
     }
-    const float mat[4][4] = {{0.95f, 0.70f, 0.32f, 0.30f}, {0.95f, 0.70f, 0.32f, 0.30f}, {0.42f, 0.42f, 0.44f, 0.45f}, {0.95f, 0.70f, 0.32f, 0.30f}};
-    const float hull[4] = {0.21f, 0.004f, 0.004f, 0.45f};
-    memcpy(cf.hull, hull, sizeof cf.hull);
+    const float mat[3][4] = {{0.95f, 0.70f, 0.32f, 0.30f}, {0.95f, 0.70f, 0.32f, 0.30f}, {0.42f, 0.42f, 0.44f, 0.45f}};
     D3D11_MAPPED_SUBRESOURCE mp;
     StateBackup bk;
     bk.Save(ctx);
@@ -4737,7 +4779,7 @@ bool ShellEject::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3
     ctx->GSSetShader(nullptr, nullptr, 0);
     ctx->HSSetShader(nullptr, nullptr, 0);
     ctx->DSSetShader(nullptr, nullptr, 0);
-    for (int k = 0; k < 4; ++k) {
+    for (int k = 0; k < 3; ++k) {
         if (!ndK[k] || !kindCount_[k]) continue;
         memcpy(cf.brass, mat[k], sizeof cf.brass);
         if (FAILED(ctx->Map(cbFrame_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mp))) break;
