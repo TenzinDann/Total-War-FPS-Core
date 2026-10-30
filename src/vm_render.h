@@ -83,6 +83,7 @@ struct Settings {
     int pellets = 1, pelletsAds = 1;
     float pelletFan = 0.f, pelletFanAds = 0.f, fireRangeAds = 0.f;
     char projectileAds[64] = "";
+    float pelletSpread = 0.f, pelletSpreadAds = 0.f;
     int burst = 0;
     float burstMin = 2.f;
     float burstScatterAds = 0.f;
@@ -499,7 +500,7 @@ private:
     int nLand_ = 0;
     unsigned rng_ = 0x2545f491u;
     UINT indexCount_ = 0;
-    UINT kindIdx_[3] = {}, kindFirst_[3] = {}, kindCount_[3] = {};
+    UINT kindIdx_[4] = {}, kindFirst_[4] = {}, kindCount_[4] = {};
     ID3D11VertexShader* vs_ = nullptr;
     ID3D11PixelShader* ps_ = nullptr;
     ID3D11InputLayout* layout_ = nullptr;

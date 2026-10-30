@@ -3716,10 +3716,12 @@ int ShotPattern(float adsW, const float fwd[3], const float right[3], const floa
     const int idx = CurrentWeapon();
     const bool foc = adsW >= 0.5f;
     int n = 1;
-    float fan = 0.f, rg = 0.f;
+    float fan = 0.f, rg = 0.f, cone = 0.f;
     if (idx >= 0 && idx < g_modelCount) {
         const auto& s = g_w[idx].set;
         n = foc ? s.pelletsAds : s.pellets;
+        const float aw = std::fmin(std::fmax(adsW, 0.f), 1.f);
+        cone = (s.pelletSpread + (s.pelletSpreadAds - s.pelletSpread) * aw) * 0.01745329f;
         fan = (foc ? s.pelletFanAds : s.pelletFan) * 0.01745329f;
         rg = foc && s.fireRangeAds > 0.f ? s.fireRangeAds : s.fireRange;
     }
@@ -3733,6 +3735,17 @@ int ShotPattern(float adsW, const float fwd[3], const float right[3], const floa
         float d[3], r[3];
         for (int i = 0; i < 3; ++i) d[i] = fwd[i] * c + right[i] * sn, r[i] = right[i] * c - fwd[i] * sn;
         SpreadDir(d, r, up, out[k]);
+        if (cone > 0.f) {
+            g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
+            const float u1 = static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
+            g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
+            const float th = 6.2831853f * static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
+            const float rr = std::tan(cone * std::sqrt(u1)), a = rr * std::cos(th), b = rr * std::sin(th);
+            float o[3], len = 0.f;
+            for (int i = 0; i < 3; ++i) o[i] = out[k][i] + r[i] * a + up[i] * b, len += o[i] * o[i];
+            len = 1.f / std::sqrt(len);
+            for (int i = 0; i < 3; ++i) out[k][i] = o[i] * len;
+        }
     }
     if (range) *range = rg;
     if (focus) *focus = foc;

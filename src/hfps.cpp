@@ -7827,9 +7827,9 @@ void Apply(uintptr_t mgr) {
             Log("fire: weapon %d projectile '%s' -> %s (id %d)", S.projFor, want, S.fpProj ? "found" : "NOT FOUND (hero's own)", S.fpProjId);
             LookupFocusProjectile();
         }
-        float sdirs[8][3], srange = 0.f;
+        float sdirs[16][3], srange = 0.f;
         bool focus = false;
-        const int nShot = vmgame::ShotPattern(adsW, fwd, right, camUp, sdirs, 8, &srange, &focus);
+        const int nShot = vmgame::ShotPattern(adsW, fwd, right, camUp, sdirs, 16, &srange, &focus);
         const uintptr_t hipProj = S.fpProj;
         const int32_t hipProjId = S.fpProjId;
         if (focus && S.fpProjAds) S.fpProj = S.fpProjAds, S.fpProjId = S.fpProjAdsId;
