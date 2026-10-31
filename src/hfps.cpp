@@ -615,8 +615,9 @@ struct Config {
     bool silentHalt = true;
     bool fly = true, flyTakeoff = true;
     float flyAhead = 60.f, flyInterval = 2.0f, flyTurnDeg = 20.f, flyEyeHeight = 1.2f;
-    bool mount = true, mountHide = true, mountFallback = true;
+    bool mount = true, mountUnitMove = true, mountHide = false, mountFallback = true;
     float mountEyeAbove = 0.3f, mountEye = 0.f;
+    bool quietOrders = true;
     bool shieldGame = true;
     bool shieldStagger = true;
     float shieldAngle = 180.f;
@@ -676,7 +677,8 @@ enum RefuseCode : LONG {
     kRefusePaused = 4,
     kRefuseArtillery = 5,
     kRefuseOther = 6,
-    kRefuseRouting = 7
+    kRefuseRouting = 7,
+    kRefuseShieldSpear = 8
 };
 volatile LONG g_status = kStatusStarting;
 volatile LONG g_refuseSeq = 0, g_refuseCode = 0;
@@ -958,7 +960,9 @@ void LoadConfig() {
     if (cfg.flyTurnDeg < 1.f || cfg.flyTurnDeg > 180.f) cfg.flyTurnDeg = 20.f;
     if (cfg.flyEyeHeight < -5.f || cfg.flyEyeHeight > 20.f) cfg.flyEyeHeight = 1.2f;
     cfg.mount = GetPrivateProfileIntW(L"move", L"mount", 1, ini) != 0;
-    cfg.mountHide = GetPrivateProfileIntW(L"move", L"mount_hide", 1, ini) != 0;
+    cfg.mountUnitMove = GetPrivateProfileIntW(L"move", L"mount_unit", 1, ini) != 0;
+    cfg.mountHide = GetPrivateProfileIntW(L"move", L"mount_hide", 0, ini) != 0;
+    cfg.quietOrders = GetPrivateProfileIntW(L"move", L"quiet_orders", 1, ini) != 0;
     cfg.mountFallback = GetPrivateProfileIntW(L"move", L"mount_fallback", 1, ini) != 0;
     cfg.mountEyeAbove = IniF(L"move", L"mount_eye_above", cfg.mountEyeAbove, ini);
     cfg.mountEye = IniF(L"move", L"mount_eye", cfg.mountEye, ini);
@@ -1607,6 +1611,8 @@ void LookupFocusProjectile() {
     Log("fire: weapon %d focus projectile '%s' -> %s (id %d)", S.projFor, key, S.fpProjAds ? "found" : "NOT FOUND (same as hip)", id);
 }
 void EarlyFlightUninstall(const char* why);
+void QuietVoStart(uintptr_t battle, uintptr_t unit);
+void QuietVoStop(const char* why);
 long EarlyFlightCalls();
 long EarlyFlightPromoted();
 void FastFireStats(bool force);
@@ -1623,6 +1629,7 @@ void Exit(uintptr_t mgr, const char* why, bool release = true) {
     InstantFireUninstall(why);
     FastFireUninstall(why);
     EarlyFlightUninstall(why);
+    QuietVoStop(why);
     herofx::Uninstall(why);
     if (S.mpMode) mp::QueueOff(S.unit);
     int mode = S.lastMode >= 0 ? S.lastMode : MoveMode();
@@ -1795,7 +1802,10 @@ void Enter(uintptr_t mgr) {
                 "rider at %.2f,%.2f,%.2f -> %s",
                 (void*)carrier, (unsigned long long)(mvt > g_base ? mvt - g_base : 0), mid, listed ? 1 : 0, IsEntityOf(carrier, unit) ? 1 : 0, mh, rh,
                 mp[0], mp[1], mp[2], pos[0], pos[1], pos[2],
-                mount ? "teleports / halts go to the mount (the rider rides along), camera on the mount" : "not a mount we can move - the hero is teleported as before");
+                !mount ? "not a mount we can move - the hero is teleported as before"
+                : cfg.mountUnitMove && g_moveOk ? "unit move orders like flying heroes (the mount runs with its own animation), camera on the mount, "
+                                                  "no sprint / walking bob / footsteps"
+                                                : "teleports / halts go to the mount (the rider rides along), camera on the mount");
         }
     }
     if (S.exitStage && unit != S.exitUnit) {
@@ -1850,7 +1860,8 @@ void Enter(uintptr_t mgr) {
     S.entity = entity;
     S.mount = mount;
     S.body = mount ? mount : entity;
-    S.mountUnit = S.mountMoved = false;
+    S.mountMoved = false;
+    S.mountUnit = mount && cfg.mountUnitMove && g_moveOk;
     S.mountLogs = 0;
     S.tMountLog = 0;
     S.mountStart[0] = pos[0], S.mountStart[1] = pos[2];
@@ -1956,6 +1967,7 @@ void Enter(uintptr_t mgr) {
         if (cfg.fastFire && g_shotOk && !S.mpMode) FastFireInstall(sbf ? Ptr(sbf + oScriptBattle) : 0);
         if (cfg.earlyFlight && g_shotOk && cfg.fireShooter && !S.mpMode) EarlyFlightInstall(sbf ? Ptr(sbf + oScriptBattle) : 0, entity);
         if (cfg.instantFire && g_shotOk && !S.mpMode) InstantFireInstall(sbf ? Ptr(sbf + oScriptBattle) : 0);
+        if (cfg.quietOrders && !S.mpMode) QuietVoStart(sbf ? Ptr(sbf + oScriptBattle) : 0, S.unit);
         if (S.mpMode)
             Log("mp: multiplayer path - ammo flags, shield / no-knockdown / super armor, melee by message (FPS_ON / KEEP / SHIELD / MELEE / FPS_OFF); "
                 "off until they are message-driven: fast fire, ghost mode, bullet speed rewrite, "
@@ -2351,6 +2363,94 @@ bool EarlyFlightActive() {
     LARGE_INTEGER q;
     QueryPerformanceCounter(&q);
     return q.QuadPart - g_ef.lastQpc < g_qpf.QuadPart / 2;
+}
+constexpr uintptr_t kVtOrderVo904 = 0x3ab1da0, kFnOrderVoPost904 = 0x2dd19b0, kFnOrderVoFlush904 = 0x2dca320, oHubOrderVo = 0x818;
+constexpr uint32_t kVoOrderMove = 0x6be5e35e, kVoOrderHalt = 0x09dab550;
+struct QuietVo {
+    int state = 0;
+    uintptr_t obj = 0;
+    uintptr_t* vtCopy = nullptr;
+    void (*orig)(uintptr_t, uintptr_t, uintptr_t, uintptr_t) = nullptr;
+    volatile uintptr_t unit = 0;
+    volatile LONG64 untilQpc = 0;
+    volatile LONG moves = 0, halts = 0, passed = 0, lastPassed = 0;
+} g_qv;
+void QuietVoPost(uintptr_t self, uintptr_t evt, uintptr_t a3, uintptr_t a4) {
+    const uintptr_t unit = g_qv.unit;
+    if (unit && evt) {
+        bool on = true;
+        if (const LONG64 until = g_qv.untilQpc) {
+            LARGE_INTEGER q;
+            QueryPerformanceCounter(&q);
+            on = q.QuadPart < until;
+        }
+        const uint32_t nn = *reinterpret_cast<const uint32_t*>(evt + 4), nu = *reinterpret_cast<const uint32_t*>(evt + 0x14);
+        const uint32_t* names = *reinterpret_cast<uint32_t* const*>(evt + 8);
+        const uintptr_t* units = *reinterpret_cast<uintptr_t* const*>(evt + 0x18);
+        bool hero = false;
+        for (uint32_t i = 0; units && i < nu && i < 256 && !hero; ++i) hero = units[i] == unit;
+        if (on && hero && nn && names) {
+            if (names[0] == kVoOrderMove) {
+                InterlockedIncrement(&g_qv.moves);
+                return;
+            }
+            if (names[0] == kVoOrderHalt) {
+                InterlockedIncrement(&g_qv.halts);
+                return;
+            }
+            InterlockedIncrement(&g_qv.passed);
+            InterlockedExchange(&g_qv.lastPassed, static_cast<LONG>(names[0]));
+        }
+    }
+    g_qv.orig(self, evt, a3, a4);
+}
+bool QuietVoCheck() {
+    if (g_qv.state == 0)
+        g_qv.state = Ptr(g_base + kVtOrderVo904) == g_base + kFnOrderVoFlush904 && Ptr(g_base + kVtOrderVo904 + 0x10) == g_base + kFnOrderVoPost904 ? 1 : -1;
+    return g_qv.state > 0;
+}
+void QuietVoStart(uintptr_t battle, uintptr_t unit) {
+    if (!cfg.quietOrders || !battle || !unit || !QuietVoCheck()) return;
+    const uintptr_t world = Ptr(battle + 0x440), hub = world ? Ptr(world + 0xf0) : 0, obj = hub ? hub + oHubOrderVo : 0, vt = obj ? Ptr(obj) : 0;
+    const uintptr_t vtOurs = g_qv.vtCopy ? reinterpret_cast<uintptr_t>(g_qv.vtCopy + 1) : 0;
+    if (!vt || (vt != g_base + kVtOrderVo904 && vt != vtOurs)) {
+        Log("quiet-orders: order voice channel not found / not matching (world %p hub %p vt %p) - the hero's move / halt lines stay on", (void*)world,
+            (void*)hub, (void*)vt);
+        return;
+    }
+    if (!g_qv.vtCopy) {
+        constexpr size_t kN = 16;
+        auto* c = static_cast<uintptr_t*>(VirtualAlloc(nullptr, (kN + 1) * sizeof(uintptr_t), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!c) return;
+        const uintptr_t v0 = g_base + kVtOrderVo904;
+        c[0] = Ptr(v0 - 8);
+        for (size_t i = 0; i < kN; ++i) c[1 + i] = Ptr(v0 + 8 * i);
+        g_qv.orig = reinterpret_cast<void (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t)>(c[1 + 2]);
+        c[1 + 2] = reinterpret_cast<uintptr_t>(&QuietVoPost);
+        DWORD old;
+        VirtualProtect(c, (kN + 1) * sizeof(uintptr_t), PAGE_READONLY, &old);
+        g_qv.vtCopy = c;
+    }
+    g_qv.untilQpc = 0;
+    g_qv.moves = g_qv.halts = g_qv.passed = g_qv.lastPassed = 0;
+    g_qv.unit = unit;
+    if (vt != reinterpret_cast<uintptr_t>(g_qv.vtCopy + 1) && !Wr(obj, reinterpret_cast<uintptr_t>(g_qv.vtCopy + 1))) {
+        Log("quiet-orders: vtable write failed on %p - lines stay on", (void*)obj);
+        g_qv.unit = 0;
+        return;
+    }
+    g_qv.obj = obj;
+    Log("quiet-orders: hero unit %p - its move / halt order lines are muted while in first person (order voice channel %p, vt +%llx -> copy %p)",
+        (void*)unit, (void*)obj, (unsigned long long)kVtOrderVo904, (void*)(g_qv.vtCopy + 1));
+}
+void QuietVoStop(const char* why) {
+    if (!g_qv.unit || g_qv.untilQpc) return;
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    g_qv.untilQpc = q.QuadPart + g_qpf.QuadPart;
+    Log("quiet-orders: first person ended (%s) - muted the hero's move lines %ld / halt lines %ld; other order lines from the hero %ld (last 0x%08lx) "
+        "played; still muting for 1 s",
+        why, g_qv.moves, g_qv.halts, g_qv.passed, static_cast<unsigned long>(g_qv.lastPassed));
 }
 constexpr uintptr_t kAfterStepCall904 = 0x2dd3618, kAfterStepRet904 = 0x2dd3628, kExecCmdBlock904 = 0x2f041c0, kVtCmdReader904 = 0x3904438,
                     kProjStep904 = 0x30ba364, oBattleAfterObj = 0x64558, oBattleWorld = 0x440, kAfterStepSlot = 0x288;
@@ -4747,6 +4847,7 @@ int MoveMode() {
     return 1;
 }
 const char* ModeName(int m) { return m == 0 ? "teleport" : m == 2 ? "entity" : "unit"; }
+bool UnitRide() { return S.flyer || (S.mount && S.mountUnit); }
 bool UseOverride() { return MoveMode() == 2; }
 bool StartOrSteer(float x, float z, bool run) { return UseOverride() ? IssueOvrMove(x, z) : IssueMove(x, z, run); }
 bool StopMoving() { return UseOverride() ? IssueOvrHalt() : IssueHalt(); }
@@ -7074,7 +7175,7 @@ bool WallUpFrame(double now, bool fg, bool paused, bool pinned) {
     bool e = fg && KeyDown(static_cast<int>(cfg.wallUpKey));
     bool press = e && !S.ePrev;
     S.ePrev = e;
-    if (!cfg.wallUp || !cfg.wall || !g_wallOk || S.air || pinned || paused || S.stuck || S.ghostWanted || S.flyer) {
+    if (!cfg.wallUp || !cfg.wall || !g_wallOk || S.air || pinned || paused || S.stuck || S.ghostWanted || UnitRide()) {
         S.prompt = 0;
         S.wallUpOk = false;
         return false;
@@ -7610,7 +7711,7 @@ void Apply(uintptr_t mgr) {
                 ++S.dropKept;
             }
         }
-        if (cfg.building && g_buildOk && !pinned && !paused && dt > 0.f && !S.flyer) {
+        if (cfg.building && g_buildOk && !pinned && !paused && dt > 0.f && !UnitRide()) {
             if (S.bldRecheck || (S.bldInside && now - S.tBldCheck > 0.5)) {
                 bool was = S.bldInside;
                 S.bldInside = InsideBuilding(S.kinPos[0], S.kinPos[1], S.footY);
@@ -8110,7 +8211,7 @@ void Apply(uintptr_t mgr) {
         if (wantMove && S.moving && dt > 0.f && now - S.tMoveBegan > 0.8 && vlen > 0.5f * S.speedEst &&
             vlen < 3.f * S.speedEst)
             S.speedEst += (vlen - S.speedEst) * (1.f - std::exp(-dt / 1.0f));
-        if (cfg.predict && !S.flyer && dt > 0.f) {
+        if (cfg.predict && !UnitRide() && dt > 0.f) {
             S.lead[0] += (mx * S.speedEst - vx) * dt;
             S.lead[1] += (mz * S.speedEst - vz) * dt;
             bool atRest = !wantMove && vlen < 0.3f;
@@ -8122,7 +8223,7 @@ void Apply(uintptr_t mgr) {
                 S.lead[0] *= cfg.predictMax / ll;
                 S.lead[1] *= cfg.predictMax / ll;
             }
-        } else if (!cfg.predict || S.flyer) {
+        } else if (!cfg.predict || UnitRide()) {
             S.lead[0] = S.lead[1] = 0;
         }
         camPos[0] = S.outPos[0] + S.lead[0];
@@ -8149,7 +8250,7 @@ void Apply(uintptr_t mgr) {
     const float* vFwd = kv.fwd;
     const float* vRight = kv.right;
     const float* vUp = kv.up;
-    vmgame::PublishView(S.yaw, S.pitch, (S.flyer || (mode == 0 && S.air)) ? 0.f : S.camSpeed);
+    vmgame::PublishView(S.yaw, S.pitch, (UnitRide() || (mode == 0 && S.air)) ? 0.f : S.camSpeed);
     float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : cfg.eyeHeight * CrouchEyeScale(S.crouchT, cfg.crouchEye)),
                     camPos[2] + cy * cfg.eyeForward};
     float target[3] = {eye[0] + vFwd[0] * 10.f, eye[1] + vFwd[1] * 10.f, eye[2] + vFwd[2] * 10.f};
@@ -8183,8 +8284,9 @@ void Apply(uintptr_t mgr) {
     }
     ++S.frames;
     if (canMove && mode != 0) {
-        const float ahead = S.flyer ? cfg.flyAhead : cfg.moveAhead, turnDeg = S.flyer ? cfg.flyTurnDeg : cfg.moveTurnDeg;
-        const double interval = S.flyer ? cfg.flyInterval : cfg.moveInterval;
+        const bool ride = UnitRide();
+        const float ahead = ride ? cfg.flyAhead : cfg.moveAhead, turnDeg = ride ? cfg.flyTurnDeg : cfg.moveTurnDeg;
+        const double interval = ride ? cfg.flyInterval : cfg.moveInterval;
         if (wantMove) {
             float dot = mx * S.lastMoveDir[0] + mz * S.lastMoveDir[1];
             bool changed = !S.moving || dot < std::cos(turnDeg * kPi / 180.f) || run != S.lastRun;
@@ -8539,7 +8641,14 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         }
         if (S.active && vmgame::ShieldKey() && w == KeyAt(vmgame::ShieldKey())) {
-            if (!(l & (1L << 30))) vmgame::ToggleShield();
+            if (!(l & (1L << 30))) {
+                if (vmgame::GunShieldOn()) {
+                    vmgame::ToggleShield();
+                } else {
+                    Log("shield: Q ignored - no shield-spear in slot 4 (the gun shield comes with one)");
+                    Refuse(kRefuseShieldSpear);
+                }
+            }
             return 0;
         }
         if (S.active && vmgame::ShieldHitKey() && w == vmgame::ShieldHitKey()) {
@@ -8901,9 +9010,14 @@ bool VerifyGame() {
         g_flyStateOk = g_flyOk && PrintsMatch(Prints(kFlyStatePrints904), "flying heroes (airborne / can take off)");
         Log("fly: take-off byte 0 (10-31 fix: 1 = land); airborne / can-take-off checks %s",
             g_flyStateOk ? "ok - grounded flyers take off once the game allows it" : "OFF - one take-off command on entering, result not checked");
-        Log("mount: ground mounts %s (mount=%d mount_hide=%d mount_fallback=%d mount_eye_above=%.2f mount_eye=%.2f)",
-            cfg.mount ? "ok - the mount is teleported, the rider rides along" : "OFF - the rider is teleported (it cannot move)", cfg.mount, cfg.mountHide,
-            cfg.mountFallback, cfg.mountEyeAbove, cfg.mountEye);
+        Log("mount: ground mounts %s (mount=%d mount_unit=%d mount_hide=%d mount_fallback=%d mount_eye_above=%.2f mount_eye=%.2f)",
+            !cfg.mount ? "OFF - the rider is teleported (it cannot move)"
+            : cfg.mountUnitMove ? "ok - unit move orders like flying heroes (10-31 round 2), the mount is drawn unless mount_hide=1"
+                                : "ok - the mount is teleported, the rider rides along",
+            cfg.mount, cfg.mountUnitMove, cfg.mountHide, cfg.mountFallback, cfg.mountEyeAbove, cfg.mountEye);
+        Log("quiet-orders: the hero's move / halt order lines in first person %s (quiet_orders=%d; order voice channel vtable +%llx %s)",
+            cfg.quietOrders && QuietVoCheck() ? "muted" : "played", cfg.quietOrders, (unsigned long long)kVtOrderVo904,
+            QuietVoCheck() ? "verified" : "NOT matching (other game version) - off");
         g_wallOk = PrintsMatch(Prints(kWallPrints904), "wall nav blocks (teleport hint)");
         g_buildOk = PrintsMatch(Prints(kBuildPrints904), "building collision (segment query)");
         g_netOk = PrintsMatch(Prints(kNetPrints904), "ground region net (arches / passages)") &&

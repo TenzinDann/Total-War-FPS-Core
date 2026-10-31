@@ -1356,22 +1356,6 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (!(s.flashGasSidePuff >= 0.f && s.flashGasSidePuff <= 5.f)) s.flashGasSidePuff = 1.f;
     s.flashGasAds = IniFloat(ini, L"flash_gas_ads", s.flashGasAds);
     if (!(s.flashGasAds >= 0.f && s.flashGasAds <= 1.f)) s.flashGasAds = 1.f;
-    s.dof = IniFloat(ini, L"dof", s.dof ? 1.f : 0.f) != 0.f;
-    s.dofBlur = IniFloat(ini, L"dof_blur", s.dofBlur);
-    if (!(s.dofBlur >= 0.f && s.dofBlur <= 10.f)) s.dofBlur = 1.25f;
-    s.dofFocus = IniFloat(ini, L"dof_focus", s.dofFocus);
-    if (!(s.dofFocus >= 0.05f && s.dofFocus <= 5.f)) s.dofFocus = 0.8f;
-    s.dofRamp = IniFloat(ini, L"dof_ramp", s.dofRamp);
-    if (!(s.dofRamp >= 0.01f && s.dofRamp <= 5.f)) s.dofRamp = 0.55f;
-    s.dofRate = IniFloat(ini, L"dof_rate", s.dofRate);
-    if (!(s.dofRate >= 0.1f && s.dofRate <= 200.f)) s.dofRate = 30.f;
-    s.dofHold = IniFloat(ini, L"dof_hold", s.dofHold);
-    if (!(s.dofHold >= 0.f && s.dofHold <= 5.f)) s.dofHold = 0.3f;
-    s.dofPx = IniFloat(ini, L"dof_px", s.dofPx);
-    if (!(s.dofPx >= 0.f && s.dofPx <= 64.f)) s.dofPx = 8.f;
-    s.dofAds = IniFloat(ini, L"dof_ads", s.dofAds);
-    if (!(s.dofAds >= 0.f && s.dofAds <= 1.f)) s.dofAds = 0.f;
-    s.dofDebug = static_cast<int>(IniFloat(ini, L"dof_debug", static_cast<float>(s.dofDebug)));
     s.shellEject = IniFloat(ini, L"shell_eject", s.shellEject ? 1.f : 0.f) != 0.f;
     s.shellEjectAnim = IniFloat(ini, L"shell_eject_anim", s.shellEjectAnim ? 1.f : 0.f) != 0.f;
     s.shellScale = IniFloat(ini, L"shell_scale", s.shellScale);
@@ -1460,6 +1444,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
                   {L"shield_block_ads", &s.shieldBlockAds, 0.f, 1.f, d.shieldBlockAds},
                   {L"shield_rest", &s.shieldRest, 0.f, 1.f, d.shieldRest}};
         GetPrivateProfileStringW(L"viewmodel", L"shield_model", s.shieldModel, s.shieldModel, 520, ini);
+        GetPrivateProfileStringW(L"viewmodel", L"gun_shield_model", s.gunShieldModel, s.gunShieldModel, 520, ini);
         for (F& f : fs) {
             *f.v = IniFloat(ini, f.key, *f.v);
             if (!(*f.v >= f.lo && *f.v <= f.hi)) *f.v = f.def;
@@ -6379,222 +6364,6 @@ void Shield::Release() {
     n_ = hitPending_ = 0;
     for (UINT& c : kindCount_) c = 0;
 }
-static const char kDofShader[] = R"HLSL(cbuffer C : register(b0) {
-    float4 gSize;
-    float4 gHalf;
-    float4 gDof;
-    float4 gDir;
-    float4 gMisc;
-};
-Texture2D tColor : register(t0);
-Texture2D<float> tDepth : register(t1);
-Texture2D tBlur : register(t2);
-SamplerState sLin : register(s0);
-struct V { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
-V VS(uint id : SV_VertexID) {
-    V o;
-    float2 t = float2((id << 1) & 2, id & 2);
-    o.uv = t;
-    o.pos = float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
-    return o;
-}
-float Coc(float d) {
-    if (d >= 0.99999) return 0;
-    float z = 0.01 * 50.0 / (50.0 - d * (50.0 - 0.01));
-    float c = saturate((gDof.x - z) * gDof.y);
-    return c * c;
-}
-float3 In(float3 c) { return gDir.z > 0.5 ? c * c : c; }
-float4 PSDown(V i) : SV_Target {
-    int2 p = int2(i.pos.xy) * 2, m = int2(gSize.xy) - 1;
-    float3 c = 0;
-    float k = 0;
-    [unroll] for (int j = 0; j < 4; ++j) {
-        int2 q = min(p + int2(j & 1, j >> 1), m);
-        c += In(tColor.Load(int3(q, 0)).rgb);
-        k = max(k, Coc(tDepth.Load(int3(q, 0))));
-    }
-    return float4(c * 0.25, k);
-}
-float4 PSBlur(V i) : SV_Target {
-    float2 st = gDir.xy * gHalf.zw * (gDof.z / 8.0);
-    float3 acc = 0;
-    float ws = 0, k = 0;
-    [unroll] for (int j = -8; j <= 8; ++j) {
-        float4 s = tColor.SampleLevel(sLin, i.uv + st * j, 0);
-        float x = j / 8.0, w = exp(-4.5 * x * x);
-        acc += s.rgb * w;
-        ws += w;
-        k = max(k, s.a * (1.0 - 0.7 * abs(x)));
-    }
-    return float4(acc / ws, k);
-}
-float4 PSComp(V i) : SV_Target {
-    int2 p = int2(i.pos.xy);
-    float3 sharp = In(tColor.Load(int3(p, 0)).rgb);
-    float4 b = tBlur.SampleLevel(sLin, i.uv, 0);
-    float k = saturate(max(Coc(tDepth.Load(int3(p, 0))), b.a)) * gDof.w;
-    float3 c = lerp(sharp, b.rgb, k);
-    if (gMisc.x > 0.5) c = lerp(c, float3(1, 0, 0), 0.6 * k);
-    return float4(gDir.w > 0.5 ? sqrt(max(c, 0)) : c, 1);
-}
-)HLSL";
-bool NearDof::Init(ID3D11Device* dev) {
-    Release();
-    dev_ = dev;
-    FnD3DCompile compile = GetCompiler();
-    if (!compile) return false;
-    const char* entry[4] = {"VS", "PSDown", "PSBlur", "PSComp"};
-    ID3DBlob* b[4] = {};
-    bool ok = true;
-    for (int i = 0; i < 4 && ok; ++i) {
-        ID3DBlob* msg = nullptr;
-        ok = SUCCEEDED(compile(kDofShader, sizeof kDofShader - 1, "tenzin_fps_dof", nullptr, nullptr, entry[i], i ? "ps_5_0" : "vs_5_0",
-                               D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &b[i], &msg));
-        SafeRelease(msg);
-    }
-    ok = ok && SUCCEEDED(dev->CreateVertexShader(b[0]->GetBufferPointer(), b[0]->GetBufferSize(), nullptr, &vs_)) &&
-         SUCCEEDED(dev->CreatePixelShader(b[1]->GetBufferPointer(), b[1]->GetBufferSize(), nullptr, &psDown_)) &&
-         SUCCEEDED(dev->CreatePixelShader(b[2]->GetBufferPointer(), b[2]->GetBufferSize(), nullptr, &psBlur_)) &&
-         SUCCEEDED(dev->CreatePixelShader(b[3]->GetBufferPointer(), b[3]->GetBufferSize(), nullptr, &psComp_));
-    for (ID3DBlob*& x : b) SafeRelease(x);
-    D3D11_BUFFER_DESC bd = {};
-    bd.ByteWidth = 80;
-    bd.Usage = D3D11_USAGE_DYNAMIC;
-    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    ok = ok && SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &cb_));
-    D3D11_SAMPLER_DESC sd = {};
-    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
-    sd.MaxLOD = D3D11_FLOAT32_MAX;
-    ok = ok && SUCCEEDED(dev->CreateSamplerState(&sd, &samp_));
-    D3D11_BLEND_DESC bld = {};
-    bld.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-    ok = ok && SUCCEEDED(dev->CreateBlendState(&bld, &bsAll_));
-    bld.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
-    ok = ok && SUCCEEDED(dev->CreateBlendState(&bld, &bsRgb_));
-    D3D11_RASTERIZER_DESC rd = {};
-    rd.FillMode = D3D11_FILL_SOLID;
-    rd.CullMode = D3D11_CULL_NONE;
-    rd.DepthClipEnable = TRUE;
-    ok = ok && SUCCEEDED(dev->CreateRasterizerState(&rd, &rs_));
-    D3D11_DEPTH_STENCIL_DESC dd = {};
-    dd.DepthEnable = FALSE;
-    dd.StencilEnable = FALSE;
-    ok = ok && SUCCEEDED(dev->CreateDepthStencilState(&dd, &dss_));
-    if (!ok) Release();
-    return ok;
-}
-bool NearDof::EnsureTargets(UINT w, UINT h) {
-    const UINT hw = (w + 1) / 2, hh = (h + 1) / 2;
-    if (rtv_[0] && rtv_[1] && hw == hw_ && hh == hh_) return true;
-    for (int i = 0; i < 2; ++i) SafeRelease(rtv_[i]), SafeRelease(srv_[i]), SafeRelease(tex_[i]);
-    hw_ = hh_ = 0;
-    D3D11_TEXTURE2D_DESC td = {};
-    td.Width = hw;
-    td.Height = hh;
-    td.MipLevels = td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    td.SampleDesc.Count = 1;
-    td.Usage = D3D11_USAGE_DEFAULT;
-    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    for (int i = 0; i < 2; ++i)
-        if (FAILED(dev_->CreateTexture2D(&td, nullptr, &tex_[i])) || FAILED(dev_->CreateShaderResourceView(tex_[i], nullptr, &srv_[i])) ||
-            FAILED(dev_->CreateRenderTargetView(tex_[i], nullptr, &rtv_[i]))) {
-            for (int k = 0; k < 2; ++k) SafeRelease(rtv_[k]), SafeRelease(srv_[k]), SafeRelease(tex_[k]);
-            return false;
-        }
-    hw_ = hw, hh_ = hh;
-    return true;
-}
-void NearDof::Release() {
-    SafeRelease(vs_);
-    SafeRelease(psDown_);
-    SafeRelease(psBlur_);
-    SafeRelease(psComp_);
-    SafeRelease(cb_);
-    SafeRelease(samp_);
-    SafeRelease(bsAll_);
-    SafeRelease(bsRgb_);
-    SafeRelease(rs_);
-    SafeRelease(dss_);
-    for (int i = 0; i < 2; ++i) SafeRelease(rtv_[i]), SafeRelease(srv_[i]), SafeRelease(tex_[i]);
-    hw_ = hh_ = 0;
-    dev_ = nullptr;
-}
-bool NearDof::Apply(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11ShaderResourceView* color, bool colorGamma,
-                    ID3D11ShaderResourceView* depth, UINT w, UINT h, bool rtvEncodesSrgb, const DofParams& p) {
-    if (!ctx || !rtv || !color || !depth || w < 16 || h < 16 || failed_ || !(p.weight > 0.f)) return false;
-    ID3D11Device* dev = nullptr;
-    ctx->GetDevice(&dev);
-    if (!dev) return false;
-    if (dev != dev_ || !vs_) {
-        if (!Init(dev)) {
-            failed_ = true;
-            dev->Release();
-            return false;
-        }
-    }
-    dev->Release();
-    if (!EnsureTargets(w, h)) return false;
-    float c[20] = {static_cast<float>(w), static_cast<float>(h), 1.f / w, 1.f / h,
-                   static_cast<float>(hw_), static_cast<float>(hh_), 1.f / hw_, 1.f / hh_,
-                   p.focus, 1.f / std::fmax(p.ramp, 0.01f), std::fmax(p.radiusPx, 0.f) * 0.5f, std::fmin(p.weight, 1.f),
-                   0.f, 0.f, 0.f, 0.f,
-                   p.debug ? 1.f : 0.f, 0.f, 0.f, 0.f};
-    StateBackup bk;
-    bk.Save(ctx);
-    ctx->RSSetState(rs_);
-    ctx->OMSetDepthStencilState(dss_, 0);
-    ctx->IASetInputLayout(nullptr);
-    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx->VSSetShader(vs_, nullptr, 0);
-    ctx->GSSetShader(nullptr, nullptr, 0);
-    ctx->HSSetShader(nullptr, nullptr, 0);
-    ctx->DSSetShader(nullptr, nullptr, 0);
-    ctx->PSSetSamplers(0, 1, &samp_);
-    ctx->PSSetConstantBuffers(0, 1, &cb_);
-    const float bf[4] = {0, 0, 0, 0};
-    ID3D11ShaderResourceView* none[3] = {};
-    auto pass = [&](ID3D11RenderTargetView* rt, UINT vw, UINT vh, ID3D11PixelShader* ps, ID3D11ShaderResourceView* t0, ID3D11ShaderResourceView* t1,
-                    ID3D11ShaderResourceView* t2, float dx, float dy, bool gin, bool gout) {
-        c[12] = dx, c[13] = dy, c[14] = gin ? 1.f : 0.f, c[15] = gout ? 1.f : 0.f;
-        D3D11_MAPPED_SUBRESOURCE m;
-        if (SUCCEEDED(ctx->Map(cb_, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
-            memcpy(m.pData, c, sizeof c);
-            ctx->Unmap(cb_, 0);
-        }
-        ctx->PSSetShaderResources(0, 3, none);
-        ctx->OMSetRenderTargets(1, &rt, nullptr);
-        ID3D11ShaderResourceView* t[3] = {t0, t1, t2};
-        ctx->PSSetShaderResources(0, 3, t);
-        D3D11_VIEWPORT vp = {0.f, 0.f, static_cast<float>(vw), static_cast<float>(vh), 0.f, 1.f};
-        ctx->RSSetViewports(1, &vp);
-        ctx->PSSetShader(ps, nullptr, 0);
-        ctx->Draw(3, 0);
-    };
-    ctx->OMSetBlendState(bsAll_, bf, 0xffffffff);
-    pass(rtv_[0], hw_, hh_, psDown_, color, depth, nullptr, 0.f, 0.f, colorGamma, false);
-    pass(rtv_[1], hw_, hh_, psBlur_, srv_[0], nullptr, nullptr, 1.f, 0.f, false, false);
-    pass(rtv_[0], hw_, hh_, psBlur_, srv_[1], nullptr, nullptr, 0.f, 1.f, false, false);
-    ctx->OMSetBlendState(bsRgb_, bf, 0xffffffff);
-    pass(rtv, w, h, psComp_, color, depth, srv_[0], 0.f, 0.f, colorGamma, colorGamma && !rtvEncodesSrgb);
-    ctx->PSSetShaderResources(0, 3, none);
-    bk.Restore(ctx);
-    return true;
-}
-bool NearDof::Prewarm(ID3D11Device* dev, UINT w, UINT h) {
-    if (failed_ || !dev) return false;
-    if (dev != dev_ || !vs_) {
-        if (!Init(dev)) {
-            failed_ = true;
-            return false;
-        }
-    }
-    return w < 16 || h < 16 || EnsureTargets(w, h);
-}
 namespace prefetch {
 ID3D11Device* DeviceRef() {
     AcquireSRWLockShared(&g_preLock);
@@ -6796,11 +6565,7 @@ int WarmShaders() {
                       {kCrossShader, sizeof kCrossShader - 1, "tenzin_fps_cross", "VS", "vs_5_0"},
                       {kCrossShader, sizeof kCrossShader - 1, "tenzin_fps_cross", "PS", "ps_5_0"},
                       {kShieldShader, sizeof kShieldShader - 1, "tenzin_fps_shield", "VS", "vs_5_0"},
-                      {kShieldShader, sizeof kShieldShader - 1, "tenzin_fps_shield", "PS", "ps_5_0"},
-                      {kDofShader, sizeof kDofShader - 1, "tenzin_fps_dof", "VS", "vs_5_0"},
-                      {kDofShader, sizeof kDofShader - 1, "tenzin_fps_dof", "PSDown", "ps_5_0"},
-                      {kDofShader, sizeof kDofShader - 1, "tenzin_fps_dof", "PSBlur", "ps_5_0"},
-                      {kDofShader, sizeof kDofShader - 1, "tenzin_fps_dof", "PSComp", "ps_5_0"}};
+                      {kShieldShader, sizeof kShieldShader - 1, "tenzin_fps_shield", "PS", "ps_5_0"}};
     int ok = 0;
     for (const One& o : list) {
         ID3DBlob *b = nullptr, *m = nullptr;
