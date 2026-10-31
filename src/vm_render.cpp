@@ -1351,7 +1351,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.flashGasLinger = IniFloat(ini, L"flash_gas_linger", s.flashGasLinger);
     if (!(s.flashGasLinger >= 0.f && s.flashGasLinger <= 5.f)) s.flashGasLinger = 1.f;
     s.flashGasStyle = static_cast<int>(IniFloat(ini, L"flash_gas_style", static_cast<float>(s.flashGasStyle)));
-    if (s.flashGasStyle < 0 || s.flashGasStyle > 5) s.flashGasStyle = 1;
+    if (s.flashGasStyle < 0 || s.flashGasStyle > 6) s.flashGasStyle = 1;
     s.flashGasSidePuff = IniFloat(ini, L"flash_gas_side_puff", s.flashGasSidePuff);
     if (!(s.flashGasSidePuff >= 0.f && s.flashGasSidePuff <= 5.f)) s.flashGasSidePuff = 1.f;
     s.flashGasAds = IniFloat(ini, L"flash_gas_ads", s.flashGasAds);
@@ -3691,6 +3691,24 @@ const SmokeLayer kSmokeLayers[] = {
     {kFlashTexSmoke37, 3, 1, 1, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
      7.f, -0.03f, -0.03f, 0.f, 0.f, 0, 0.f,
      1, {{0.f, 0.5f}}, 1, {{0.f, 0.4f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+    {kFlashTexSmoke34, 4, 2, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.25f, 0.3f, 20.f, 40.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 7.f, -3.f}, {0.f, 7.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f,
+     0.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
+     4, {{0.f, 0.f}, {0.01f, 0.329f}, {0.07f, 0.24f}, {1.f, 0.f}}, 1, {{0.f, 3.f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
+    {kFlashTexSmoke38, 4, 2, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 45.f, 55.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 7.f, -4.f}, {3.f, 7.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 0.25f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+    {kFlashTexSmoke39, 4, 2, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.1f, 50.f, 70.f, 25.f, 35.f, 0.2f, 1.3f, 1.033f, {0.f, 7.f, -3.f}, {0.f, 7.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, 0.f, 1.f, 0.f, 0.f, 1, 0.f,
+     3, {{0.f, 0.5f}, {0.3f, 0.5f}, {1.f, 0.f}}, 1, {{0.f, 1.8f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
+    {kFlashTexSmokeTrail, 4, 0, 0, 1, 1, 1, 1, 1.f, 0.f, 30.f, 2.f, 1.f, 0.3f, 0.3f, 3.f, 3.f, 0.f, 0.f, 1.f, 1.f, 1.287f, {0.f, 0.f, -1.f}, {0.f, 0.f, -1.f}, {-3.f, -3.f, 121.f}, {3.f, 3.f, 121.f}, 0.f,
+     0.f, 0.f, 0.f, 0.f, 0.f, 0, 24.f,
+     4, {{0.f, 0.f}, {0.47f, 0.28f}, {0.54f, 0.276f}, {1.f, 0.f}}, 1, {{0.f, 1.f}}, 1, {{0.f, 0.f}}},
+    {kFlashTexSmokeDust, 4, 0, 0, 1, 0, 1, 1, 1.f, 0.06f, 5.f, 0.8f, 1.f, 0.5f, 0.75f, 11.f, 13.f, 0.f, 0.f, 1.f, 1.f, 1.115f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 20.f}, {0.f, 0.f, 80.f}, 3.f,
+     6.f, 0.f, 2.f, -0.05f, 0.05f, 0, 0.f,
+     4, {{0.f, 0.f}, {0.34f, 0.067f}, {0.67f, 0.066f}, {1.f, 0.f}}, 2, {{0.f, 1.f}, {1.f, 1.5f}}, 4, {{0.f, 5.f}, {0.47f, 32.3f}, {0.48f, 32.8f}, {1.f, 63.f}}},
+    {kFlashTexSmoke37, 4, 0, 1, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
+     7.f, 0.f, 0.f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 0.6f}}, 1, {{0.f, 0.7f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
 };
 void MuzzleFlash::SpawnSmoke(const Settings& s, int where, bool trail, float t0) {
     const float k = (s.flashGasScale > 0.f ? s.flashGasScale : 1.f) / 2.54f;
