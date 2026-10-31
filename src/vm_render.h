@@ -335,27 +335,6 @@ struct CrosshairSettings {
     float fadeStart = 0.0f;
     float fadeEnd = 0.0f;
     float color[4] = {0.0f, 1.0f, 0.0f, 0.9f};
-    bool hitMarker = true;
-    float hitMarkerRadius = 19.0f;
-    float hitMarkerLength = 4.8f;
-    float hitMarkerWidth = 1.95f;
-    bool hitMarkerRound = false;
-    float hitMarkerOutline = 1.0f;
-    float hitMarkerOutlineAlpha = 0.6f;
-    float hitMarkerGlow = 0.0f;
-    float hitMarkerGlowAlpha = 0.0f;
-    float hitMarkerTime = 0.1f;
-    float hitMarkerColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-    float killMarkerRadius = 19.0f;
-    float killMarkerLength = 4.8f;
-    float killMarkerWidth = 1.95f;
-    bool killMarkerRound = false;
-    float killMarkerOutline = 1.0f;
-    float killMarkerOutlineAlpha = 0.6f;
-    float killMarkerGlow = 0.0f;
-    float killMarkerGlowAlpha = 0.0f;
-    float killMarkerTime = 0.25f;
-    float killMarkerColor[4] = {230.0f / 255.0f, 27.0f / 255.0f, 27.0f / 255.0f, 1.0f};
 };
 bool LoadCrosshair(const wchar_t* ini, CrosshairSettings& s);
 class MuzzleFlash {
@@ -379,7 +358,7 @@ public:
     bool GasLoaded() const { return tex_[5] && tex_[6]; }
     int LiveTracers() const { return nTr_; }
     int LiveImpacts() const { return nImp_; }
-    unsigned SmokeLastMask() const { return smokeMask_; }
+    unsigned long long SmokeLastMask() const { return smokeMask_; }
     void LoadFlame(const wchar_t* dir, const Settings& s);
     int LiveFlame() const { return nFl_; }
     int Live() const { return n_; }
@@ -448,7 +427,7 @@ private:
     bool sceneGamma_ = false;
     int burst_ = 0;
     bool smokeTrailArmed_ = false;
-    unsigned smokeMask_ = 0;
+    unsigned long long smokeMask_ = 0;
     double tLastShot_ = -1.0;
     struct Tracer {
         float a[3], b[3];
@@ -603,8 +582,6 @@ class Crosshair {
 public:
     bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool rtvEncodesSrgb,
               const CrosshairSettings& s, float spread = 0.f, float alpha = 1.f);
-    int DrawHitMarker(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool rtvEncodesSrgb, const CrosshairSettings& s,
-                      float hitAge, float killAge);
     void Release();
     bool Prewarm(ID3D11Device* dev);
 private:
