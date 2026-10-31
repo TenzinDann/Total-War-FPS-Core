@@ -233,12 +233,6 @@ const CodePrint kArmorPrints904[] = {
 const CodePrint kMoraleLockPrints904[] = {
     {0x3033e40, 0x31, 0x9c69c6976f544645ull},
     {0x304c190, 0x1cd, 0x618f86e8ee295c36ull}};
-const CodePrint kVocalPrints904[] = {
-    {0x30352f8, 0x1a, 0x9244fb1be7bc4eedull},
-    {0x2e2af50, 0x1047, 0xd4cff9c6358a904full},
-    {0x2e8c2e8, 0x568, 0x093abc0c1e7f42e9ull}};
-constexpr uintptr_t oUnitVoGroup = 0x3ea4;
-constexpr uint32_t kVoGroupSilent = 0xb744cd04;
 const CodePrint kAggroPrints904[] = {
     {0x2ef045c, 0x3a, 0x088f6732f2da7a66ull},
     {0x2ef0364, 0x47, 0x97ae22b45236fc06ull},
@@ -519,7 +513,6 @@ constexpr uintptr_t oUnitAttrScript = 0x36f0;
 constexpr int32_t kAttrMeleeDisabled = 0x2a;
 bool g_meleeOk = false;
 constexpr int32_t kAttrUnbreakable = 0x15;
-bool g_vocalOk = false;
 bool g_moraleLockOk = false;
 bool g_aggroOk = false;
 bool g_shotOk = false;
@@ -612,7 +605,6 @@ struct Config {
     bool ghost = false;
     bool revealEnemies = true;
     bool noMelee = true;
-    bool muteVocal = true;
     bool lockMorale = true;
     bool aggro = true;
     float aggroRadius = 60.f, aggroRelease = 80.f, aggroHitHold = 20.f, aggroInterval = 2.f;
@@ -623,15 +615,8 @@ struct Config {
     bool silentHalt = true;
     bool fly = true, flyTakeoff = true;
     float flyAhead = 60.f, flyInterval = 2.0f, flyTurnDeg = 20.f, flyEyeHeight = 1.2f;
-    bool mount = true, mountUnitMove = true, mountHide = false, mountFallback = true;
-    float mountEyeAbove = 0.7f, mountEye = 0.f;
-    bool mountNoFade = true;
-    bool mountNoSkirmish = true, mountMeleeReach = true;
-    bool mountNoAutoFire = true;
-    bool mountCrouch = true;
-    float mountEyeBack = 0.5f;
-    float flyMountEyeAbove = 1.5f;
-    bool quietOrders = true;
+    bool mount = true, mountHide = true, mountFallback = true;
+    float mountEyeAbove = 0.3f, mountEye = 0.f;
     bool shieldGame = true;
     bool shieldStagger = true;
     float shieldAngle = 180.f;
@@ -691,8 +676,7 @@ enum RefuseCode : LONG {
     kRefusePaused = 4,
     kRefuseArtillery = 5,
     kRefuseOther = 6,
-    kRefuseRouting = 7,
-    kRefuseShieldSpear = 8
+    kRefuseRouting = 7
 };
 volatile LONG g_status = kStatusStarting;
 volatile LONG g_refuseSeq = 0, g_refuseCode = 0;
@@ -946,7 +930,6 @@ void LoadConfig() {
     cfg.revealEnemies = GetPrivateProfileIntW(L"hero", L"reveal_enemies", 1, ini) != 0;
     cfg.noMelee = GetPrivateProfileIntW(L"hero", L"no_melee", 1, ini) != 0;
     cfg.lockMorale = GetPrivateProfileIntW(L"hero", L"lock_morale", 1, ini) != 0;
-    cfg.muteVocal = GetPrivateProfileIntW(L"hero", L"mute_vocalisation", 1, ini) != 0;
     cfg.aggro = GetPrivateProfileIntW(L"aggro", L"enabled", 1, ini) != 0;
     cfg.aggroRadius = IniF(L"aggro", L"radius", 60.f, ini);
     cfg.aggroRelease = IniF(L"aggro", L"release_radius", 80.f, ini);
@@ -975,22 +958,11 @@ void LoadConfig() {
     if (cfg.flyTurnDeg < 1.f || cfg.flyTurnDeg > 180.f) cfg.flyTurnDeg = 20.f;
     if (cfg.flyEyeHeight < -5.f || cfg.flyEyeHeight > 20.f) cfg.flyEyeHeight = 1.2f;
     cfg.mount = GetPrivateProfileIntW(L"move", L"mount", 1, ini) != 0;
-    cfg.mountUnitMove = GetPrivateProfileIntW(L"move", L"mount_unit", 1, ini) != 0;
-    cfg.mountHide = GetPrivateProfileIntW(L"move", L"mount_hide", 0, ini) != 0;
-    cfg.quietOrders = GetPrivateProfileIntW(L"move", L"quiet_orders", 1, ini) != 0;
+    cfg.mountHide = GetPrivateProfileIntW(L"move", L"mount_hide", 1, ini) != 0;
     cfg.mountFallback = GetPrivateProfileIntW(L"move", L"mount_fallback", 1, ini) != 0;
     cfg.mountEyeAbove = IniF(L"move", L"mount_eye_above", cfg.mountEyeAbove, ini);
     cfg.mountEye = IniF(L"move", L"mount_eye", cfg.mountEye, ini);
-    cfg.mountNoFade = GetPrivateProfileIntW(L"move", L"mount_no_fade", 1, ini) != 0;
-    cfg.mountNoSkirmish = GetPrivateProfileIntW(L"move", L"mount_no_skirmish", 1, ini) != 0;
-    cfg.mountNoAutoFire = GetPrivateProfileIntW(L"move", L"mount_no_auto_fire", 1, ini) != 0;
-    cfg.mountMeleeReach = GetPrivateProfileIntW(L"move", L"mount_melee_reach", 1, ini) != 0;
-    cfg.mountCrouch = GetPrivateProfileIntW(L"move", L"mount_crouch", 1, ini) != 0;
-    cfg.mountEyeBack = IniF(L"move", L"mount_eye_back", cfg.mountEyeBack, ini);
-    if (!(cfg.mountEyeBack >= -3.f && cfg.mountEyeBack <= 3.f)) cfg.mountEyeBack = 0.5f;
-    cfg.flyMountEyeAbove = IniF(L"move", L"fly_mount_eye_above", cfg.flyMountEyeAbove, ini);
-    if (!(cfg.flyMountEyeAbove >= -3.f && cfg.flyMountEyeAbove <= 10.f)) cfg.flyMountEyeAbove = 1.5f;
-    if (cfg.mountEyeAbove < -3.f || cfg.mountEyeAbove > 5.f) cfg.mountEyeAbove = 0.7f;
+    if (cfg.mountEyeAbove < -3.f || cfg.mountEyeAbove > 5.f) cfg.mountEyeAbove = 0.3f;
     if (cfg.mountEye < 0.f || cfg.mountEye > 20.f) cfg.mountEye = 0.f;
     cfg.shieldGame = GetPrivateProfileIntW(L"viewmodel", L"shield_block_game", 1, ini) != 0;
     cfg.shieldStagger = GetPrivateProfileIntW(L"viewmodel", L"shield_block_stagger", 1, ini) != 0;
@@ -1311,12 +1283,6 @@ struct State {
     uintptr_t mount = 0, body = 0;
     bool mountUnit = false, mountMoved = false;
     float footEye = 1.75f, mountStart[2] = {};
-    uintptr_t flyMount = 0;
-    float flyEye = 1.2f;
-    float saddle = 1.f;
-    bool rideCrouch = false;
-    float rideDir[2] = {0.f, 1.f};
-    bool rideDirInit = false;
     double tMountLog = 0;
     unsigned mountLogs = 0;
     TpRec tpHist[32] = {};
@@ -1386,9 +1352,6 @@ struct State {
     uintptr_t meleeUnit = 0, meleeBattle = 0, meleeSkipUnit = 0;
     unsigned meleeLogs = 0;
     uintptr_t moraleUnit = 0, moraleBattle = 0, moraleSkipUnit = 0;
-    uintptr_t vocalUnit = 0, vocalBattle = 0;
-    uint32_t vocalOrig = 0;
-    unsigned vocalLogs = 0;
     unsigned moraleLogs = 0;
     int heroAlliance = -1;
     double tStat = 0;
@@ -1644,9 +1607,6 @@ void LookupFocusProjectile() {
     Log("fire: weapon %d focus projectile '%s' -> %s (id %d)", S.projFor, key, S.fpProjAds ? "found" : "NOT FOUND (same as hip)", id);
 }
 void EarlyFlightUninstall(const char* why);
-void QuietVoStart(uintptr_t battle, uintptr_t unit);
-void QuietVoStop(const char* why);
-void SkirmishForget();
 long EarlyFlightCalls();
 long EarlyFlightPromoted();
 void FastFireStats(bool force);
@@ -1663,8 +1623,6 @@ void Exit(uintptr_t mgr, const char* why, bool release = true) {
     InstantFireUninstall(why);
     FastFireUninstall(why);
     EarlyFlightUninstall(why);
-    QuietVoStop(why);
-    if (!release) SkirmishForget();
     herofx::Uninstall(why);
     if (S.mpMode) mp::QueueOff(S.unit);
     int mode = S.lastMode >= 0 ? S.lastMode : MoveMode();
@@ -1837,10 +1795,7 @@ void Enter(uintptr_t mgr) {
                 "rider at %.2f,%.2f,%.2f -> %s",
                 (void*)carrier, (unsigned long long)(mvt > g_base ? mvt - g_base : 0), mid, listed ? 1 : 0, IsEntityOf(carrier, unit) ? 1 : 0, mh, rh,
                 mp[0], mp[1], mp[2], pos[0], pos[1], pos[2],
-                !mount ? "not a mount we can move - the hero is teleported as before"
-                : cfg.mountUnitMove && g_moveOk ? "unit move orders like flying heroes (the mount runs with its own animation), camera on the mount, "
-                                                  "no sprint / walking bob / footsteps"
-                                                : "teleports / halts go to the mount (the rider rides along), camera on the mount");
+                mount ? "teleports / halts go to the mount (the rider rides along), camera on the mount" : "not a mount we can move - the hero is teleported as before");
         }
     }
     if (S.exitStage && unit != S.exitUnit) {
@@ -1872,8 +1827,6 @@ void Enter(uintptr_t mgr) {
     S.sprint = S.tac = S.ads = false;
     S.shiftPrev = true;
     S.crouch = S.crouchLatch = false;
-    S.rideCrouch = false;
-    S.rideDirInit = false;
     S.ctrlPrev = true;
     S.crouchT = 0;
     S.adsT = 0;
@@ -1896,23 +1849,8 @@ void Enter(uintptr_t mgr) {
     S.flyer = flyer;
     S.entity = entity;
     S.mount = mount;
-    S.flyMount = 0;
-    S.flyEye = cfg.flyEyeHeight;
-    if (flyer) {
-        bool listed = false;
-        const uintptr_t fm = RiderMount(unit, entity, &listed);
-        const uintptr_t mrec = fm ? Ptr(fm + oEntRecord) : 0;
-        float mp[3] = {}, mh = 0.f;
-        if (fm && ReadVec(fm + oEntPos, mp) && mrec && Rd(mrec + oRecHeight, mh) && mh > 0.3f && mh < 30.f) {
-            S.flyMount = fm;
-            S.flyEye = std::fmax(cfg.flyEyeHeight, mp[1] + (cfg.mountEye > 0.f ? cfg.mountEye : mh + cfg.flyMountEyeAbove) - pos[1]);
-        }
-        Log("fly: mount %p (height %.2f m, its root %.2f m below the rider) -> camera %.2f m above the rider, standing (fly_eye_height %.2f, fly_mount_eye_above %.2f)",
-            (void*)S.flyMount, mh, pos[1] - mp[1], S.flyEye, cfg.flyEyeHeight, cfg.flyMountEyeAbove);
-    }
     S.body = mount ? mount : entity;
-    S.mountMoved = false;
-    S.mountUnit = mount && cfg.mountUnitMove && g_moveOk;
+    S.mountUnit = S.mountMoved = false;
     S.mountLogs = 0;
     S.tMountLog = 0;
     S.mountStart[0] = pos[0], S.mountStart[1] = pos[2];
@@ -1927,11 +1865,6 @@ void Enter(uintptr_t mgr) {
         uintptr_t rec = Ptr(entity + oEntRecord);
         if (cfg.eyeFromHeight && !flyer && rec && Rd(rec + oRecHeight, h)) eye = EyeFromHeight(h, s_cfgEye);
         S.footEye = mount ? s_cfgEye : eye;
-        S.saddle = 1.f;
-        if (mount) {
-            float mpos[3];
-            if (ReadVec(mount + oEntPos, mpos)) S.saddle = pos[1] - mpos[1];
-        }
         if (mount) {
             float mh = 0.f;
             const uintptr_t mrec = Ptr(mount + oEntRecord);
@@ -1941,11 +1874,6 @@ void Enter(uintptr_t mgr) {
                 cfg.mountEye > 0.f ? "; fixed mount_eye" : "");
         }
         cfg.eyeHeight = s_lastAuto = eye;
-        if (mount && cfg.mountCrouch) {
-            const float s = std::fmin(std::fmax(S.saddle, 0.f), eye);
-            Log("mount: crouched in the saddle (%.2f m above the mount) -> eye %.2f m (standing %.2f, crouch_eye %.2f)", S.saddle, s + (eye - s) * cfg.crouchEye,
-                eye, cfg.crouchEye);
-        }
         Log("ghost: entity height %.2f m -> eye height %.2f m (config %.2f%s)", h, eye, s_cfgEye,
             !cfg.eyeFromHeight ? ", eye_from_height off" : flyer ? ", flyer" : "");
         Log("ghost: learned teleport lead by speed band (walk / run / sprint / tactical sprint): %.3f %.3f %.3f %.3f s",
@@ -2028,7 +1956,6 @@ void Enter(uintptr_t mgr) {
         if (cfg.fastFire && g_shotOk && !S.mpMode) FastFireInstall(sbf ? Ptr(sbf + oScriptBattle) : 0);
         if (cfg.earlyFlight && g_shotOk && cfg.fireShooter && !S.mpMode) EarlyFlightInstall(sbf ? Ptr(sbf + oScriptBattle) : 0, entity);
         if (cfg.instantFire && g_shotOk && !S.mpMode) InstantFireInstall(sbf ? Ptr(sbf + oScriptBattle) : 0);
-        if (cfg.quietOrders && !S.mpMode) QuietVoStart(sbf ? Ptr(sbf + oScriptBattle) : 0, S.unit);
         if (S.mpMode)
             Log("mp: multiplayer path - ammo flags, shield / no-knockdown / super armor, melee by message (FPS_ON / KEEP / SHIELD / MELEE / FPS_OFF); "
                 "off until they are message-driven: fast fire, ghost mode, bullet speed rewrite, "
@@ -2425,94 +2352,6 @@ bool EarlyFlightActive() {
     QueryPerformanceCounter(&q);
     return q.QuadPart - g_ef.lastQpc < g_qpf.QuadPart / 2;
 }
-constexpr uintptr_t kVtOrderVo904 = 0x3ab1da0, kFnOrderVoPost904 = 0x2dd19b0, kFnOrderVoFlush904 = 0x2dca320, oHubOrderVo = 0x818;
-constexpr uint32_t kVoOrderMove = 0x6be5e35e, kVoOrderHalt = 0x09dab550;
-struct QuietVo {
-    int state = 0;
-    uintptr_t obj = 0;
-    uintptr_t* vtCopy = nullptr;
-    void (*orig)(uintptr_t, uintptr_t, uintptr_t, uintptr_t) = nullptr;
-    volatile uintptr_t unit = 0;
-    volatile LONG64 untilQpc = 0;
-    volatile LONG moves = 0, halts = 0, passed = 0, lastPassed = 0;
-} g_qv;
-void QuietVoPost(uintptr_t self, uintptr_t evt, uintptr_t a3, uintptr_t a4) {
-    const uintptr_t unit = g_qv.unit;
-    if (unit && evt) {
-        bool on = true;
-        if (const LONG64 until = g_qv.untilQpc) {
-            LARGE_INTEGER q;
-            QueryPerformanceCounter(&q);
-            on = q.QuadPart < until;
-        }
-        const uint32_t nn = *reinterpret_cast<const uint32_t*>(evt + 4), nu = *reinterpret_cast<const uint32_t*>(evt + 0x14);
-        const uint32_t* names = *reinterpret_cast<uint32_t* const*>(evt + 8);
-        const uintptr_t* units = *reinterpret_cast<uintptr_t* const*>(evt + 0x18);
-        bool hero = false;
-        for (uint32_t i = 0; units && i < nu && i < 256 && !hero; ++i) hero = units[i] == unit;
-        if (on && hero && nn && names) {
-            if (names[0] == kVoOrderMove) {
-                InterlockedIncrement(&g_qv.moves);
-                return;
-            }
-            if (names[0] == kVoOrderHalt) {
-                InterlockedIncrement(&g_qv.halts);
-                return;
-            }
-            InterlockedIncrement(&g_qv.passed);
-            InterlockedExchange(&g_qv.lastPassed, static_cast<LONG>(names[0]));
-        }
-    }
-    g_qv.orig(self, evt, a3, a4);
-}
-bool QuietVoCheck() {
-    if (g_qv.state == 0)
-        g_qv.state = Ptr(g_base + kVtOrderVo904) == g_base + kFnOrderVoFlush904 && Ptr(g_base + kVtOrderVo904 + 0x10) == g_base + kFnOrderVoPost904 ? 1 : -1;
-    return g_qv.state > 0;
-}
-void QuietVoStart(uintptr_t battle, uintptr_t unit) {
-    if (!cfg.quietOrders || !battle || !unit || !QuietVoCheck()) return;
-    const uintptr_t world = Ptr(battle + 0x440), hub = world ? Ptr(world + 0xf0) : 0, obj = hub ? hub + oHubOrderVo : 0, vt = obj ? Ptr(obj) : 0;
-    const uintptr_t vtOurs = g_qv.vtCopy ? reinterpret_cast<uintptr_t>(g_qv.vtCopy + 1) : 0;
-    if (!vt || (vt != g_base + kVtOrderVo904 && vt != vtOurs)) {
-        Log("quiet-orders: order voice channel not found / not matching (world %p hub %p vt %p) - the hero's move / halt lines stay on", (void*)world,
-            (void*)hub, (void*)vt);
-        return;
-    }
-    if (!g_qv.vtCopy) {
-        constexpr size_t kN = 16;
-        auto* c = static_cast<uintptr_t*>(VirtualAlloc(nullptr, (kN + 1) * sizeof(uintptr_t), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-        if (!c) return;
-        const uintptr_t v0 = g_base + kVtOrderVo904;
-        c[0] = Ptr(v0 - 8);
-        for (size_t i = 0; i < kN; ++i) c[1 + i] = Ptr(v0 + 8 * i);
-        g_qv.orig = reinterpret_cast<void (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t)>(c[1 + 2]);
-        c[1 + 2] = reinterpret_cast<uintptr_t>(&QuietVoPost);
-        DWORD old;
-        VirtualProtect(c, (kN + 1) * sizeof(uintptr_t), PAGE_READONLY, &old);
-        g_qv.vtCopy = c;
-    }
-    g_qv.untilQpc = 0;
-    g_qv.moves = g_qv.halts = g_qv.passed = g_qv.lastPassed = 0;
-    g_qv.unit = unit;
-    if (vt != reinterpret_cast<uintptr_t>(g_qv.vtCopy + 1) && !Wr(obj, reinterpret_cast<uintptr_t>(g_qv.vtCopy + 1))) {
-        Log("quiet-orders: vtable write failed on %p - lines stay on", (void*)obj);
-        g_qv.unit = 0;
-        return;
-    }
-    g_qv.obj = obj;
-    Log("quiet-orders: hero unit %p - its move / halt order lines are muted while in first person (order voice channel %p, vt +%llx -> copy %p)",
-        (void*)unit, (void*)obj, (unsigned long long)kVtOrderVo904, (void*)(g_qv.vtCopy + 1));
-}
-void QuietVoStop(const char* why) {
-    if (!g_qv.unit || g_qv.untilQpc) return;
-    LARGE_INTEGER q;
-    QueryPerformanceCounter(&q);
-    g_qv.untilQpc = q.QuadPart + g_qpf.QuadPart;
-    Log("quiet-orders: first person ended (%s) - muted the hero's move lines %ld / halt lines %ld; other order lines from the hero %ld (last 0x%08lx) "
-        "played; still muting for 1 s",
-        why, g_qv.moves, g_qv.halts, g_qv.passed, static_cast<unsigned long>(g_qv.lastPassed));
-}
 constexpr uintptr_t kAfterStepCall904 = 0x2dd3618, kAfterStepRet904 = 0x2dd3628, kExecCmdBlock904 = 0x2f041c0, kVtCmdReader904 = 0x3904438,
                     kProjStep904 = 0x30ba364, oBattleAfterObj = 0x64558, oBattleWorld = 0x440, kAfterStepSlot = 0x288;
 const unsigned char kAfterStepCallBytes[16] = {0x48, 0x8b, 0x8f, 0x58, 0x45, 0x06, 0x00, 0x48, 0x8b, 0x01, 0xff, 0x90, 0x88, 0x02, 0x00, 0x00};
@@ -2805,7 +2644,6 @@ struct MeleeReq {
     float rmax = 0.f;
     int mpFlags = -1;
     bool quiet = false;
-    uintptr_t mount = 0;
     uint32_t mpFrom = 0, mpSeq = 0;
     uintptr_t mpUnit = 0;
 };
@@ -2834,11 +2672,6 @@ bool MeleeEngineQueue(int kind, int cat, const float eye[3], const float fwd[3])
     float hx = fwd[0], hz = fwd[2], hl = std::sqrt(hx * hx + hz * hz);
     if (kind < 0 || kind >= vmgame::kStrikeKinds || hl < 1e-3f || !S.entity) return false;
     MeleeReq r = {kind, cat, eye[0], eye[1], eye[2], hx / hl, hz / hl, S.entity, Now()};
-    if (cfg.mountMeleeReach) {
-        const uintptr_t mt = S.mount ? S.mount : S.flyMount;
-        float mp[3];
-        if (mt && ReadVec(mt + oEntPos, mp)) r.mount = mt, r.ox = mp[0], r.oz = mp[2], r.oy = mp[1] + 1.7f;
-    }
     AcquireSRWLockExclusive(&g_mq.lock);
     bool ok = g_mq.n < 8;
     if (ok) g_mq.q[g_mq.n++] = r;
@@ -2964,13 +2797,6 @@ bool FlameDirectPush(uintptr_t e, uint32_t dmg, double now, float react, float f
     if (!ok) InterlockedIncrement(&g_fq.overflow);
     return ok;
 }
-uint32_t HitLayers(uintptr_t hero) {
-    uint32_t v = 0, c = 0;
-    Rd(hero + 0x6c, v);
-    const uintptr_t m = Ptr(hero + 0x2e0);
-    if (m && Rd(m + 0x6c, c)) v |= c & 3u;
-    return v;
-}
 void FlameDirectStep(uintptr_t world, uintptr_t hero) {
     if (!g_fq.n) return;
     static FlameReq batch[kFlameQ];
@@ -2984,7 +2810,7 @@ void FlameDirectStep(uintptr_t world, uintptr_t hero) {
     const uintptr_t outer = Ptr(hero + 0x58);
     uint32_t heroHp = 0, heroL6c = 0;
     Rd(hero + 0xb1c, heroHp);
-    heroL6c = HitLayers(hero);
+    Rd(hero + 0x6c, heroL6c);
     if (!outer || Ptr(outer + 0x440) != world || !heroHp) {
         InterlockedExchangeAdd(&g_fq.skipped, n);
         return;
@@ -3246,7 +3072,7 @@ void MeleeEngineRun(uintptr_t world, uintptr_t hero, const MeleeReq* reqs, int n
     }
     uint32_t heroHp = 0, heroL6c = 0;
     Rd(hero + 0xb1c, heroHp);
-    heroL6c = HitLayers(hero);
+    Rd(hero + 0x6c, heroL6c);
     uintptr_t heroSide = Ptr(hero + 0x80), heroUnit = Ptr(hero + 0x2e8);
     if (!heroHp) return;
     using FnCanHit = char (*)(uintptr_t e);
@@ -3259,8 +3085,7 @@ void MeleeEngineRun(uintptr_t world, uintptr_t hero, const MeleeReq* reqs, int n
         const int cat = rq.cat >= 0 && rq.cat < vmgame::kMeleeCats ? rq.cat : vmgame::kMeleeCatSword;
         const MeleeKindCfg arc = (rq.cc ? *rq.cc : MeleeCatEff(cat)).k[rq.kind];
         org[no][0] = rq.ox, org[no][1] = rq.oz;
-        org[no][2] = arc.reach + (arc.splashR > 0.f && arc.splashMax > 0 ? arc.splashR : 0.f) + MeleeBigSlack(rq.cc ? rq.rmax : g_meleeTargetRadiusMax) +
-                       (rq.mount ? MeleeTargetExtra(rq.mount, rq.cc ? rq.rmax : g_meleeTargetRadiusMax) : 0.f);
+        org[no][2] = arc.reach + (arc.splashR > 0.f && arc.splashMax > 0 ? arc.splashR : 0.f) + MeleeBigSlack(rq.cc ? rq.rmax : g_meleeTargetRadiusMax);
         if (rq.cc) anyMp = true;
         ++no;
     }
@@ -3293,14 +3118,13 @@ void MeleeEngineRun(uintptr_t world, uintptr_t hero, const MeleeReq* reqs, int n
         int nc = 0;
         unsigned scanned = 0;
         const float bigSlack = MeleeBigSlack(rmax);
-        const float own = rq.mount ? MeleeTargetExtra(rq.mount, rmax) : 0.f;
         int nMount = 0, nBig = 0;
         for (unsigned g = 0; g < ng; ++g) {
             const uintptr_t rider = g_mgather[g].e;
             const float* q = g_mgather[g].q;
             ++scanned;
             float vx = q[0] - rq.ox, vz = q[2] - rq.oz, d = std::sqrt(vx * vx + vz * vz);
-            if (d > scanR + bigSlack + own || std::fabs(q[1] - (rq.oy - 1.7f)) > 3.f) continue;
+            if (d > scanR + bigSlack || std::fabs(q[1] - (rq.oy - 1.7f)) > 3.f) continue;
             uintptr_t e = rider;
             float tx = q[0], tz = q[2];
             const uintptr_t carrier = Ptr(rider + 0x2e0);
@@ -3315,7 +3139,7 @@ void MeleeEngineRun(uintptr_t world, uintptr_t hero, const MeleeReq* reqs, int n
                 e = mount, tx = mq[0], tz = mq[2];
                 vx = tx - rq.ox, vz = tz - rq.oz, d = std::sqrt(vx * vx + vz * vz);
             }
-            const float extra = MeleeTargetExtra(e, rmax) + own, de = d - extra;
+            const float extra = MeleeTargetExtra(e, rmax), de = d - extra;
             if (de > scanR) continue;
             bool inArc = de <= reach && (d <= 0.6f || (vx * rq.dx + vz * rq.dz) / d >= (extra > 0.f ? MeleeWideCos(arc.halfDeg, extra, d) : cosHalf));
             if (!inArc && !splash) continue;
@@ -4879,44 +4703,6 @@ float CrouchEyeScale(float t, float eye) {
     const float s = t * t * (3.f - 2.f * t);
     return 1.f - (1.f - eye) * s;
 }
-bool RideCrouch() {
-    if (S.mount || S.flyMount) {
-        S.crouch = cfg.mountCrouch && S.mount;
-        S.rideCrouch = true;
-        return true;
-    }
-    if (!S.rideCrouch) return false;
-    S.crouch = S.crouchLatch = S.rideCrouch = false;
-    return true;
-}
-float EyeAbove() {
-    const float k = CrouchEyeScale(S.crouchT, cfg.crouchEye);
-    if (S.flyer) return S.flyMount ? S.flyEye * k : cfg.flyEyeHeight;
-    if (S.mount) {
-        const float s = std::fmin(std::fmax(S.saddle, 0.f), cfg.eyeHeight);
-        return s + (cfg.eyeHeight - s) * k;
-    }
-    return cfg.eyeHeight * k;
-}
-void RideBack(float dt, float sy, float cy, const float vel[2], float out[2]) {
-    out[0] = out[1] = 0.f;
-    if (!(S.mount || S.flyMount) || cfg.mountEyeBack == 0.f) {
-        S.rideDirInit = false;
-        return;
-    }
-    if (!S.rideDirInit) {
-        S.rideDir[0] = sy, S.rideDir[1] = cy;
-        S.rideDirInit = true;
-    }
-    const float v = std::sqrt(vel[0] * vel[0] + vel[1] * vel[1]);
-    if (v > 1.f && dt > 0.f) {
-        const float a = 1.f - std::exp(-dt / 0.25f);
-        const float x = S.rideDir[0] + (vel[0] / v - S.rideDir[0]) * a, z = S.rideDir[1] + (vel[1] / v - S.rideDir[1]) * a, l = std::sqrt(x * x + z * z);
-        if (l > 1e-3f) S.rideDir[0] = x / l, S.rideDir[1] = z / l;
-    }
-    out[0] = -S.rideDir[0] * cfg.mountEyeBack;
-    out[1] = -S.rideDir[1] * cfg.mountEyeBack;
-}
 bool CrouchKeyMsg(WPARAM w) {
     const unsigned k = cfg.crouchKey;
     if (w == k) return true;
@@ -4961,106 +4747,6 @@ int MoveMode() {
     return 1;
 }
 const char* ModeName(int m) { return m == 0 ? "teleport" : m == 2 ? "entity" : "unit"; }
-bool UnitRide() { return S.flyer || (S.mount && S.mountUnit); }
-constexpr uintptr_t kFnBehaviourCtor904 = 0x2ea9ea0, kFnBehaviourIssue904 = 0x1bc3530, oUnitBehaviours = 0x3d1c;
-constexpr int kBehaviourSkirmish = 8;
-const CodePrint kBehaviourPrints904[] = {{0x2ea9ea0, 0x55, 0xa052bdfcbc794e19ull},
-                                         {0x1bc3530, 0x6e, 0x54532345798ac251ull},
-                                         {0x2ed2ce8, 0xb7, 0xa16cb370f0657711ull},
-                                         {0x2f4ac24, 0x1da, 0x1b0318535307b3e6ull},
-                                         {0x2ee99d0, 0xa0, 0x68c8c0827e84d5f9ull}};
-bool g_behaviourOk = false;
-constexpr int kBehaviourFireAtWill = 7;
-struct SkirmishOff {
-    int id = kBehaviourSkirmish;
-    const char* name = "skirmish";
-    uintptr_t unit = 0;
-    bool was = false;
-    bool off = false;
-    double tTry = -1;
-    unsigned tries = 0;
-};
-SkirmishOff g_rideBeh[2] = {{kBehaviourSkirmish, "skirmish"}, {kBehaviourFireAtWill, "fire-at-will"}};
-void RideBehaviourReset(SkirmishOff& st) {
-    const int id = st.id;
-    const char* const name = st.name;
-    st = SkirmishOff();
-    st.id = id, st.name = name;
-}
-bool UnitBehaviourOn(uintptr_t unit, int id) {
-    uint32_t w = 0;
-    return Rd(unit + oUnitBehaviours + 4 * static_cast<uintptr_t>(id >> 5), w) && ((w >> (id & 31)) & 1);
-}
-bool IssueBehaviour(uintptr_t unit, int id, bool on) {
-    const uintptr_t queue = CmdQueue(nullptr);
-    if (!g_behaviourOk || !queue || !unit) return false;
-    using FnCtor = void* (*)(void*);
-    using FnAdd = void (*)(void*, uintptr_t, char);
-    SelBuf sel;
-    reinterpret_cast<FnCtor>(g_base + kFnSelCtor)(&sel);
-    reinterpret_cast<FnAdd>(g_base + kFnSelAdd)(&sel, unit, 0);
-    unsigned n = 0;
-    memcpy(&n, sel.b + oSelUnitCount, 4);
-    bool ok = false;
-    if (n) {
-        using FnBCtor = void* (*)(void*, void*, int, unsigned char, unsigned char);
-        using FnIssue = unsigned char (*)(uintptr_t, void*);
-        HaltCmdBuf cmd;
-        memset(&cmd, 0, sizeof cmd);
-        reinterpret_cast<FnBCtor>(g_base + kFnBehaviourCtor904)(&cmd, &sel, id, on ? 1 : 0, 0);
-        ok = reinterpret_cast<FnIssue>(g_base + kFnBehaviourIssue904)(queue, &cmd) != 0;
-        FreeSelection(cmd.b + 8);
-    }
-    FreeSelection(&sel);
-    return ok;
-}
-void RideBehaviourForget(SkirmishOff& st) {
-    if (st.off) Log("%s: hero %p gone - not switched back on", st.name, (void*)st.unit);
-    RideBehaviourReset(st);
-}
-void SkirmishForget() {
-    for (SkirmishOff& st : g_rideBeh) RideBehaviourForget(st);
-}
-void RideBehaviourStep(SkirmishOff& st, bool enabled) {
-    const double now = Now();
-    const bool want = S.active && enabled && g_behaviourOk && UnitRide() && !S.mpMode && S.unit;
-    if (want && st.unit != S.unit) {
-        if (st.off) RideBehaviourForget(st);
-        RideBehaviourReset(st);
-        st.unit = S.unit;
-        st.was = UnitBehaviourOn(S.unit, st.id);
-        Log("%s: hero unit %p %s while riding", st.name, (void*)S.unit, st.was ? "on - switching it off" : "off - nothing to do");
-    }
-    if (want) {
-        if (st.was && !st.off && now - st.tTry >= 0.25) {
-            st.tTry = now;
-            if (IssueBehaviour(S.unit, st.id, false)) {
-                st.off = true;
-                st.tTry = -1;
-                Log("%s: off for unit %p (silent behaviour toggle)", st.name, (void*)S.unit);
-            }
-        }
-        return;
-    }
-    if (!st.unit) return;
-    if (!st.off) {
-        RideBehaviourReset(st);
-        return;
-    }
-    if (now - st.tTry < 0.25) return;
-    st.tTry = now;
-    if (IssueBehaviour(st.unit, st.id, true)) {
-        Log("%s: back on for unit %p (%s)", st.name, (void*)st.unit, S.active ? "not riding with unit moves any more" : "first person ended");
-        RideBehaviourReset(st);
-    } else if (++st.tries > 240) {
-        Log("%s: could not switch it back on for unit %p in 60 s - left off", st.name, (void*)st.unit);
-        RideBehaviourReset(st);
-    }
-}
-void SkirmishStep() {
-    RideBehaviourStep(g_rideBeh[0], cfg.mountNoSkirmish);
-    RideBehaviourStep(g_rideBeh[1], cfg.mountNoAutoFire);
-}
 bool UseOverride() { return MoveMode() == 2; }
 bool StartOrSteer(float x, float z, bool run) { return UseOverride() ? IssueOvrMove(x, z) : IssueMove(x, z, run); }
 bool StopMoving() { return UseOverride() ? IssueOvrHalt() : IssueHalt(); }
@@ -5871,39 +5557,6 @@ void MoraleStep() {
     if (S.moraleLogs++ < 20)
         Log("morale: hero %p unbreakable set (morale locked in first person: no wavering / routing; [hero] lock_morale=0 turns it off) issued %d",
             (void*)S.unit, ok);
-}
-void VocalStep() {
-    bool want = S.active && cfg.muteVocal && g_vocalOk && S.unit;
-    if (!want && !S.vocalUnit) return;
-    uintptr_t battle = 0;
-    CmdQueue(&battle);
-    if (S.vocalUnit && battle != S.vocalBattle) {
-        Log("vocal: battle changed, forgetting the silenced voice group on %p", (void*)S.vocalUnit);
-        S.vocalUnit = 0;
-    }
-    if (S.vocalUnit && (!want || S.vocalUnit != S.unit)) {
-        uint32_t cur = 0;
-        bool ours = Rd(S.vocalUnit + oUnitVoGroup, cur) && cur == kVoGroupSilent;
-        bool ok = ours && Wr(S.vocalUnit + oUnitVoGroup, S.vocalOrig);
-        if (S.vocalLogs++ < 20)
-            Log("vocal: hero %p voice group restored to 0x%08x (%s) - its own vocalisations play again", (void*)S.vocalUnit, S.vocalOrig,
-                ok ? "ok" : ours ? "write failed" : "changed by someone else, left as it is");
-        S.vocalUnit = 0;
-    }
-    if (!want || S.vocalUnit) return;
-    uint32_t cur = 0;
-    if (!Rd(S.unit + oUnitVoGroup, cur)) return;
-    if (cur == kVoGroupSilent) return;
-    if (!Wr(S.unit + oUnitVoGroup, kVoGroupSilent)) {
-        if (S.vocalLogs++ < 20) Log("vocal: hero %p voice group write failed", (void*)S.unit);
-        return;
-    }
-    S.vocalUnit = S.unit;
-    S.vocalBattle = battle;
-    S.vocalOrig = cur;
-    if (S.vocalLogs++ < 20)
-        Log("vocal: hero %p voice group 0x%08x -> wh_silent (no pain / grunt / breathing / roar from the hero in first person; "
-            "[hero] mute_vocalisation=0 turns it off)", (void*)S.unit, cur);
 }
 struct ControlCmd {
     uintptr_t vt;
@@ -7421,7 +7074,7 @@ bool WallUpFrame(double now, bool fg, bool paused, bool pinned) {
     bool e = fg && KeyDown(static_cast<int>(cfg.wallUpKey));
     bool press = e && !S.ePrev;
     S.ePrev = e;
-    if (!cfg.wallUp || !cfg.wall || !g_wallOk || S.air || pinned || paused || S.stuck || S.ghostWanted || UnitRide()) {
+    if (!cfg.wallUp || !cfg.wall || !g_wallOk || S.air || pinned || paused || S.stuck || S.ghostWanted || S.flyer) {
         S.prompt = 0;
         S.wallUpOk = false;
         return false;
@@ -7745,8 +7398,7 @@ void Apply(uintptr_t mgr) {
                 S.sprint = S.tac = false;
             }
             const bool was = S.crouch;
-            if (!RideCrouch())
-                S.crouch = cfg.crouch && !S.flyer && !S.mount && CrouchWant(S.crouch, ck, S.ctrlPrev, cfg.crouchToggle, S.sprint && !wasSprint, &S.crouchLatch);
+            S.crouch = cfg.crouch && !S.flyer && !S.mount && CrouchWant(S.crouch, ck, S.ctrlPrev, cfg.crouchToggle, S.sprint && !wasSprint, &S.crouchLatch);
             S.ctrlPrev = ck;
             if (S.crouch != was) {
                 vmgame::CrouchImpulse(S.crouch ? 1.f : -1.f);
@@ -7897,7 +7549,7 @@ void Apply(uintptr_t mgr) {
         float spd = S.tac ? cfg.tacSprintSpeed
                     : S.sprint ? cfg.sprintSpeed : cfg.runSpeed * (1.f - (1.f - cfg.adsMoveScale) * S.adsT);
         spd *= shieldMove;
-        if (!S.mount) spd *= 1.f - (1.f - cfg.crouchSpeed) * S.crouchT;
+        spd *= 1.f - (1.f - cfg.crouchSpeed) * S.crouchT;
         (void)run;
         bool space = fg && KeyDown(VK_SPACE);
         if (space && !S.spacePrev && !S.air && !pinned && !S.stuck && !paused && cfg.jumpHeight > 0.f) {
@@ -7958,7 +7610,7 @@ void Apply(uintptr_t mgr) {
                 ++S.dropKept;
             }
         }
-        if (cfg.building && g_buildOk && !pinned && !paused && dt > 0.f && !UnitRide()) {
+        if (cfg.building && g_buildOk && !pinned && !paused && dt > 0.f && !S.flyer) {
             if (S.bldRecheck || (S.bldInside && now - S.tBldCheck > 0.5)) {
                 bool was = S.bldInside;
                 S.bldInside = InsideBuilding(S.kinPos[0], S.kinPos[1], S.footY);
@@ -8458,7 +8110,7 @@ void Apply(uintptr_t mgr) {
         if (wantMove && S.moving && dt > 0.f && now - S.tMoveBegan > 0.8 && vlen > 0.5f * S.speedEst &&
             vlen < 3.f * S.speedEst)
             S.speedEst += (vlen - S.speedEst) * (1.f - std::exp(-dt / 1.0f));
-        if (cfg.predict && !UnitRide() && dt > 0.f) {
+        if (cfg.predict && !S.flyer && dt > 0.f) {
             S.lead[0] += (mx * S.speedEst - vx) * dt;
             S.lead[1] += (mz * S.speedEst - vz) * dt;
             bool atRest = !wantMove && vlen < 0.3f;
@@ -8470,7 +8122,7 @@ void Apply(uintptr_t mgr) {
                 S.lead[0] *= cfg.predictMax / ll;
                 S.lead[1] *= cfg.predictMax / ll;
             }
-        } else if (!cfg.predict || UnitRide()) {
+        } else if (!cfg.predict || S.flyer) {
             S.lead[0] = S.lead[1] = 0;
         }
         camPos[0] = S.outPos[0] + S.lead[0];
@@ -8497,11 +8149,9 @@ void Apply(uintptr_t mgr) {
     const float* vFwd = kv.fwd;
     const float* vRight = kv.right;
     const float* vUp = kv.up;
-    vmgame::PublishView(S.yaw, S.pitch, (UnitRide() || (mode == 0 && S.air)) ? 0.f : S.camSpeed);
-    float rb[2];
-    RideBack(dt, sy, cy, mode == 0 ? S.kinVel : S.entVel, rb);
-    float eye[3] = {camPos[0] + sy * cfg.eyeForward + rb[0], camPos[1] + EyeAbove(),
-                    camPos[2] + cy * cfg.eyeForward + rb[1]};
+    vmgame::PublishView(S.yaw, S.pitch, (S.flyer || (mode == 0 && S.air)) ? 0.f : S.camSpeed);
+    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : cfg.eyeHeight * CrouchEyeScale(S.crouchT, cfg.crouchEye)),
+                    camPos[2] + cy * cfg.eyeForward};
     float target[3] = {eye[0] + vFwd[0] * 10.f, eye[1] + vFwd[1] * 10.f, eye[2] + vFwd[2] * 10.f};
     float up[3] = {0.f, 1.f, 0.f};
     if (vRoll != 0.f) memcpy(up, vUp, sizeof up);
@@ -8533,9 +8183,8 @@ void Apply(uintptr_t mgr) {
     }
     ++S.frames;
     if (canMove && mode != 0) {
-        const bool ride = UnitRide();
-        const float ahead = ride ? cfg.flyAhead : cfg.moveAhead, turnDeg = ride ? cfg.flyTurnDeg : cfg.moveTurnDeg;
-        const double interval = ride ? cfg.flyInterval : cfg.moveInterval;
+        const float ahead = S.flyer ? cfg.flyAhead : cfg.moveAhead, turnDeg = S.flyer ? cfg.flyTurnDeg : cfg.moveTurnDeg;
+        const double interval = S.flyer ? cfg.flyInterval : cfg.moveInterval;
         if (wantMove) {
             float dot = mx * S.lastMoveDir[0] + mz * S.lastMoveDir[1];
             bool changed = !S.moving || dot < std::cos(turnDeg * kPi / 180.f) || run != S.lastRun;
@@ -8891,14 +8540,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         }
         if (S.active && vmgame::ShieldKey() && w == KeyAt(vmgame::ShieldKey())) {
-            if (!(l & (1L << 30))) {
-                if (vmgame::GunShieldOn()) {
-                    vmgame::ToggleShield();
-                } else {
-                    Log("shield: Q ignored - no shield-spear in slot 4 (the gun shield comes with one)");
-                    Refuse(kRefuseShieldSpear);
-                }
-            }
+            if (!(l & (1L << 30))) vmgame::ToggleShield();
             return 0;
         }
         if (S.active && vmgame::ShieldHitKey() && w == vmgame::ShieldHitKey()) {
@@ -9217,9 +8859,6 @@ bool VerifyGame() {
         Log("hero: no-melee switch (melee_disabled) %s", g_meleeOk ? "ok" : "OFF");
         g_moraleLockOk = g_meleeOk && PrintsMatch(Prints(kMoraleLockPrints904), "morale lock (unbreakable)");
         Log("hero: morale lock in first person (unbreakable) %s", g_moraleLockOk ? "ok" : "OFF - morale can still break in first person");
-        g_vocalOk = PrintsMatch(Prints(kVocalPrints904), "hero vocalisations (unit voice group)");
-        Log("hero: mute own vocalisations in first person (unit voice group -> wh_silent) %s",
-            g_vocalOk ? "ok" : "OFF - pain / grunt sounds of the hero still play in first person");
         g_uiOk = PrintsMatch(game->ui, "battle hud hide");
         Log("ui: battle hud hiding %s", g_uiOk ? "ok" : "OFF");
         g_selMarkOk = g_uiOk && PrintsMatch(Prints(kSelMarkPrints904), "selection markers");
@@ -9263,26 +8902,9 @@ bool VerifyGame() {
         g_flyStateOk = g_flyOk && PrintsMatch(Prints(kFlyStatePrints904), "flying heroes (airborne / can take off)");
         Log("fly: take-off byte 0 (10-31 fix: 1 = land); airborne / can-take-off checks %s",
             g_flyStateOk ? "ok - grounded flyers take off once the game allows it" : "OFF - one take-off command on entering, result not checked");
-        Log("mount: ground mounts %s (mount=%d mount_unit=%d mount_hide=%d mount_fallback=%d mount_eye_above=%.2f mount_eye=%.2f)",
-            !cfg.mount ? "OFF - the rider is teleported (it cannot move)"
-            : cfg.mountUnitMove ? "ok - unit move orders like flying heroes (10-31 round 2), the mount is drawn unless mount_hide=1"
-                                : "ok - the mount is teleported, the rider rides along",
-            cfg.mount, cfg.mountUnitMove, cfg.mountHide, cfg.mountFallback, cfg.mountEyeAbove, cfg.mountEye);
-        Log("mount: near-camera fading while riding %s (mount_no_fade=%d; the fade site is checked on the first ride)",
-            cfg.mountNoFade ? "off" : "as the game has it", cfg.mountNoFade);
-        g_behaviourOk = PrintsMatch(Prints(kBehaviourPrints904), "unit behaviour toggle (skirmish / fire at will)");
-        Log("mount: fire at will while riding %s (mount_no_auto_fire=%d) - the hero does not shoot on its own; our gun / casting are not affected",
-            cfg.mountNoAutoFire && g_behaviourOk ? "switched off" : "left alone", cfg.mountNoAutoFire);
-        Log("mount: skirmish mode while riding %s (mount_no_skirmish=%d; behaviour toggle %s); melee reach from the mount's edge %s (mount_melee_reach=%d)",
-            cfg.mountNoSkirmish && g_behaviourOk ? "switched off" : "left alone", cfg.mountNoSkirmish, g_behaviourOk ? "ok" : "NOT matching - off",
-            cfg.mountMeleeReach ? "on" : "off", cfg.mountMeleeReach);
-        Log("mount: riders crouch in the saddle %s (mount_crouch=%d; crouch_eye %.2f of the height above the saddle, no slow-down)",
-            cfg.mountCrouch ? "on" : "off", cfg.mountCrouch, cfg.crouchEye);
-        Log("mount: rider camera %.2f m back from the mount's centre along its heading (mount_eye_back; melee still measured from the centre)",
-            cfg.mountEyeBack);
-        Log("quiet-orders: the hero's move / halt order lines in first person %s (quiet_orders=%d; order voice channel vtable +%llx %s)",
-            cfg.quietOrders && QuietVoCheck() ? "muted" : "played", cfg.quietOrders, (unsigned long long)kVtOrderVo904,
-            QuietVoCheck() ? "verified" : "NOT matching (other game version) - off");
+        Log("mount: ground mounts %s (mount=%d mount_hide=%d mount_fallback=%d mount_eye_above=%.2f mount_eye=%.2f)",
+            cfg.mount ? "ok - the mount is teleported, the rider rides along" : "OFF - the rider is teleported (it cannot move)", cfg.mount, cfg.mountHide,
+            cfg.mountFallback, cfg.mountEyeAbove, cfg.mountEye);
         g_wallOk = PrintsMatch(Prints(kWallPrints904), "wall nav blocks (teleport hint)");
         g_buildOk = PrintsMatch(Prints(kBuildPrints904), "building collision (segment query)");
         g_netOk = PrintsMatch(Prints(kNetPrints904), "ground region net (arches / passages)") &&
@@ -9725,60 +9347,6 @@ void MountHideRestore(const char* why) {
     h = HideSelf();
     g_hideMountEnt = 0;
 }
-constexpr uintptr_t kFadeTestSite904 = 0x2fd73ff, kFadeCallSite904 = 0x2fd7419, kFnFade904 = 0x3000e94, oVisMgrFlags = 0x75a;
-constexpr unsigned char kFadeBit = 0x08;
-struct MountFade {
-    int state = 0;
-    uintptr_t mgr = 0;
-    bool wasOn = false;
-    unsigned rewrites = 0;
-} g_mfade;
-bool MountFadeCheck() {
-    if (g_mfade.state == 0) {
-        static const unsigned char kTest[7] = {0xf6, 0x81, 0x5a, 0x07, 0x00, 0x00, 0x08};
-        unsigned char b[7] = {}, op = 0;
-        int32_t rel = 0;
-        for (int i = 0; i < 7; ++i) Rd(g_base + kFadeTestSite904 + i, b[i]);
-        Rd(g_base + kFadeCallSite904, op);
-        Rd(g_base + kFadeCallSite904 + 1, rel);
-        g_mfade.state = !memcmp(b, kTest, 7) && op == 0xe8 && kFadeCallSite904 + 5 + rel == kFnFade904 ? 1 : -1;
-        Log("mount: near-camera fade site +%llx %s", (unsigned long long)kFadeTestSite904,
-            g_mfade.state > 0 ? "verified" : "NOT matching (other game version) - fading left as the game has it");
-    }
-    return g_mfade.state > 0;
-}
-uintptr_t VisMgr(uintptr_t battle) {
-    const uintptr_t root = battle ? Ptr(battle + oBattleVisRoot) : 0;
-    return root ? Ptr(root + oVisRootMgr) : 0;
-}
-void MountFadeRestore(const char* why) {
-    if (!g_mfade.mgr) return;
-    unsigned char b = 0;
-    const bool same = VisMgr(S.battle) == g_mfade.mgr && Rd(g_mfade.mgr + oVisMgrFlags, b);
-    if (same && g_mfade.wasOn) __atomic_fetch_or(reinterpret_cast<unsigned char*>(g_mfade.mgr + oVisMgrFlags), kFadeBit, __ATOMIC_SEQ_CST);
-    Log("mount: near-camera fading %s (%s; the game set it again %u times while riding)",
-        !same ? "not restored (battle gone)" : g_mfade.wasOn ? "back on" : "left off (it was off before)", why, g_mfade.rewrites);
-    const int st = g_mfade.state;
-    g_mfade = MountFade();
-    g_mfade.state = st;
-}
-void MountFadeStep() {
-    const bool riding = (S.mount && !(cfg.hideSelf && cfg.mountHide)) || S.flyMount;
-    const uintptr_t mgr = S.active && cfg.mountNoFade && riding && MountFadeCheck() ? VisMgr(S.battle) : 0;
-    if (g_mfade.mgr && mgr != g_mfade.mgr) MountFadeRestore(!S.active ? "first person ended" : mgr ? "another battle" : "off the mount");
-    if (!mgr) return;
-    unsigned char b = 0;
-    if (!Rd(mgr + oVisMgrFlags, b)) return;
-    if (!g_mfade.mgr) {
-        g_mfade.mgr = mgr;
-        g_mfade.wasOn = (b & kFadeBit) != 0;
-        g_mfade.rewrites = 0;
-        Log("mount: near-camera fading off while riding (visual manager %p, flags 0x%02x) - the mount stays drawn next to the camera", (void*)mgr, b);
-    } else if (b & kFadeBit) {
-        ++g_mfade.rewrites;
-    }
-    if (b & kFadeBit) __atomic_fetch_and(reinterpret_cast<unsigned char*>(mgr + oVisMgrFlags), static_cast<unsigned char>(~kFadeBit), __ATOMIC_SEQ_CST);
-}
 void MountHideStep() {
     const uintptr_t m = S.active && cfg.hideSelf && cfg.mountHide ? S.mount : 0;
     HideSelf& h = g_hideMount;
@@ -10027,10 +9595,6 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
         Log("morale: forgetting unbreakable on %p (left over from the previous battle)", (void*)S.moraleUnit);
         S.moraleUnit = 0;
     }
-    if (staleFp && S.vocalUnit) {
-        Log("vocal: forgetting the silenced voice group on %p (left over from the previous battle)", (void*)S.vocalUnit);
-        S.vocalUnit = 0;
-    }
     if (g_fpDetached) {
         g_fpDetached = false;
         if (mgr == g_detachMgr && !staleFp) {
@@ -10064,7 +9628,6 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     RevealStep(mgr);
     MeleeStep();
     MoraleStep();
-    VocalStep();
     AggroStep();
     NoKnockStep();
     UiStep();
@@ -10076,8 +9639,6 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     KillMarkStep();
     HideSelfStep();
     MountHideStep();
-    SkirmishStep();
-    MountFadeStep();
     ArrowHideStep();
     vmgame::GameThreadTime((Now() - tGameFrame) * 1000.0);
 }
