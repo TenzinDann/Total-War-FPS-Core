@@ -624,7 +624,8 @@ struct Config {
     bool fly = true, flyTakeoff = true;
     float flyAhead = 60.f, flyInterval = 2.0f, flyTurnDeg = 20.f, flyEyeHeight = 1.2f;
     bool mount = true, mountUnitMove = true, mountHide = false, mountFallback = true;
-    float mountEyeAbove = 0.3f, mountEye = 0.f;
+    float mountEyeAbove = 0.7f, mountEye = 0.f;
+    bool mountNoFade = true;
     bool quietOrders = true;
     bool shieldGame = true;
     bool shieldStagger = true;
@@ -975,7 +976,8 @@ void LoadConfig() {
     cfg.mountFallback = GetPrivateProfileIntW(L"move", L"mount_fallback", 1, ini) != 0;
     cfg.mountEyeAbove = IniF(L"move", L"mount_eye_above", cfg.mountEyeAbove, ini);
     cfg.mountEye = IniF(L"move", L"mount_eye", cfg.mountEye, ini);
-    if (cfg.mountEyeAbove < -3.f || cfg.mountEyeAbove > 5.f) cfg.mountEyeAbove = 0.3f;
+    cfg.mountNoFade = GetPrivateProfileIntW(L"move", L"mount_no_fade", 1, ini) != 0;
+    if (cfg.mountEyeAbove < -3.f || cfg.mountEyeAbove > 5.f) cfg.mountEyeAbove = 0.7f;
     if (cfg.mountEye < 0.f || cfg.mountEye > 20.f) cfg.mountEye = 0.f;
     cfg.shieldGame = GetPrivateProfileIntW(L"viewmodel", L"shield_block_game", 1, ini) != 0;
     cfg.shieldStagger = GetPrivateProfileIntW(L"viewmodel", L"shield_block_stagger", 1, ini) != 0;
@@ -1296,6 +1298,8 @@ struct State {
     uintptr_t mount = 0, body = 0;
     bool mountUnit = false, mountMoved = false;
     float footEye = 1.75f, mountStart[2] = {};
+    uintptr_t flyMount = 0;
+    float flyEye = 1.2f;
     double tMountLog = 0;
     unsigned mountLogs = 0;
     TpRec tpHist[32] = {};
@@ -1871,6 +1875,20 @@ void Enter(uintptr_t mgr) {
     S.flyer = flyer;
     S.entity = entity;
     S.mount = mount;
+    S.flyMount = 0;
+    S.flyEye = cfg.flyEyeHeight;
+    if (flyer) {
+        bool listed = false;
+        const uintptr_t fm = RiderMount(unit, entity, &listed);
+        const uintptr_t mrec = fm ? Ptr(fm + oEntRecord) : 0;
+        float mp[3] = {}, mh = 0.f;
+        if (fm && ReadVec(fm + oEntPos, mp) && mrec && Rd(mrec + oRecHeight, mh) && mh > 0.3f && mh < 30.f) {
+            S.flyMount = fm;
+            S.flyEye = std::fmax(cfg.flyEyeHeight, mp[1] + MountEye(mh, 0.f) - pos[1]);
+        }
+        Log("fly: mount %p (height %.2f m, its root %.2f m below the rider) -> camera %.2f m above the rider (fly_eye_height %.2f, mount_eye_above %.2f)",
+            (void*)S.flyMount, mh, pos[1] - mp[1], S.flyEye, cfg.flyEyeHeight, cfg.mountEyeAbove);
+    }
     S.body = mount ? mount : entity;
     S.mountMoved = false;
     S.mountUnit = mount && cfg.mountUnitMove && g_moveOk;
@@ -8296,7 +8314,7 @@ void Apply(uintptr_t mgr) {
     const float* vRight = kv.right;
     const float* vUp = kv.up;
     vmgame::PublishView(S.yaw, S.pitch, (UnitRide() || (mode == 0 && S.air)) ? 0.f : S.camSpeed);
-    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? cfg.flyEyeHeight : cfg.eyeHeight * CrouchEyeScale(S.crouchT, cfg.crouchEye)),
+    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? (S.flyMount ? S.flyEye : cfg.flyEyeHeight) : cfg.eyeHeight * CrouchEyeScale(S.crouchT, cfg.crouchEye)),
                     camPos[2] + cy * cfg.eyeForward};
     float target[3] = {eye[0] + vFwd[0] * 10.f, eye[1] + vFwd[1] * 10.f, eye[2] + vFwd[2] * 10.f};
     float up[3] = {0.f, 1.f, 0.f};
@@ -9063,6 +9081,8 @@ bool VerifyGame() {
             : cfg.mountUnitMove ? "ok - unit move orders like flying heroes (10-31 round 2), the mount is drawn unless mount_hide=1"
                                 : "ok - the mount is teleported, the rider rides along",
             cfg.mount, cfg.mountUnitMove, cfg.mountHide, cfg.mountFallback, cfg.mountEyeAbove, cfg.mountEye);
+        Log("mount: near-camera fading while riding %s (mount_no_fade=%d; the fade site is checked on the first ride)",
+            cfg.mountNoFade ? "off" : "as the game has it", cfg.mountNoFade);
         Log("quiet-orders: the hero's move / halt order lines in first person %s (quiet_orders=%d; order voice channel vtable +%llx %s)",
             cfg.quietOrders && QuietVoCheck() ? "muted" : "played", cfg.quietOrders, (unsigned long long)kVtOrderVo904,
             QuietVoCheck() ? "verified" : "NOT matching (other game version) - off");
@@ -9508,6 +9528,60 @@ void MountHideRestore(const char* why) {
     h = HideSelf();
     g_hideMountEnt = 0;
 }
+constexpr uintptr_t kFadeTestSite904 = 0x2fd73ff, kFadeCallSite904 = 0x2fd7419, kFnFade904 = 0x3000e94, oVisMgrFlags = 0x75a;
+constexpr unsigned char kFadeBit = 0x08;
+struct MountFade {
+    int state = 0;
+    uintptr_t mgr = 0;
+    bool wasOn = false;
+    unsigned rewrites = 0;
+} g_mfade;
+bool MountFadeCheck() {
+    if (g_mfade.state == 0) {
+        static const unsigned char kTest[7] = {0xf6, 0x81, 0x5a, 0x07, 0x00, 0x00, 0x08};
+        unsigned char b[7] = {}, op = 0;
+        int32_t rel = 0;
+        for (int i = 0; i < 7; ++i) Rd(g_base + kFadeTestSite904 + i, b[i]);
+        Rd(g_base + kFadeCallSite904, op);
+        Rd(g_base + kFadeCallSite904 + 1, rel);
+        g_mfade.state = !memcmp(b, kTest, 7) && op == 0xe8 && kFadeCallSite904 + 5 + rel == kFnFade904 ? 1 : -1;
+        Log("mount: near-camera fade site +%llx %s", (unsigned long long)kFadeTestSite904,
+            g_mfade.state > 0 ? "verified" : "NOT matching (other game version) - fading left as the game has it");
+    }
+    return g_mfade.state > 0;
+}
+uintptr_t VisMgr(uintptr_t battle) {
+    const uintptr_t root = battle ? Ptr(battle + oBattleVisRoot) : 0;
+    return root ? Ptr(root + oVisRootMgr) : 0;
+}
+void MountFadeRestore(const char* why) {
+    if (!g_mfade.mgr) return;
+    unsigned char b = 0;
+    const bool same = VisMgr(S.battle) == g_mfade.mgr && Rd(g_mfade.mgr + oVisMgrFlags, b);
+    if (same && g_mfade.wasOn) __atomic_fetch_or(reinterpret_cast<unsigned char*>(g_mfade.mgr + oVisMgrFlags), kFadeBit, __ATOMIC_SEQ_CST);
+    Log("mount: near-camera fading %s (%s; the game set it again %u times while riding)",
+        !same ? "not restored (battle gone)" : g_mfade.wasOn ? "back on" : "left off (it was off before)", why, g_mfade.rewrites);
+    const int st = g_mfade.state;
+    g_mfade = MountFade();
+    g_mfade.state = st;
+}
+void MountFadeStep() {
+    const bool riding = (S.mount && !(cfg.hideSelf && cfg.mountHide)) || S.flyMount;
+    const uintptr_t mgr = S.active && cfg.mountNoFade && riding && MountFadeCheck() ? VisMgr(S.battle) : 0;
+    if (g_mfade.mgr && mgr != g_mfade.mgr) MountFadeRestore(!S.active ? "first person ended" : mgr ? "another battle" : "off the mount");
+    if (!mgr) return;
+    unsigned char b = 0;
+    if (!Rd(mgr + oVisMgrFlags, b)) return;
+    if (!g_mfade.mgr) {
+        g_mfade.mgr = mgr;
+        g_mfade.wasOn = (b & kFadeBit) != 0;
+        g_mfade.rewrites = 0;
+        Log("mount: near-camera fading off while riding (visual manager %p, flags 0x%02x) - the mount stays drawn next to the camera", (void*)mgr, b);
+    } else if (b & kFadeBit) {
+        ++g_mfade.rewrites;
+    }
+    if (b & kFadeBit) __atomic_fetch_and(reinterpret_cast<unsigned char*>(mgr + oVisMgrFlags), static_cast<unsigned char>(~kFadeBit), __ATOMIC_SEQ_CST);
+}
 void MountHideStep() {
     const uintptr_t m = S.active && cfg.hideSelf && cfg.mountHide ? S.mount : 0;
     HideSelf& h = g_hideMount;
@@ -9805,6 +9879,7 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     KillMarkStep();
     HideSelfStep();
     MountHideStep();
+    MountFadeStep();
     ArrowHideStep();
     vmgame::GameThreadTime((Now() - tGameFrame) * 1000.0);
 }
