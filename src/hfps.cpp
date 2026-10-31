@@ -9416,7 +9416,7 @@ DWORD WINAPI InitThread(LPVOID) {
             return 0;
         }
         Log("loader: version.dll = %ls (%s), module dir %ls", vp[0] ? vp : L"(none)",
-            inDir ? "in the game folder, another tool's (no hero_fps / tenzin_fps proxy signature) - carrying on" : "not ours", g_dir);
+            inDir ? "in the game folder, another tool's (no tenzin_fps / tenzin_fps proxy signature) - carrying on" : "not ours", g_dir);
     }
 #ifdef HFPS_PACK_ASSETS
     if (!packx::ExtractFromPack(g_dir, &Log)) {
