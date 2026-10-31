@@ -318,6 +318,7 @@ struct AnimSound {
     float t, vol;
     vm::GunSound snd;
     bool shell = false;
+    bool ammo = false;
 };
 constexpr int kMaxAnimSounds = 48;
 struct Weapon {
@@ -991,6 +992,10 @@ struct Anim {
     int cur = -1, prev = -1, idle = -1, fireNext = 0, cycleNext = 0, stance = 0;
     int reloadKind = 0;
     double reloadAt = 0;
+    int shellSeq = -1;
+    LONG shellTarget = 0;
+    int shellLoops = 0;
+    bool shellEmpty = false;
     int spinSeen = 0;
     int evClip = -1;
     double evStart = 0, evLast = -1;
@@ -1031,6 +1036,23 @@ void Play(int clip, double now, double fade, double rate = 1.0) {
     g_an.fadeStart = now;
     g_an.fadeLen = g_an.prev >= 0 ? fade : 0;
     g_an.curveClip = -1;
+}
+bool ShellReload() {
+    for (int i = 0; i < 4; ++i)
+        if (!Wp().set.reloadShellClips[i][0] || Wp().rend.FindClip(Wp().set.reloadShellClips[i]) < 0) return false;
+    return true;
+}
+void ShellAmmoEvent() {
+    if (g_mag.reload == 0 || g_mag.size <= 0) return;
+    LONG res = g_mag.reserve, have = g_mag.ammo < 0 ? 0 : g_mag.ammo;
+    if (res != 0 && have < g_mag.size) {
+        InterlockedExchange(&g_mag.ammo, ++have);
+        if (res > 0) InterlockedExchange(&g_mag.reserve, res - 1);
+    }
+    const bool done = have >= g_mag.size || have >= g_an.shellTarget || g_mag.reserve == 0;
+    if (done) InterlockedExchange(&g_mag.reload, 0);
+    static int logs = 0;
+    if (logs++ < 4) g_log("reload: shell in -> %ld / %ld (reserve %ld)%s", have, g_mag.size, g_mag.reserve, done ? ", done" : "");
 }
 void MarkCurveClip(int clip, bool down) {
     if (CurveAdsOn() && clip >= 0 && g_an.cur == clip) g_an.curveClip = clip, g_an.curveDown = down;
@@ -1215,7 +1237,8 @@ void AnimStep(vm::Look& l, double now) {
         LONG raw = g_fp ? g_stance : 0;
         int st = (raw & 4) ? 3 : (raw & 2) ? 2 : (raw & 1) ? 1 : 0;
         bool reloadAnim = g_mag.reload != 0 && g_an.cur >= 0 &&
-                          (g_an.cur == Wp().rend.FindClip("reload") || g_an.cur == Wp().rend.FindClip("reload_empty"));
+                          (g_an.cur == Wp().rend.FindClip("reload") || g_an.cur == Wp().rend.FindClip("reload_empty") ||
+                           g_an.cur == g_an.shellSeq);
         if (st != g_an.stance && Wp().set.fireMode && g_spin.state != 0 && st < 2 && g_an.stance < 2) {
             g_an.stance = st;
             if (g_spin.state == 2) {
@@ -1341,8 +1364,24 @@ void AnimStep(vm::Look& l, double now) {
     }
     if (g_an.reloadKind && now >= g_an.reloadAt) {
         if (g_mag.reload == g_an.reloadKind) {
-            int c = g_an.reloadKind == 2 ? Wp().rend.FindClip("reload_empty") : -1;
-            if (c < 0) c = Wp().rend.FindClip("reload");
+            int c = -1;
+            if (ShellReload()) {
+                const auto& rs = Wp().set.reloadShellClips;
+                const auto& r2 = Wp().set.reloadShellClips2;
+                c = Wp().rend.FindClip(rs[g_an.reloadKind == 2 ? 1 : 0]);
+                LONG size = g_mag.size, have = g_mag.ammo < 0 ? 0 : g_mag.ammo, res = g_mag.reserve;
+                g_an.shellTarget = res < 0 || have + res >= size ? size : have + res;
+                if (g_an.reloadKind == 1 && g_an.shellTarget - have >= 2 && r2[0][0] && Wp().rend.FindClip(r2[0]) >= 0)
+                    c = Wp().rend.FindClip(r2[0]);
+                g_an.shellSeq = c;
+                g_an.shellLoops = 0;
+                g_an.shellEmpty = g_an.reloadKind == 2;
+                static int logs = 0;
+                if (logs++ < 6) g_log("reload: shell by shell %ld -> %ld (clip %d)", have, g_an.shellTarget, c);
+            } else {
+                c = g_an.reloadKind == 2 ? Wp().rend.FindClip("reload_empty") : -1;
+                if (c < 0) c = Wp().rend.FindClip("reload");
+            }
             Play(c, now, 0.1);
             InterlockedExchange64(&g_mag.t0Us, static_cast<LONG64>(now * 1e6));
         }
@@ -1367,20 +1406,54 @@ void AnimStep(vm::Look& l, double now) {
         Weapon& w = Wp();
         for (int i = 0; i < w.nAnim; ++i) {
             AnimSound& a = w.anim[i];
-            if (a.clip == g_an.cur && a.t > g_an.evLast && a.t <= t && a.t > t - 0.2) {
-                if (a.shell) {
+            if (a.clip == g_an.cur && a.t > g_an.evLast && a.t <= t && (a.ammo || a.t > t - 0.2)) {
+                if (a.ammo) {
+                    ShellAmmoEvent();
+                } else if (a.shell) {
                     if (w.set.shellEject) w.shells.Trigger(g_mo.adsW);
                 } else {
                     a.snd.Play(a.vol * w.set.animSoundVolume);
                 }
                 static int logs = 0;
-                if (logs < 80) {
+                if (!a.ammo && logs < 24) {
                     ++logs;
                     g_log("anim %s: clip %d at %.2f s (event %.2f s)", a.shell ? "shell" : "sound", a.clip, t, a.t);
                 }
             }
         }
         g_an.evLast = t;
+    }
+    if (g_an.shellSeq >= 0) {
+        if (g_an.cur != g_an.shellSeq) {
+            g_an.shellSeq = -1;
+            if (g_mag.reload != 0 && g_an.reloadKind == 0) InterlockedExchange(&g_mag.reload, 0);
+        } else {
+            const double t = ClipT(now), dur = Wp().rend.ClipDuration(g_an.cur);
+            if (t >= dur) {
+                const auto& rs = Wp().set.reloadShellClips;
+                const auto& r2 = Wp().set.reloadShellClips2;
+                auto find = [](const char* n) { return n[0] ? Wp().rend.FindClip(n) : -1; };
+                int loop = -1;
+                if (g_an.shellTarget - g_mag.ammo >= 2) {
+                    if (g_an.shellEmpty) loop = find(r2[2]);
+                    if (loop < 0) loop = find(r2[1]);
+                }
+                if (loop < 0 && g_an.shellEmpty) loop = find(rs[4]);
+                if (loop < 0) loop = find(rs[2]);
+                int end = g_an.shellEmpty ? find(rs[5]) : -1;
+                if (end < 0) end = find(rs[3]);
+                const double over = (t - dur) / (g_an.curRate > 0 ? g_an.curRate : 1.0);
+                if (g_mag.reload != 0 && g_mag.ammo < g_an.shellTarget && g_an.shellLoops < g_mag.size + 2 && loop >= 0) {
+                    Play(loop, now - over, 0.0);
+                    g_an.shellSeq = loop;
+                    ++g_an.shellLoops;
+                } else {
+                    if (g_mag.reload != 0) InterlockedExchange(&g_mag.reload, 0);
+                    Play(end, now - over, 0.0);
+                    g_an.shellSeq = -1;
+                }
+            }
+        }
     }
     if (g_an.cur >= 0 && !Wp().rend.ClipLoops(g_an.cur) && g_an.cur != StanceIdle() &&
         ClipT(now) >= Wp().rend.ClipDuration(g_an.cur))
@@ -1716,7 +1789,8 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
                     a.t = t;
                     a.vol = v;
                     a.shell = !strcmp(file, "!shell");
-                    if (a.shell) {
+                    a.ammo = !strcmp(file, "!ammo");
+                    if (a.shell || a.ammo) {
                         if (a.clip >= 0)
                             ++w.nAnim;
                         else if (bad++ < 4)
@@ -3351,6 +3425,15 @@ void MagApply() {
     int cTac = Wp().rend.FindClip("reload"), cEmpty = Wp().rend.FindClip("reload_empty");
     InterlockedExchange(&g_mag.refillUs[1], refill(Wp().set.reloadRefill, cTac));
     InterlockedExchange(&g_mag.refillUs[2], refill(Wp().set.reloadEmptyRefill, cEmpty >= 0 ? cEmpty : cTac));
+    if (ShellReload()) {
+        const auto& rs = Wp().set.reloadShellClips;
+        const float d = Wp().rend.ClipDuration(Wp().rend.FindClip(rs[0])) + Wp().rend.ClipDuration(Wp().rend.FindClip(rs[1])) +
+                        static_cast<float>(size > 0 ? size : 1) * Wp().rend.ClipDuration(Wp().rend.FindClip(rs[2])) +
+                        Wp().rend.ClipDuration(Wp().rend.FindClip(rs[3])) + 3.f;
+        InterlockedExchange(&g_mag.refillUs[1], static_cast<LONG>(d * 1e6f));
+        InterlockedExchange(&g_mag.refillUs[2], static_cast<LONG>(d * 1e6f));
+        g_log("viewmodel: shell-by-shell reload (%s / %s / %s / %s), fallback refill %.1f s", rs[0], rs[1], rs[2], rs[3], d);
+    }
     bool same = g_mag.loadedModel == g_modelIdx;
     g_mag.loadedModel = g_modelIdx;
     LONG keep = g_modelIdx < kMaxModels ? g_mag.ammoByModel[g_modelIdx] : -1;

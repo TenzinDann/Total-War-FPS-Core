@@ -77,6 +77,8 @@ struct Settings {
     int ammoUpgrade = 0;
     float reloadRefill = 0.f;
     float reloadEmptyRefill = 0.f;
+    char reloadShellClips[6][48] = {};
+    char reloadShellClips2[3][48] = {};
     wchar_t weaponId[64] = L"";
     bool weaponDefault = false;
     char projectile[64] = "";

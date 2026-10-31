@@ -1065,6 +1065,45 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (s.ammoUpgrade < 0 || s.ammoUpgrade > 10000) s.ammoUpgrade = 0;
     s.reloadRefill = IniFloat(ini, L"reload_refill", s.reloadRefill);
     s.reloadEmptyRefill = IniFloat(ini, L"reload_empty_refill", s.reloadEmptyRefill);
+    {
+        wchar_t buf[256];
+        GetPrivateProfileStringW(L"viewmodel", L"reload_shell_clips", L"", buf, 256, ini);
+        for (auto& c : s.reloadShellClips) c[0] = 0;
+        int k = 0;
+        wchar_t* p = buf;
+        while (k < 6 && *p) {
+            wchar_t* q = wcschr(p, L',');
+            if (q) *q = 0;
+            wchar_t* b = p;
+            while (*b == L' ') ++b;
+            wchar_t* e = b + wcslen(b);
+            while (e > b && e[-1] == L' ') *--e = 0;
+            if (WideCharToMultiByte(CP_UTF8, 0, b, -1, s.reloadShellClips[k], sizeof s.reloadShellClips[k], nullptr, nullptr) <= 0)
+                s.reloadShellClips[k][0] = 0;
+            ++k;
+            if (!q) break;
+            p = q + 1;
+        }
+        if (k < 4)
+            for (auto& c : s.reloadShellClips) c[0] = 0;
+        GetPrivateProfileStringW(L"viewmodel", L"reload_shell_clips2", L"", buf, 256, ini);
+        for (auto& c : s.reloadShellClips2) c[0] = 0;
+        k = 0;
+        p = buf;
+        while (k < 3 && *p) {
+            wchar_t* q = wcschr(p, L',');
+            if (q) *q = 0;
+            wchar_t* b = p;
+            while (*b == L' ') ++b;
+            wchar_t* e = b + wcslen(b);
+            while (e > b && e[-1] == L' ') *--e = 0;
+            if (WideCharToMultiByte(CP_UTF8, 0, b, -1, s.reloadShellClips2[k], sizeof s.reloadShellClips2[k], nullptr, nullptr) <= 0)
+                s.reloadShellClips2[k][0] = 0;
+            ++k;
+            if (!q) break;
+            p = q + 1;
+        }
+    }
     GetPrivateProfileStringW(L"viewmodel", L"weapon_id", s.weaponId, s.weaponId, 64, ini);
     GetPrivateProfileStringW(L"viewmodel", L"anim_sounds", s.animSounds, s.animSounds, 128, ini);
     s.animSoundVolume = IniFloat(ini, L"anim_sound_volume", s.animSoundVolume);
