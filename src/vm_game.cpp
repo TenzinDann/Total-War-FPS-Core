@@ -65,6 +65,11 @@ struct MagState {
     volatile LONG fireUs = 0;
     volatile LONG disposable = 0;
     volatile LONG reserve = -1;
+    volatile LONG shellMode = 0;
+    volatile LONG shellStop = 0;
+    volatile LONG shellWait = 0;
+    volatile LONG trigUp = 1;
+    volatile LONG64 firePendUs = 0;
     LONG ammoByModel[kMaxModels];
     LONG reserveByModel[kMaxModels];
     MagState() {
@@ -1042,6 +1047,8 @@ struct Anim {
     LONG shellTarget = 0;
     int shellLoops = 0;
     bool shellEmpty = false;
+    int shellEnd = -1;
+    double shellEndStart = 0;
     int spinSeen = 0;
     int evClip = -1;
     double evStart = 0, evLast = -1;
@@ -1088,6 +1095,12 @@ bool ShellReload() {
         if (!Wp().set.reloadShellClips[i][0] || Wp().rend.FindClip(Wp().set.reloadShellClips[i]) < 0) return false;
     return true;
 }
+int ShellEndClip() {
+    const auto& rs = Wp().set.reloadShellClips;
+    int c = g_an.shellEmpty && rs[5][0] ? Wp().rend.FindClip(rs[5]) : -1;
+    return c >= 0 ? c : Wp().rend.FindClip(rs[3]);
+}
+constexpr double kShellFireAt = 0.65, kShellFinish = 0.15, kShellCutFade = 0.15, kFirePendSec = 1.5;
 void ShellAmmoEvent() {
     if (g_mag.reload == 0 || g_mag.size <= 0) return;
     LONG res = g_mag.reserve, have = g_mag.ammo < 0 ? 0 : g_mag.ammo;
@@ -1442,6 +1455,29 @@ void AnimStep(vm::Look& l, double now) {
         }
         Play(c, now, 0.15);
     }
+    if (InterlockedExchange(&g_mag.shellStop, 0) && g_mag.reload != 0) {
+        int how = 0;
+        if (g_an.shellSeq >= 0 && g_an.cur == g_an.shellSeq && !g_an.reloadKind) {
+            const double left = (Wp().rend.ClipDuration(g_an.cur) - ClipT(now)) / (g_an.curRate > 0 ? g_an.curRate : 1.0);
+            how = g_an.shellTarget == g_mag.ammo ? 3 : 1;
+            g_an.shellTarget = g_mag.ammo;
+            if (left > kShellFinish) {
+                InterlockedExchange(&g_mag.reload, 0);
+                const int end = ShellEndClip();
+                Play(end, now, kShellCutFade);
+                g_an.shellSeq = -1;
+                g_an.shellEnd = end, g_an.shellEndStart = g_an.curStart;
+                how = 2;
+            }
+        } else {
+            g_an.reloadKind = 0;
+            InterlockedExchange(&g_mag.reload, 0);
+        }
+        static int logs = 0;
+        if (how != 3 && logs++ < 8)
+            g_log("reload: fire pressed -> stop shell reload at %ld / %ld (%s)", g_mag.ammo, g_mag.size,
+                  how == 2 ? "fade into end" : how == 1 ? "finish this segment, then end" : "reload not started, cancelled");
+    }
     if (g_an.cur != g_an.evClip || g_an.curStart != g_an.evStart) {
         g_an.evClip = g_an.cur;
         g_an.evStart = g_an.curStart;
@@ -1486,8 +1522,7 @@ void AnimStep(vm::Look& l, double now) {
                 }
                 if (loop < 0 && g_an.shellEmpty) loop = find(rs[4]);
                 if (loop < 0) loop = find(rs[2]);
-                int end = g_an.shellEmpty ? find(rs[5]) : -1;
-                if (end < 0) end = find(rs[3]);
+                const int end = ShellEndClip();
                 const double over = (t - dur) / (g_an.curRate > 0 ? g_an.curRate : 1.0);
                 if (g_mag.reload != 0 && g_mag.ammo < g_an.shellTarget && g_an.shellLoops < g_mag.size + 2 && loop >= 0) {
                     Play(loop, now - over, 0.0);
@@ -1497,6 +1532,7 @@ void AnimStep(vm::Look& l, double now) {
                     if (g_mag.reload != 0) InterlockedExchange(&g_mag.reload, 0);
                     Play(end, now - over, 0.0);
                     g_an.shellSeq = -1;
+                    g_an.shellEnd = end, g_an.shellEndStart = g_an.curStart;
                 }
             }
         }
@@ -1504,6 +1540,17 @@ void AnimStep(vm::Look& l, double now) {
     if (g_an.cur >= 0 && !Wp().rend.ClipLoops(g_an.cur) && g_an.cur != StanceIdle() &&
         ClipT(now) >= Wp().rend.ClipDuration(g_an.cur))
         Play(StanceIdle(), now, g_an.stance == 1 ? 0.05 : 0.15);
+    {
+        bool wait = g_an.shellSeq >= 0 && g_an.cur == g_an.shellSeq;
+        if (!wait && g_an.shellEnd >= 0) {
+            if (g_an.cur == g_an.shellEnd && g_an.curStart == g_an.shellEndStart)
+                wait = ClipT(now) < Wp().rend.ClipDuration(g_an.cur) * kShellFireAt;
+            else
+                g_an.shellEnd = -1;
+        }
+        InterlockedExchange(&g_mag.shellWait, wait ? 1 : 0);
+        if (g_mag.firePendUs && (g_an.stance >= 2 || g_sw.phase != 0)) InterlockedExchange64(&g_mag.firePendUs, 0);
+    }
     l.clip = g_an.cur;
     l.clipTime = static_cast<float>(ClipT(now));
     l.clipPrev = g_an.prev;
@@ -3518,6 +3565,8 @@ bool StartMagReload() {
     if (size <= 0 || g_mag.reload != 0 || g_mag.ammo >= size) return false;
     if (g_mag.reserve == 0) return false;
     LONG kind = g_mag.ammo > 0 ? 1 : 2;
+    InterlockedExchange(&g_mag.trigUp, 0);
+    InterlockedExchange64(&g_mag.firePendUs, 0);
     InterlockedExchange64(&g_mag.t0Us, static_cast<LONG64>(Now() * 1e6));
     if (InterlockedCompareExchange(&g_mag.reload, kind, 0) != 0) return false;
     InterlockedExchange(&g_mag.reqAnim, kind);
@@ -3528,12 +3577,25 @@ bool CanFire() {
     if (g_spin.mode && g_spin.state != 2) return false;
     if (g_mag.size <= 0) return true;
     MagTick();
+    if (g_mag.shellMode && g_mag.ammo > 0 && ((g_mag.reload != 0 && g_mag.trigUp) || (g_mag.reload == 0 && g_mag.shellWait))) {
+        if (g_mag.reload != 0) InterlockedExchange(&g_mag.shellStop, 1);
+        if (!g_mag.firePendUs) InterlockedExchange64(&g_mag.firePendUs, static_cast<LONG64>(Now() * 1e6));
+        return false;
+    }
     if (g_mag.reload != 0) return false;
     if (g_mag.ammo <= 0) {
         if (!g_mag.disposable) StartMagReload();
         return false;
     }
+    if (g_mag.firePendUs) InterlockedExchange64(&g_mag.firePendUs, 0);
     return true;
+}
+bool FirePending() {
+    const LONG64 t = g_mag.firePendUs;
+    if (!t) return false;
+    if (static_cast<LONG64>(Now() * 1e6) - t < static_cast<LONG64>(kFirePendSec * 1e6)) return true;
+    InterlockedCompareExchange64(&g_mag.firePendUs, 0, t);
+    return false;
 }
 void MagApply() {
     if (g_mag.loadedModel >= 0 && g_mag.loadedModel < kMaxModels && g_mag.size > 0) {
@@ -3542,6 +3604,11 @@ void MagApply() {
     }
     InterlockedExchange(&g_mag.reload, 0);
     InterlockedExchange(&g_mag.reqAnim, 0);
+    InterlockedExchange(&g_mag.shellMode, ShellReload() ? 1 : 0);
+    InterlockedExchange(&g_mag.shellStop, 0);
+    InterlockedExchange(&g_mag.shellWait, 0);
+    InterlockedExchange64(&g_mag.firePendUs, 0);
+    g_an.shellEnd = -1;
     InterlockedExchange(&g_spin.mode, Wp().set.fireMode == 1 ? 1 : 0);
     InterlockedExchange(&g_spin.state, 0);
     InterlockedExchange(&g_spin.upUs, static_cast<LONG>((Wp().set.spinUpTime > 0.f ? Wp().set.spinUpTime : 0.f) * 1e6f));
@@ -3744,6 +3811,7 @@ void CycleWeapon(int dir) {
 }
 bool Busy() { return g_switching != 0 || Reloading(); }
 void SetTrigger(bool held) {
+    if (!held && !g_mag.trigUp) InterlockedExchange(&g_mag.trigUp, 1);
     if (!g_spin.mode || !Enabled() || !g_fp) return;
     LONG64 now = static_cast<LONG64>(Now() * 1e6);
     LONG st = g_spin.state;

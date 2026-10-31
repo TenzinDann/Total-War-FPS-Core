@@ -55,6 +55,7 @@ void CycleModel();
 void Fire();
 double FireInterval();
 bool CanFire();
+bool FirePending();
 bool Reloading();
 void AmmoInfo(int* ammo, int* size, bool* reloading, int* reserve);
 void RefillAmmo(float frac);

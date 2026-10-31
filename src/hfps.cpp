@@ -627,7 +627,6 @@ struct Config {
     float mountEyeAbove = 0.7f, mountEye = 0.f;
     bool mountNoFade = true;
     bool mountNoSkirmish = true, mountMeleeReach = true;
-    bool mountNoAutoFire = true;
     bool mountCrouch = true;
     float mountEyeBack = 0.5f;
     bool quietOrders = true;
@@ -982,7 +981,6 @@ void LoadConfig() {
     cfg.mountEye = IniF(L"move", L"mount_eye", cfg.mountEye, ini);
     cfg.mountNoFade = GetPrivateProfileIntW(L"move", L"mount_no_fade", 1, ini) != 0;
     cfg.mountNoSkirmish = GetPrivateProfileIntW(L"move", L"mount_no_skirmish", 1, ini) != 0;
-    cfg.mountNoAutoFire = GetPrivateProfileIntW(L"move", L"mount_no_auto_fire", 1, ini) != 0;
     cfg.mountMeleeReach = GetPrivateProfileIntW(L"move", L"mount_melee_reach", 1, ini) != 0;
     cfg.mountCrouch = GetPrivateProfileIntW(L"move", L"mount_crouch", 1, ini) != 0;
     cfg.mountEyeBack = IniF(L"move", L"mount_eye_back", cfg.mountEyeBack, ini);
@@ -4967,23 +4965,13 @@ const CodePrint kBehaviourPrints904[] = {{0x2ea9ea0, 0x55, 0xa052bdfcbc794e19ull
                                          {0x2f4ac24, 0x1da, 0x1b0318535307b3e6ull},
                                          {0x2ee99d0, 0xa0, 0x68c8c0827e84d5f9ull}};
 bool g_behaviourOk = false;
-constexpr int kBehaviourFireAtWill = 7;
 struct SkirmishOff {
-    int id = kBehaviourSkirmish;
-    const char* name = "skirmish";
     uintptr_t unit = 0;
     bool was = false;
     bool off = false;
     double tTry = -1;
     unsigned tries = 0;
-};
-SkirmishOff g_rideBeh[2] = {{kBehaviourSkirmish, "skirmish"}, {kBehaviourFireAtWill, "fire-at-will"}};
-void RideBehaviourReset(SkirmishOff& st) {
-    const int id = st.id;
-    const char* const name = st.name;
-    st = SkirmishOff();
-    st.id = id, st.name = name;
-}
+} g_skirm;
 bool UnitBehaviourOn(uintptr_t unit, int id) {
     uint32_t w = 0;
     return Rd(unit + oUnitBehaviours + 4 * static_cast<uintptr_t>(id >> 5), w) && ((w >> (id & 31)) & 1);
@@ -5011,52 +4999,45 @@ bool IssueBehaviour(uintptr_t unit, int id, bool on) {
     FreeSelection(&sel);
     return ok;
 }
-void RideBehaviourForget(SkirmishOff& st) {
-    if (st.off) Log("%s: hero %p gone - not switched back on", st.name, (void*)st.unit);
-    RideBehaviourReset(st);
-}
 void SkirmishForget() {
-    for (SkirmishOff& st : g_rideBeh) RideBehaviourForget(st);
+    if (g_skirm.off) Log("skirmish: hero %p gone - its skirmish mode is not switched back on", (void*)g_skirm.unit);
+    g_skirm = SkirmishOff();
 }
-void RideBehaviourStep(SkirmishOff& st, bool enabled) {
+void SkirmishStep() {
     const double now = Now();
-    const bool want = S.active && enabled && g_behaviourOk && UnitRide() && !S.mpMode && S.unit;
-    if (want && st.unit != S.unit) {
-        if (st.off) RideBehaviourForget(st);
-        RideBehaviourReset(st);
-        st.unit = S.unit;
-        st.was = UnitBehaviourOn(S.unit, st.id);
-        Log("%s: hero unit %p %s while riding", st.name, (void*)S.unit, st.was ? "on - switching it off" : "off - nothing to do");
+    const bool want = S.active && cfg.mountNoSkirmish && g_behaviourOk && UnitRide() && !S.mpMode && S.unit;
+    if (want && g_skirm.unit != S.unit) {
+        if (g_skirm.off) SkirmishForget();
+        g_skirm = SkirmishOff();
+        g_skirm.unit = S.unit;
+        g_skirm.was = UnitBehaviourOn(S.unit, kBehaviourSkirmish);
+        Log("skirmish: hero unit %p skirmish mode %s while riding", (void*)S.unit, g_skirm.was ? "on - switching it off" : "off - nothing to do");
     }
     if (want) {
-        if (st.was && !st.off && now - st.tTry >= 0.25) {
-            st.tTry = now;
-            if (IssueBehaviour(S.unit, st.id, false)) {
-                st.off = true;
-                st.tTry = -1;
-                Log("%s: off for unit %p (silent behaviour toggle)", st.name, (void*)S.unit);
+        if (g_skirm.was && !g_skirm.off && now - g_skirm.tTry >= 0.25) {
+            g_skirm.tTry = now;
+            if (IssueBehaviour(S.unit, kBehaviourSkirmish, false)) {
+                g_skirm.off = true;
+                g_skirm.tTry = -1;
+                Log("skirmish: off for unit %p (silent behaviour toggle)", (void*)S.unit);
             }
         }
         return;
     }
-    if (!st.unit) return;
-    if (!st.off) {
-        RideBehaviourReset(st);
+    if (!g_skirm.unit) return;
+    if (!g_skirm.off) {
+        g_skirm = SkirmishOff();
         return;
     }
-    if (now - st.tTry < 0.25) return;
-    st.tTry = now;
-    if (IssueBehaviour(st.unit, st.id, true)) {
-        Log("%s: back on for unit %p (%s)", st.name, (void*)st.unit, S.active ? "not riding with unit moves any more" : "first person ended");
-        RideBehaviourReset(st);
-    } else if (++st.tries > 240) {
-        Log("%s: could not switch it back on for unit %p in 60 s - left off", st.name, (void*)st.unit);
-        RideBehaviourReset(st);
+    if (now - g_skirm.tTry < 0.25) return;
+    g_skirm.tTry = now;
+    if (IssueBehaviour(g_skirm.unit, kBehaviourSkirmish, true)) {
+        Log("skirmish: back on for unit %p (%s)", (void*)g_skirm.unit, S.active ? "not riding with unit moves any more" : "first person ended");
+        g_skirm = SkirmishOff();
+    } else if (++g_skirm.tries > 240) {
+        Log("skirmish: could not switch it back on for unit %p in 60 s - left off", (void*)g_skirm.unit);
+        g_skirm = SkirmishOff();
     }
-}
-void SkirmishStep() {
-    RideBehaviourStep(g_rideBeh[0], cfg.mountNoSkirmish);
-    RideBehaviourStep(g_rideBeh[1], cfg.mountNoAutoFire);
 }
 bool UseOverride() { return MoveMode() == 2; }
 bool StartOrSteer(float x, float z, bool run) { return UseOverride() ? IssueOvrMove(x, z) : IssueMove(x, z, run); }
@@ -9266,9 +9247,7 @@ bool VerifyGame() {
             cfg.mount, cfg.mountUnitMove, cfg.mountHide, cfg.mountFallback, cfg.mountEyeAbove, cfg.mountEye);
         Log("mount: near-camera fading while riding %s (mount_no_fade=%d; the fade site is checked on the first ride)",
             cfg.mountNoFade ? "off" : "as the game has it", cfg.mountNoFade);
-        g_behaviourOk = PrintsMatch(Prints(kBehaviourPrints904), "unit behaviour toggle (skirmish / fire at will)");
-        Log("mount: fire at will while riding %s (mount_no_auto_fire=%d) - the hero does not shoot on its own; our gun / casting are not affected",
-            cfg.mountNoAutoFire && g_behaviourOk ? "switched off" : "left alone", cfg.mountNoAutoFire);
+        g_behaviourOk = PrintsMatch(Prints(kBehaviourPrints904), "unit behaviour toggle (skirmish)");
         Log("mount: skirmish mode while riding %s (mount_no_skirmish=%d; behaviour toggle %s); melee reach from the mount's edge %s (mount_melee_reach=%d)",
             cfg.mountNoSkirmish && g_behaviourOk ? "switched off" : "left alone", cfg.mountNoSkirmish, g_behaviourOk ? "ok" : "NOT matching - off",
             cfg.mountMeleeReach ? "on" : "off", cfg.mountMeleeReach);
