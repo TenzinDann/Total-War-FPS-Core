@@ -288,6 +288,13 @@ constexpr uintptr_t kFnUnitRouting904 = 0x30348f0, oUnitMorale = 0x3b30, oMorale
 constexpr uintptr_t oUiCanFly = 0x70f, oUiAlwaysFly = 0x710, oUiCanToggleFly = 0x711, oUiIsFlying = 0x712;
 constexpr uintptr_t kFnFlyCmdCtor904 = 0x2ea9358, kFnFlyCmdIssue904 = 0x1e3f410;
 bool g_flyOk = false;
+const CodePrint kFlyStatePrints904[] = {
+    {0x301e0c0, 0xd2, 0xbbfbba4b2daa7719ull},
+    {0x301c86c, 0xa6, 0x59bb7f64bf36fc5full},
+    {0x3039e89, 0x28, 0x44a5c3a11a7eeec0ull}};
+constexpr uintptr_t oUnitFlyComp = 0x3e30, oFlyCompLanded = 0x8;
+constexpr uintptr_t kFnFlyCanChange904 = 0x301c86c;
+bool g_flyStateOk = false;
 const CodePrint kWallPrints904[] = {
     {0x2dc67a8, 0x1ab, 0xb8fa363f9006326full},
     {0x30b3cf8, 0xa3, 0x73b7107b30625308ull},
@@ -1271,6 +1278,8 @@ struct State {
     unsigned tpSent = 0, tpFailed = 0, tpLogs = 0, leashHits = 0;
     int lastMode = -1;
     bool flyer = false;
+    int flyTakeoff = 0;
+    double tFlyEnter = 0, tFlyCheck = 0, tFlyGiveUp = 0;
     uintptr_t mount = 0, body = 0;
     bool mountUnit = false, mountMoved = false;
     float footEye = 1.75f, mountStart[2] = {};
@@ -1536,6 +1545,7 @@ void ReleaseMouse() {
 }
 bool IssueHalt();
 bool IssueDesiredFlying(bool fly);
+void FlyTakeoffStep(double now);
 bool IssueQuietUnitHalt();
 bool StopMoving();
 int MoveMode();
@@ -1750,7 +1760,7 @@ void Enter(uintptr_t mgr) {
             moraleState);
         return;
     }
-    bool flyer = false, flyAlways = false;
+    bool flyer = false, flyAlways = false, flyNow = false;
     if (cfg.fly && g_flyOk && g_moveOk && cfg.moveEnabled) {
         uint8_t canFly = 0, always = 0, canToggle = 0, isFly = 0;
         Rd(uiUnit + oUiCanFly, canFly);
@@ -1759,6 +1769,7 @@ void Enter(uintptr_t mgr) {
         Rd(uiUnit + oUiIsFlying, isFly);
         flyer = canFly != 0 || always != 0;
         flyAlways = always != 0;
+        flyNow = isFly != 0;
         if (flyer)
             Log("fly: flying hero (CanFly %d, CanAlwaysFlying %d, CanToggleFlying %d, IsFlying %d, entity y %.2f) -> unit move orders, "
                 "camera at the hero's own height, no sprint, no walking bob / footsteps",
@@ -2007,7 +2018,20 @@ void Enter(uintptr_t mgr) {
     }
     HookRenderChild();
     if (g_moveOk && cfg.moveEnabled && (MoveMode() == 2 || MoveMode() == 0)) IssueQuietUnitHalt();
-    if (S.flyer && cfg.flyTakeoff && !flyAlways) IssueDesiredFlying(true);
+    S.flyTakeoff = 0;
+    S.tFlyEnter = Now();
+    if (S.flyer && cfg.flyTakeoff && !flyAlways) {
+        if (flyNow) {
+            Log("fly: already airborne - no take-off / landing command, stays in the air");
+        } else if (!g_flyStateOk) {
+            IssueDesiredFlying(true);
+        } else {
+            S.flyTakeoff = 1;
+            S.tFlyCheck = 0;
+            S.tFlyGiveUp = S.tFlyEnter + 5.0;
+            FlyTakeoffStep(S.tFlyEnter);
+        }
+    }
     Log("FPS enter mgr=%p battle=%p fpCtrl=%p cam=%p prevActive=%p(vt %p) unit=%p entities=%u entity=%p "
         "pos=%.2f,%.2f,%.2f yaw=%.1f fov=%.4f near=%.3f(prev %.3f) far=%.1f camDone=%u selCount=%d",
         (void*)mgr, (void*)battle, (void*)fpCtrl, (void*)cam, (void*)prev, (void*)Ptr(prev), (void*)unit,
@@ -4021,13 +4045,53 @@ bool IssueDesiredFlying(bool fly) {
         using FnIssue = unsigned char (*)(uintptr_t, void*);
         HaltCmdBuf cmd;
         memset(&cmd, 0, sizeof cmd);
-        reinterpret_cast<FnCtor>(g_base + kFnFlyCmdCtor904)(&cmd, &sel, fly ? 1 : 0);
+        reinterpret_cast<FnCtor>(g_base + kFnFlyCmdCtor904)(&cmd, &sel, fly ? 0 : 1);
         ok = reinterpret_cast<FnIssue>(g_base + kFnFlyCmdIssue904)(queue, &cmd) != 0;
         FreeSelection(cmd.b + 8);
     }
     FreeSelection(&sel);
-    Log("fly: desired flying state %d issued=%d units=%u", fly ? 1 : 0, ok, n);
+    Log("fly: %s command (byte %d) issued=%d units=%u", fly ? "take-off" : "landing", fly ? 0 : 1, ok, n);
     return ok;
+}
+bool FlyAirborne(uintptr_t unit) {
+    uintptr_t fc = Plausible(unit) ? Ptr(unit + oUnitFlyComp) : 0;
+    uint32_t st = 1;
+    return Plausible(fc) && Rd(fc + oFlyCompLanded, st) && st == 0;
+}
+bool FlyCanTakeOff(uintptr_t unit) {
+    uintptr_t fc = Plausible(unit) ? Ptr(unit + oUnitFlyComp) : 0;
+    if (!Plausible(fc)) return false;
+    using FnCan = unsigned char (*)(uintptr_t, unsigned char);
+    return reinterpret_cast<FnCan>(g_base + kFnFlyCanChange904)(fc, 0) != 0;
+}
+void FlyTakeoffStep(double now) {
+    if (!S.flyTakeoff || now < S.tFlyCheck) return;
+    S.tFlyCheck = now + 0.25;
+    float p[3] = {};
+    ReadVec(S.entity + oEntPos, p);
+    if (FlyAirborne(S.unit)) {
+        Log("fly: airborne %.1f s after entering (entity y %.2f)%s", now - S.tFlyEnter, p[1],
+            S.flyTakeoff == 2 ? " - took off" : "");
+        S.flyTakeoff = 0;
+        return;
+    }
+    if (!CmdQueue(nullptr)) {
+        S.tFlyGiveUp = now + 5.0;
+        return;
+    }
+    if (S.flyTakeoff == 1 && FlyCanTakeOff(S.unit)) {
+        if (IssueDesiredFlying(true)) {
+            S.flyTakeoff = 2;
+            S.tFlyGiveUp = now + 5.0;
+        }
+        return;
+    }
+    if (now >= S.tFlyGiveUp) {
+        Log("fly: still on the ground %.1f s after entering (entity y %.2f; %s) - it moves along the ground", now - S.tFlyEnter, p[1],
+            S.flyTakeoff == 2 ? "take-off issued but it did not lift off"
+                              : "the game never allowed a take-off: landing / taking off / fighting?");
+        S.flyTakeoff = 0;
+    }
 }
 using FnBsWrite = void (*)(void* w, char tag, const void* p, unsigned n);
 using FnDestWrite = void* (*)(void* w, const void* dest);
@@ -7161,6 +7225,7 @@ void Apply(uintptr_t mgr) {
         Exit(mgr, "camera-invalid");
         return;
     }
+    if (S.flyTakeoff) FlyTakeoffStep(now);
     if (S.ghostWanted && !S.ghost && IssueUnitEnabled(false)) S.ghost = true;
     if (g_moveOk && !S.ghostWanted && !S.ghost && now - S.tAliveCheck >= 1.0) {
         S.tAliveCheck = now;
@@ -8833,6 +8898,9 @@ bool VerifyGame() {
         Log("fly: flying heroes %s (fly=%d takeoff=%d ahead=%.0f interval=%.2f turn=%.0f eye=%.2f)",
             g_flyOk ? "ok" : "OFF - flying heroes use the normal movement", cfg.fly, cfg.flyTakeoff, cfg.flyAhead, cfg.flyInterval,
             cfg.flyTurnDeg, cfg.flyEyeHeight);
+        g_flyStateOk = g_flyOk && PrintsMatch(Prints(kFlyStatePrints904), "flying heroes (airborne / can take off)");
+        Log("fly: take-off byte 0 (10-31 fix: 1 = land); airborne / can-take-off checks %s",
+            g_flyStateOk ? "ok - grounded flyers take off once the game allows it" : "OFF - one take-off command on entering, result not checked");
         Log("mount: ground mounts %s (mount=%d mount_hide=%d mount_fallback=%d mount_eye_above=%.2f mount_eye=%.2f)",
             cfg.mount ? "ok - the mount is teleported, the rider rides along" : "OFF - the rider is teleported (it cannot move)", cfg.mount, cfg.mountHide,
             cfg.mountFallback, cfg.mountEyeAbove, cfg.mountEye);
