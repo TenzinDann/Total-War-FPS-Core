@@ -97,6 +97,7 @@ struct Settings {
     float burstCoverLead = 0.f;
     float burstCoverDirect = 0.f;
     float burstCoverDirectReact = 0.f, burstCoverDirectFx = 0.f;
+    float burstCoverMargin = 1.f;
     float fireRange = 0.f;
     wchar_t animSounds[128] = L"";
     float animSoundVolume = 0.7f;

@@ -78,7 +78,7 @@ const char* WeaponProjectileAds(int idx);
 int ShotPattern(float adsW, const float fwd[3], const float right[3], const float up[3], float (*out)[3], int maxOut, float* range, bool* focus);
 bool WeaponBurst(int idx, float* minDist, float* scatterAds = nullptr, int* pierceAds = nullptr, float* reachAds = nullptr);
 bool WeaponBurstCover(int idx, float* tick, int* cap, float* fanDeg, int* clip = nullptr, float* lead = nullptr, float* direct = nullptr,
-                      float* react = nullptr, float* fx = nullptr);
+                      float* react = nullptr, float* fx = nullptr, float* margin = nullptr, float* visFan = nullptr);
 void BurstScatter(float radius, float* dx, float* dz);
 float BurstDistance(float minDist, float range);
 void ToggleTestLayer();

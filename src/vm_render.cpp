@@ -1234,6 +1234,8 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (!(s.burstCoverDirectReact >= 0.f && s.burstCoverDirectReact <= 5.f)) s.burstCoverDirectReact = 0.f;
     s.burstCoverDirectFx = IniFloat(ini, L"burst_cover_direct_fx", s.burstCoverDirectFx);
     if (!(s.burstCoverDirectFx >= 0.f && s.burstCoverDirectFx <= 5.f)) s.burstCoverDirectFx = 0.f;
+    s.burstCoverMargin = IniFloat(ini, L"burst_cover_margin", s.burstCoverMargin);
+    if (!(s.burstCoverMargin >= 0.5f && s.burstCoverMargin <= 5.f)) s.burstCoverMargin = 1.f;
     if (!(s.fireLfeVolume >= 0.f && s.fireLfeVolume <= 2.f)) s.fireLfeVolume = 0.7f;
     if (!(s.fireAtmoVolume >= 0.f && s.fireAtmoVolume <= 2.f)) s.fireAtmoVolume = 0.7f;
     if (!(s.fireTailVolume >= 0.f && s.fireTailVolume <= 2.f)) s.fireTailVolume = 0.7f;
