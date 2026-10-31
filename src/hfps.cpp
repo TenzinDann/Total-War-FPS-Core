@@ -8641,7 +8641,8 @@ void Apply(uintptr_t mgr) {
     double fireGap = vmgame::FireInterval() > 0 ? vmgame::FireInterval() : cfg.fireInterval;
     vmgame::SetTrigger(held && g_fireOk && cfg.fireEnabled && !S.sprint && now >= S.fireBlock);
     if (!held) S.fireChain = false;
-    if (held && g_fireOk && cfg.fireEnabled && now >= S.nextShot && !S.sprint && now >= S.fireBlock && vmgame::CanFire()) {
+    const bool firePend = !held && vmgame::FirePending();
+    if ((held || firePend) && g_fireOk && cfg.fireEnabled && now >= S.nextShot && !S.sprint && now >= S.fireBlock && vmgame::CanFire()) {
         const float* fwd = vFwd;
         const float* right = vRight;
         const float* camUp = vUp;
