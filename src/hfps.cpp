@@ -627,6 +627,7 @@ struct Config {
     float mountEyeAbove = 0.7f, mountEye = 0.f;
     bool mountNoFade = true;
     bool mountNoSkirmish = true, mountMeleeReach = true;
+    bool mountCrouch = true;
     bool quietOrders = true;
     bool shieldGame = true;
     bool shieldStagger = true;
@@ -980,6 +981,7 @@ void LoadConfig() {
     cfg.mountNoFade = GetPrivateProfileIntW(L"move", L"mount_no_fade", 1, ini) != 0;
     cfg.mountNoSkirmish = GetPrivateProfileIntW(L"move", L"mount_no_skirmish", 1, ini) != 0;
     cfg.mountMeleeReach = GetPrivateProfileIntW(L"move", L"mount_melee_reach", 1, ini) != 0;
+    cfg.mountCrouch = GetPrivateProfileIntW(L"move", L"mount_crouch", 1, ini) != 0;
     if (cfg.mountEyeAbove < -3.f || cfg.mountEyeAbove > 5.f) cfg.mountEyeAbove = 0.7f;
     if (cfg.mountEye < 0.f || cfg.mountEye > 20.f) cfg.mountEye = 0.f;
     cfg.shieldGame = GetPrivateProfileIntW(L"viewmodel", L"shield_block_game", 1, ini) != 0;
@@ -1303,6 +1305,8 @@ struct State {
     float footEye = 1.75f, mountStart[2] = {};
     uintptr_t flyMount = 0;
     float flyEye = 1.2f;
+    float saddle = 1.f;
+    bool rideCrouch = false;
     double tMountLog = 0;
     unsigned mountLogs = 0;
     TpRec tpHist[32] = {};
@@ -1858,6 +1862,7 @@ void Enter(uintptr_t mgr) {
     S.sprint = S.tac = S.ads = false;
     S.shiftPrev = true;
     S.crouch = S.crouchLatch = false;
+    S.rideCrouch = false;
     S.ctrlPrev = true;
     S.crouchT = 0;
     S.adsT = 0;
@@ -1911,6 +1916,11 @@ void Enter(uintptr_t mgr) {
         uintptr_t rec = Ptr(entity + oEntRecord);
         if (cfg.eyeFromHeight && !flyer && rec && Rd(rec + oRecHeight, h)) eye = EyeFromHeight(h, s_cfgEye);
         S.footEye = mount ? s_cfgEye : eye;
+        S.saddle = 1.f;
+        if (mount) {
+            float mpos[3];
+            if (ReadVec(mount + oEntPos, mpos)) S.saddle = pos[1] - mpos[1];
+        }
         if (mount) {
             float mh = 0.f;
             const uintptr_t mrec = Ptr(mount + oEntRecord);
@@ -1920,6 +1930,11 @@ void Enter(uintptr_t mgr) {
                 cfg.mountEye > 0.f ? "; fixed mount_eye" : "");
         }
         cfg.eyeHeight = s_lastAuto = eye;
+        if (mount && cfg.mountCrouch) {
+            const float s = std::fmin(std::fmax(S.saddle, 0.f), eye);
+            Log("mount: crouched in the saddle (%.2f m above the mount) -> eye %.2f m (standing %.2f, crouch_eye %.2f)", S.saddle, s + (eye - s) * cfg.crouchEye,
+                eye, cfg.crouchEye);
+        }
         Log("ghost: entity height %.2f m -> eye height %.2f m (config %.2f%s)", h, eye, s_cfgEye,
             !cfg.eyeFromHeight ? ", eye_from_height off" : flyer ? ", flyer" : "");
         Log("ghost: learned teleport lead by speed band (walk / run / sprint / tactical sprint): %.3f %.3f %.3f %.3f s",
@@ -4846,6 +4861,25 @@ float CrouchEyeScale(float t, float eye) {
     const float s = t * t * (3.f - 2.f * t);
     return 1.f - (1.f - eye) * s;
 }
+bool RideCrouch() {
+    if (S.mount || S.flyMount) {
+        S.crouch = cfg.mountCrouch;
+        S.rideCrouch = true;
+        return true;
+    }
+    if (!S.rideCrouch) return false;
+    S.crouch = S.crouchLatch = S.rideCrouch = false;
+    return true;
+}
+float EyeAbove() {
+    const float k = CrouchEyeScale(S.crouchT, cfg.crouchEye);
+    if (S.flyer) return S.flyMount ? S.flyEye * k : cfg.flyEyeHeight;
+    if (S.mount) {
+        const float s = std::fmin(std::fmax(S.saddle, 0.f), cfg.eyeHeight);
+        return s + (cfg.eyeHeight - s) * k;
+    }
+    return cfg.eyeHeight * k;
+}
 bool CrouchKeyMsg(WPARAM w) {
     const unsigned k = cfg.crouchKey;
     if (w == k) return true;
@@ -7657,7 +7691,8 @@ void Apply(uintptr_t mgr) {
                 S.sprint = S.tac = false;
             }
             const bool was = S.crouch;
-            S.crouch = cfg.crouch && !S.flyer && !S.mount && CrouchWant(S.crouch, ck, S.ctrlPrev, cfg.crouchToggle, S.sprint && !wasSprint, &S.crouchLatch);
+            if (!RideCrouch())
+                S.crouch = cfg.crouch && !S.flyer && !S.mount && CrouchWant(S.crouch, ck, S.ctrlPrev, cfg.crouchToggle, S.sprint && !wasSprint, &S.crouchLatch);
             S.ctrlPrev = ck;
             if (S.crouch != was) {
                 vmgame::CrouchImpulse(S.crouch ? 1.f : -1.f);
@@ -7808,7 +7843,7 @@ void Apply(uintptr_t mgr) {
         float spd = S.tac ? cfg.tacSprintSpeed
                     : S.sprint ? cfg.sprintSpeed : cfg.runSpeed * (1.f - (1.f - cfg.adsMoveScale) * S.adsT);
         spd *= shieldMove;
-        spd *= 1.f - (1.f - cfg.crouchSpeed) * S.crouchT;
+        if (!S.mount) spd *= 1.f - (1.f - cfg.crouchSpeed) * S.crouchT;
         (void)run;
         bool space = fg && KeyDown(VK_SPACE);
         if (space && !S.spacePrev && !S.air && !pinned && !S.stuck && !paused && cfg.jumpHeight > 0.f) {
@@ -8409,7 +8444,7 @@ void Apply(uintptr_t mgr) {
     const float* vRight = kv.right;
     const float* vUp = kv.up;
     vmgame::PublishView(S.yaw, S.pitch, (UnitRide() || (mode == 0 && S.air)) ? 0.f : S.camSpeed);
-    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + (S.flyer ? (S.flyMount ? S.flyEye : cfg.flyEyeHeight) : cfg.eyeHeight * CrouchEyeScale(S.crouchT, cfg.crouchEye)),
+    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + EyeAbove(),
                     camPos[2] + cy * cfg.eyeForward};
     float target[3] = {eye[0] + vFwd[0] * 10.f, eye[1] + vFwd[1] * 10.f, eye[2] + vFwd[2] * 10.f};
     float up[3] = {0.f, 1.f, 0.f};
@@ -9182,6 +9217,8 @@ bool VerifyGame() {
         Log("mount: skirmish mode while riding %s (mount_no_skirmish=%d; behaviour toggle %s); melee reach from the mount's edge %s (mount_melee_reach=%d)",
             cfg.mountNoSkirmish && g_behaviourOk ? "switched off" : "left alone", cfg.mountNoSkirmish, g_behaviourOk ? "ok" : "NOT matching - off",
             cfg.mountMeleeReach ? "on" : "off", cfg.mountMeleeReach);
+        Log("mount: riders crouch in the saddle %s (mount_crouch=%d; crouch_eye %.2f of the height above the saddle, no slow-down)",
+            cfg.mountCrouch ? "on" : "off", cfg.mountCrouch, cfg.crouchEye);
         Log("quiet-orders: the hero's move / halt order lines in first person %s (quiet_orders=%d; order voice channel vtable +%llx %s)",
             cfg.quietOrders && QuietVoCheck() ? "muted" : "played", cfg.quietOrders, (unsigned long long)kVtOrderVo904,
             QuietVoCheck() ? "verified" : "NOT matching (other game version) - off");
