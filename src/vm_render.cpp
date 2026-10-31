@@ -1351,7 +1351,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.flashGasLinger = IniFloat(ini, L"flash_gas_linger", s.flashGasLinger);
     if (!(s.flashGasLinger >= 0.f && s.flashGasLinger <= 5.f)) s.flashGasLinger = 1.f;
     s.flashGasStyle = static_cast<int>(IniFloat(ini, L"flash_gas_style", static_cast<float>(s.flashGasStyle)));
-    if (s.flashGasStyle < 0 || s.flashGasStyle > 1) s.flashGasStyle = 1;
+    if (s.flashGasStyle < 0 || s.flashGasStyle > 2) s.flashGasStyle = 1;
     s.flashGasSidePuff = IniFloat(ini, L"flash_gas_side_puff", s.flashGasSidePuff);
     if (!(s.flashGasSidePuff >= 0.f && s.flashGasSidePuff <= 5.f)) s.flashGasSidePuff = 1.f;
     s.flashGasAds = IniFloat(ini, L"flash_gas_ads", s.flashGasAds);
@@ -3223,10 +3223,13 @@ struct FlashCb {
 };
 constexpr int kFlashTexVent = 0, kFlashTexFire = 1, kFlashTexGlow = 2, kFlashTexSmoke = 3, kFlashTexSpark = 4;
 constexpr int kFlashTexGasJet = 5, kFlashTexGasPuff = 6;
-constexpr int kFlashTexDistRing = 7, kFlashTexDistHaze = 8, kFlashTexGasBall = 9, kFlashTexGasWisp = 10, kFlashTexCount = 11;
+constexpr int kFlashTexDistRing = 7, kFlashTexDistHaze = 8, kFlashTexGasBall = 9, kFlashTexGasWisp = 10;
+constexpr int kFlashTexSmoke34 = 11, kFlashTexSmoke37 = 12, kFlashTexSmoke38 = 13, kFlashTexSmoke39 = 14, kFlashTexSmokeDust = 15, kFlashTexSmokeTrail = 16,
+              kFlashTexCount = 17;
 const wchar_t* const kFlashTexNames[kFlashTexCount] = {L"flash_vent", L"flash_fire", L"flash_glow", L"hit_mist",
                                                        L"tracer", L"gas_jet", L"gas_puff", L"dist_ring", L"dist_haze",
-                                                       L"gas_ball", L"gas_wisp"};
+                                                       L"gas_ball", L"gas_wisp", L"gas_smoke34", L"gas_smoke37", L"gas_smoke38",
+                                                       L"gas_smoke39", L"gas_dust", L"gas_trail"};
 constexpr float kTracerSpeed = 13000.f * 0.0254f, kTracerMaxLen = 500.f * 0.0254f, kTracerHalfWidth = 3.f * 0.0254f;
 ID3D11ShaderResourceView* LoadDdsBc(ID3D11Device* dev, const wchar_t* path, char* err, size_t errLen) {
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -3300,7 +3303,7 @@ void LoadSheet(const wchar_t* path, MuzzleFlash::Sheet& sh) {
         float r[4];
         char line[160];
         while (fgets(line, sizeof line, f))
-            if (sscanf(line, "%d %d %f %f %f %f", &q, &k, &r[0], &r[1], &r[2], &r[3]) == 6 && q >= 0 && q < 4 && k >= 0 && k < 16) {
+            if (sscanf(line, "%d %d %f %f %f %f", &q, &k, &r[0], &r[1], &r[2], &r[3]) == 6 && q >= 0 && q < 4 && k >= 0 && k < 64) {
                 memcpy(sh.rect[q][k], r, sizeof r);
                 if (k + 1 > sh.frames[q]) sh.frames[q] = k + 1;
             }
@@ -3507,8 +3510,118 @@ void MuzzleFlash::Spawn(const Settings& s) {
     if (s.flashGas) SpawnGas(s);
     if (s.shellEject && !s.shellEjectAnim) SpawnShellFx(s);
 }
+struct SmokeLayer {
+    int tex;
+    unsigned char view, where, trailFade, ribbon;
+    float chance, delay, rate, dur;
+    float life0, life1, w0, w1, h0, h1;
+    float a0, a1, gray;
+    float loc0[3], loc1[3], vel0[3], vel1[3];
+    float drag0, drag1, rot0, rot1, spin0, spin1;
+    unsigned char flipU;
+    float fps;
+    unsigned char nA;
+    float aK[4][2];
+    unsigned char nS;
+    float sK[4][2];
+    unsigned char nF;
+    float fK[4][2];
+};
+const SmokeLayer kSmokeLayers[] = {
+    {kFlashTexSmoke34, 0, 0, 0, 0, 0.5f, 0.01f, 0.f, 0.f, 0.25f, 0.3f, 20.f, 40.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 10.f, -3.f}, {0.f, 10.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f,
+     0.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
+     4, {{0.f, 0.f}, {0.01f, 0.329f}, {0.07f, 0.24f}, {1.f, 0.f}}, 1, {{0.f, 3.f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
+    {kFlashTexSmoke37, 0, 0, 0, 0, 0.5f, 0.01f, 0.f, 0.f, 0.12f, 0.12f, 40.f, 60.f, 0.f, 0.f, 0.2f, 0.5f, 1.048f, {-3.f, 10.f, -4.f}, {3.f, 10.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, -1.f, 1.f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 1.f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
+    {kFlashTexSmoke38, 0, 0, 0, 0, 0.5f, 0.01f, 0.f, 0.f, 0.12f, 0.12f, 45.f, 55.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 10.f, -4.f}, {3.f, 10.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 0.5f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+    {kFlashTexSmoke39, 0, 0, 0, 0, 0.5f, 0.01f, 0.f, 0.f, 0.1f, 0.1f, 50.f, 70.f, 25.f, 35.f, 0.2f, 1.3f, 1.033f, {0.f, 10.f, -3.f}, {0.f, 10.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, 0.f, 1.f, 0.f, 0.f, 1, 0.f,
+     3, {{0.f, 0.7f}, {0.3f, 0.7f}, {1.f, 0.f}}, 1, {{0.f, 2.4f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
+    {kFlashTexSmoke34, 1, 0, 0, 0, 0.5f, 0.01f, 0.f, 0.f, 0.25f, 0.3f, 20.f, 30.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f,
+     0.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
+     4, {{0.f, 0.f}, {0.01f, 0.659f}, {0.07f, 0.479f}, {1.f, 0.f}}, 2, {{0.f, 3.f}, {1.f, 3.9f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
+    {kFlashTexSmoke38, 1, 0, 0, 0, 0.5f, 0.01f, 0.f, 0.f, 0.12f, 0.12f, 45.f, 55.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 0.5f}}, 1, {{0.f, 1.8f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+    {kFlashTexSmoke39, 1, 0, 0, 0, 0.5f, 0.01f, 0.f, 0.f, 0.1f, 0.1f, 50.f, 60.f, 25.f, 30.f, 0.2f, 1.3f, 1.033f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, 0.f, 1.f, 0.f, 0.f, 1, 0.f,
+     2, {{0.f, 1.f}, {1.f, 0.f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
+    {kFlashTexSmokeTrail, 0, 0, 1, 1, 1.f, 0.f, 30.f, 2.f, 0.3f, 0.3f, 3.f, 3.f, 0.f, 0.f, 1.f, 1.f, 1.287f, {0.f, 0.f, -1.f}, {0.f, 0.f, -1.f}, {-3.f, -3.f, 121.f}, {3.f, 3.f, 121.f}, 0.f,
+     0.f, 0.f, 0.f, 0.f, 0.f, 0, 24.f,
+     4, {{0.f, 0.f}, {0.47f, 0.28f}, {0.54f, 0.276f}, {1.f, 0.f}}, 1, {{0.f, 1.f}}, 1, {{0.f, 0.f}}},
+    {kFlashTexSmokeDust, 0, 0, 1, 0, 1.f, 0.06f, 5.f, 0.8f, 0.5f, 0.75f, 11.f, 13.f, 0.f, 0.f, 1.f, 1.f, 1.115f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 20.f}, {0.f, 0.f, 80.f}, 3.f,
+     6.f, 0.f, 2.f, -0.05f, 0.05f, 0, 0.f,
+     4, {{0.f, 0.f}, {0.34f, 0.067f}, {0.67f, 0.066f}, {1.f, 0.f}}, 2, {{0.f, 1.f}, {1.f, 1.5f}}, 4, {{0.f, 5.f}, {0.47f, 32.3f}, {0.48f, 32.8f}, {1.f, 63.f}}},
+    {kFlashTexSmoke37, 0, 1, 0, 0, 1.f, 0.01f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
+     7.f, 0.f, 0.f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 0.6f}}, 1, {{0.f, 0.7f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+    {kFlashTexSmoke37, 1, 1, 0, 0, 1.f, 0.01f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
+     7.f, -0.03f, -0.03f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 0.5f}}, 1, {{0.f, 0.4f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+};
+void MuzzleFlash::SpawnSmoke(const Settings& s, int where, bool trail, float t0) {
+    const float k = (s.flashGasScale > 0.f ? s.flashGasScale : 1.f) / 2.54f;
+    const int view = ads_ >= 0.5f ? 1 : 0;
+    const bool muzzleShot = where == 0 && !trail;
+    if (muzzleShot) smokeMask_ = 0;
+    for (int li = 0; li < static_cast<int>(sizeof kSmokeLayers / sizeof *kSmokeLayers); ++li) {
+        const SmokeLayer& L = kSmokeLayers[li];
+        if (L.where != where || (L.trailFade != 0) != trail || (L.view != 2 && L.view != view) || !tex_[L.tex]) continue;
+        if (L.rate <= 0.f && Rand(0.f, 1.f) >= L.chance) continue;
+        if (muzzleShot) smokeMask_ |= 1u << li;
+        const int n = L.rate > 0.f ? static_cast<int>(L.rate * L.dur + 0.5f) : 1;
+        for (int i = 0; i < n; ++i) {
+            const float t = L.delay + (L.rate > 0.f ? static_cast<float>(i) / L.rate : 0.f);
+            float fade = 1.f;
+            if (L.trailFade) {
+                if (t >= 1.75f) break;
+                if (t > 0.75f) fade = 1.f - (t - 0.75f);
+            }
+            P* p = Add();
+            if (!p) return;
+            float loc[3], vel[3];
+            for (int c = 0; c < 3; ++c) loc[c] = Rand(L.loc0[c], L.loc1[c]), vel[c] = Rand(L.vel0[c], L.vel1[c]);
+            p->tex = static_cast<unsigned char>(L.tex);
+            p->locked = 0;
+            p->frame = static_cast<unsigned char>(where);
+            p->delay = t0 + t;
+            p->p[0] = (where ? -loc[0] : loc[1]) * k, p->p[1] = (where ? loc[1] : loc[0]) * k, p->p[2] = loc[2] * k;
+            p->v[0] = (where ? -vel[0] : vel[1]) * k, p->v[1] = (where ? vel[1] : vel[0]) * k, p->v[2] = vel[2] * k;
+            p->dragRate = Rand(L.drag0, L.drag1);
+            p->life = Rand(L.life0, L.life1);
+            const float w = Rand(L.w0, L.w1), h = L.h1 > 0.f ? Rand(L.h0, L.h1) : 0.f;
+            p->r0 = 0.5f * (h > 0.f ? h : w) * k;
+            p->aspect = h > 0.f ? w / h : 0.f;
+            p->alpha = Rand(L.a0, L.a1) * fade * s.flashGasAlpha * (where ? s.shellSmoke : 1.f);
+            p->col[0] = p->col[1] = p->col[2] = L.gray;
+            p->rot = Rand(L.rot0, L.rot1) * 6.2831853f;
+            p->rotSpeed = Rand(L.spin0, L.spin1) * 6.2831853f;
+            p->flip = L.flipU && Rand(0.f, 1.f) < 0.5f;
+            p->nA = L.nA, p->nS = L.nS, p->nF = L.nF;
+            memcpy(p->aK, L.aK, sizeof p->aK);
+            memcpy(p->sK, L.sK, sizeof p->sK);
+            memcpy(p->fK, L.fK, sizeof p->fK);
+            if (L.ribbon) {
+                p->aspect = 2.f;
+                p->rot = 1.5707963f;
+                p->rotSpeed = 0.f;
+                p->nF = 0;
+                p->frame0 = static_cast<int>(Rand(0.f, 31.99f));
+                p->fps = L.fps;
+            }
+        }
+    }
+}
 void MuzzleFlash::SpawnGas(const Settings& s) {
     if (!GasLoaded()) return;
+    if (s.flashGasStyle == 2) {
+        SpawnSmoke(s, 0);
+        smokeTrailArmed_ = true;
+        return;
+    }
     const float k = s.flashGasScale > 0.f ? s.flashGasScale : 1.f, ka = s.flashGasAlpha, kd = s.flashGasDistort;
     auto fit = [&](P* p) {
         for (int c = 0; c < 3; ++c) p->p[c] *= k, p->v[c] *= k, p->g[c] *= k;
@@ -3707,7 +3820,9 @@ void MuzzleFlash::SpawnShellFx(const Settings& s) {
         n = 0;
         for (auto it = v.begin(); it + 1 < v.end() && n < 4; it += 2, ++n) k[n][0] = it[0], k[n][1] = it[1];
     };
-    if (s.shellSmoke > 0.f && GasLoaded()) {
+    if (s.flashGasStyle == 2 && s.flashGas && s.shellSmoke > 0.f && GasLoaded()) {
+        SpawnSmoke(s, 1);
+    } else if (s.shellSmoke > 0.f && GasLoaded()) {
         for (int i = 0; i < 2; ++i) {
             P* p = Add();
             if (!p) break;
@@ -3918,6 +4033,10 @@ void MuzzleFlash::BeginFrame(double now, const Settings& s) {
             if (s.flashGas && GasLoaded()) SpawnBarrelSmoke(s, now);
             burst_ = 0;
         }
+        if (smokeTrailArmed_ && tLastShot_ >= 0.0 && now - tLastShot_ > 0.12 && tSpawn_ >= 0.0) {
+            smokeTrailArmed_ = false;
+            if (s.flashGasStyle == 2 && s.flashGas && GasLoaded() && ads_ < 0.5f) SpawnSmoke(s, 0, true, static_cast<float>(now - tSpawn_));
+        }
         return;
     }
     pending_ = false;
@@ -3928,7 +4047,7 @@ void MuzzleFlash::BeginFrame(double now, const Settings& s) {
         tSpawn_ = -1;
         return;
     }
-    P keep[kMax];
+    static P keep[kMax];
     int nk = 0;
     for (int i = 0; i < n_; ++i)
         if (!parts_[i].locked && parts_[i].placed && now - tSpawn_ - parts_[i].delay <= VisibleLife(parts_[i])) {
@@ -4212,7 +4331,8 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
         }
     }
     int counts[kFlashTexCount] = {}, starts[kFlashTexCount] = {};
-    const int order[10] = {kFlashTexDistHaze, kFlashTexDistRing, kFlashTexSmoke, kFlashTexGasWisp, kFlashTexGasPuff,
+    const int order[16] = {kFlashTexDistHaze, kFlashTexDistRing, kFlashTexSmoke, kFlashTexSmokeDust, kFlashTexSmokeTrail, kFlashTexSmoke34,
+                           kFlashTexSmoke38, kFlashTexSmoke37, kFlashTexSmoke39, kFlashTexGasWisp, kFlashTexGasPuff,
                            kFlashTexGasBall, kFlashTexGasJet, kFlashTexFire, kFlashTexVent, kFlashTexGlow};
     const bool canDist = scene_ && psDist_;
     int live = 0;
@@ -4231,7 +4351,7 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
         for (int k = 0; k < 3; ++k)
             out[k] = (point ? f.pos[k] : 0.f) + (f.fwd[k] * l[0] + f.left[k] * l[1] + f.up[k] * l[2]) * unit;
     };
-    for (int oi = 0; oi < 10; ++oi) {
+    for (int oi = 0; oi < 16; ++oi) {
         int tx = order[oi];
         starts[tx] = nv;
         for (int i = 0; i < n_; ++i) {
@@ -4294,6 +4414,7 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
             int fr = p.frame0;
             if (p.fitLife && nf > 1) fr = p.frame0 + static_cast<int>(lf * static_cast<float>(nf - p.frame0));
             else if (p.fps > 0.f && nf > 1) fr = (p.frame0 + static_cast<int>(age * p.fps)) % nf;
+            if (p.nF) fr = static_cast<int>(CurveAt(p.fK, p.nF, lf));
             if (fr >= nf) fr = nf - 1;
             if (fr < 0) fr = 0;
             const float* uv = sh.rect[q][fr];
@@ -4320,7 +4441,8 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
             float cr = std::cos(rot), sr = std::sin(rot);
             const float cs[4][2] = {{-1, 1}, {1, 1}, {-1, -1}, {1, -1}};
             const float tc[4][2] = {{u0, v0}, {u1, v0}, {u0, v1}, {u1, v1}};
-            const bool gas = tx == kFlashTexGasJet || tx == kFlashTexGasPuff || tx == kFlashTexGasBall || tx == kFlashTexGasWisp || dist;
+            const bool gas = tx == kFlashTexGasJet || tx == kFlashTexGasPuff || tx == kFlashTexGasBall || tx == kFlashTexGasWisp || dist ||
+                             tx >= kFlashTexSmoke34;
             const bool over = gas || tx == kFlashTexSmoke;
             const float zd = gas && depth && f.zf > f.zn ? f.zf / (f.zf - f.zn) * (1.f - f.zn / pos[2]) : 0.f;
             float bright = p.bright;
@@ -4396,7 +4518,7 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
         ctx->PSSetShaderResources(0, 1, &flTex_[li]);
         ctx->Draw(static_cast<UINT>(flCount[li]), static_cast<UINT>(flStart[li]));
     }
-    for (int oi = 2; oi < 10; ++oi) {
+    for (int oi = 2; oi < 16; ++oi) {
         int tx = order[oi];
         if (!counts[tx] || !tex_[tx]) continue;
         ctx->PSSetShaderResources(0, 1, &tex_[tx]);

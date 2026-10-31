@@ -358,6 +358,7 @@ public:
     bool GasLoaded() const { return tex_[5] && tex_[6]; }
     int LiveTracers() const { return nTr_; }
     int LiveImpacts() const { return nImp_; }
+    unsigned SmokeLastMask() const { return smokeMask_; }
     void LoadFlame(const wchar_t* dir, const Settings& s);
     int LiveFlame() const { return nFl_; }
     int Live() const { return n_; }
@@ -365,7 +366,7 @@ public:
     void Seed(unsigned seed) { rng_ = seed ? seed : 1u; }
     struct Sheet {
         int frames[4] = {};
-        float rect[4][16][4] = {};
+        float rect[4][64][4] = {};
     };
     struct P {
         unsigned char tex, locked, placed, seq;
@@ -394,6 +395,8 @@ public:
         float aK[4][2], sK[4][2];
         float dragRate;
         unsigned char frame;
+        unsigned char nF;
+        float fK[4][2];
     };
 private:
     bool InitPipeline(ID3D11Device* dev);
@@ -404,6 +407,7 @@ private:
     void SpawnGas(const Settings& s);
     void SpawnBarrelSmoke(const Settings& s, double now);
     void SpawnShellFx(const Settings& s);
+    void SpawnSmoke(const Settings& s, int where, bool trail = false, float t0 = 0.f);
     ID3D11Device* dev_ = nullptr;
     ID3D11VertexShader* vs_ = nullptr;
     ID3D11PixelShader* ps_ = nullptr;
@@ -416,12 +420,14 @@ private:
     ID3D11DepthStencilState* dss_ = nullptr;
     ID3D11DepthStencilState* dssDepth_ = nullptr;
     ID3D11SamplerState* samp_ = nullptr;
-    ID3D11ShaderResourceView* tex_[11] = {};
-    Sheet sheet_[11];
+    ID3D11ShaderResourceView* tex_[17] = {};
+    Sheet sheet_[17];
     ID3D11ShaderResourceView* scene_ = nullptr;
     ID3D11ShaderResourceView* sceneDepth_ = nullptr;
     bool sceneGamma_ = false;
     int burst_ = 0;
+    bool smokeTrailArmed_ = false;
+    unsigned smokeMask_ = 0;
     double tLastShot_ = -1.0;
     struct Tracer {
         float a[3], b[3];
@@ -457,7 +463,7 @@ private:
     float flPh_[4] = {};
     double tFlSim_ = -1.0;
     ID3D11ShaderResourceView* flTex_[4] = {};
-    static constexpr int kMax = 160;
+    static constexpr int kMax = 256;
     P parts_[kMax];
     int n_ = 0;
     bool pending_ = false;
