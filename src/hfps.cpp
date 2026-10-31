@@ -628,6 +628,7 @@ struct Config {
     bool mountNoFade = true;
     bool mountNoSkirmish = true, mountMeleeReach = true;
     bool mountCrouch = true;
+    float mountEyeBack = 0.5f;
     bool quietOrders = true;
     bool shieldGame = true;
     bool shieldStagger = true;
@@ -982,6 +983,8 @@ void LoadConfig() {
     cfg.mountNoSkirmish = GetPrivateProfileIntW(L"move", L"mount_no_skirmish", 1, ini) != 0;
     cfg.mountMeleeReach = GetPrivateProfileIntW(L"move", L"mount_melee_reach", 1, ini) != 0;
     cfg.mountCrouch = GetPrivateProfileIntW(L"move", L"mount_crouch", 1, ini) != 0;
+    cfg.mountEyeBack = IniF(L"move", L"mount_eye_back", cfg.mountEyeBack, ini);
+    if (!(cfg.mountEyeBack >= -3.f && cfg.mountEyeBack <= 3.f)) cfg.mountEyeBack = 0.5f;
     if (cfg.mountEyeAbove < -3.f || cfg.mountEyeAbove > 5.f) cfg.mountEyeAbove = 0.7f;
     if (cfg.mountEye < 0.f || cfg.mountEye > 20.f) cfg.mountEye = 0.f;
     cfg.shieldGame = GetPrivateProfileIntW(L"viewmodel", L"shield_block_game", 1, ini) != 0;
@@ -1307,6 +1310,8 @@ struct State {
     float flyEye = 1.2f;
     float saddle = 1.f;
     bool rideCrouch = false;
+    float rideDir[2] = {0.f, 1.f};
+    bool rideDirInit = false;
     double tMountLog = 0;
     unsigned mountLogs = 0;
     TpRec tpHist[32] = {};
@@ -1863,6 +1868,7 @@ void Enter(uintptr_t mgr) {
     S.shiftPrev = true;
     S.crouch = S.crouchLatch = false;
     S.rideCrouch = false;
+    S.rideDirInit = false;
     S.ctrlPrev = true;
     S.crouchT = 0;
     S.adsT = 0;
@@ -2826,7 +2832,7 @@ bool MeleeEngineQueue(int kind, int cat, const float eye[3], const float fwd[3])
     if (cfg.mountMeleeReach) {
         const uintptr_t mt = S.mount ? S.mount : S.flyMount;
         float mp[3];
-        if (mt && ReadVec(mt + oEntPos, mp)) r.mount = mt, r.oy = mp[1] + 1.7f;
+        if (mt && ReadVec(mt + oEntPos, mp)) r.mount = mt, r.ox = mp[0], r.oz = mp[2], r.oy = mp[1] + 1.7f;
     }
     AcquireSRWLockExclusive(&g_mq.lock);
     bool ok = g_mq.n < 8;
@@ -4886,6 +4892,25 @@ float EyeAbove() {
         return s + (cfg.eyeHeight - s) * k;
     }
     return cfg.eyeHeight * k;
+}
+void RideBack(float dt, float sy, float cy, const float vel[2], float out[2]) {
+    out[0] = out[1] = 0.f;
+    if (!(S.mount || S.flyMount) || cfg.mountEyeBack == 0.f) {
+        S.rideDirInit = false;
+        return;
+    }
+    if (!S.rideDirInit) {
+        S.rideDir[0] = sy, S.rideDir[1] = cy;
+        S.rideDirInit = true;
+    }
+    const float v = std::sqrt(vel[0] * vel[0] + vel[1] * vel[1]);
+    if (v > 1.f && dt > 0.f) {
+        const float a = 1.f - std::exp(-dt / 0.25f);
+        const float x = S.rideDir[0] + (vel[0] / v - S.rideDir[0]) * a, z = S.rideDir[1] + (vel[1] / v - S.rideDir[1]) * a, l = std::sqrt(x * x + z * z);
+        if (l > 1e-3f) S.rideDir[0] = x / l, S.rideDir[1] = z / l;
+    }
+    out[0] = -S.rideDir[0] * cfg.mountEyeBack;
+    out[1] = -S.rideDir[1] * cfg.mountEyeBack;
 }
 bool CrouchKeyMsg(WPARAM w) {
     const unsigned k = cfg.crouchKey;
@@ -8451,8 +8476,10 @@ void Apply(uintptr_t mgr) {
     const float* vRight = kv.right;
     const float* vUp = kv.up;
     vmgame::PublishView(S.yaw, S.pitch, (UnitRide() || (mode == 0 && S.air)) ? 0.f : S.camSpeed);
-    float eye[3] = {camPos[0] + sy * cfg.eyeForward, camPos[1] + EyeAbove(),
-                    camPos[2] + cy * cfg.eyeForward};
+    float rb[2];
+    RideBack(dt, sy, cy, mode == 0 ? S.kinVel : S.entVel, rb);
+    float eye[3] = {camPos[0] + sy * cfg.eyeForward + rb[0], camPos[1] + EyeAbove(),
+                    camPos[2] + cy * cfg.eyeForward + rb[1]};
     float target[3] = {eye[0] + vFwd[0] * 10.f, eye[1] + vFwd[1] * 10.f, eye[2] + vFwd[2] * 10.f};
     float up[3] = {0.f, 1.f, 0.f};
     if (vRoll != 0.f) memcpy(up, vUp, sizeof up);
@@ -9226,6 +9253,8 @@ bool VerifyGame() {
             cfg.mountMeleeReach ? "on" : "off", cfg.mountMeleeReach);
         Log("mount: riders crouch in the saddle %s (mount_crouch=%d; crouch_eye %.2f of the height above the saddle, no slow-down)",
             cfg.mountCrouch ? "on" : "off", cfg.mountCrouch, cfg.crouchEye);
+        Log("mount: rider camera %.2f m back from the mount's centre along its heading (mount_eye_back; melee still measured from the centre)",
+            cfg.mountEyeBack);
         Log("quiet-orders: the hero's move / halt order lines in first person %s (quiet_orders=%d; order voice channel vtable +%llx %s)",
             cfg.quietOrders && QuietVoCheck() ? "muted" : "played", cfg.quietOrders, (unsigned long long)kVtOrderVo904,
             QuietVoCheck() ? "verified" : "NOT matching (other game version) - off");
