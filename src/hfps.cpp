@@ -676,7 +676,8 @@ enum RefuseCode : LONG {
     kRefusePaused = 4,
     kRefuseArtillery = 5,
     kRefuseOther = 6,
-    kRefuseRouting = 7
+    kRefuseRouting = 7,
+    kRefuseShieldSpear = 8
 };
 volatile LONG g_status = kStatusStarting;
 volatile LONG g_refuseSeq = 0, g_refuseCode = 0;
@@ -8539,7 +8540,14 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         }
         if (S.active && vmgame::ShieldKey() && w == KeyAt(vmgame::ShieldKey())) {
-            if (!(l & (1L << 30))) vmgame::ToggleShield();
+            if (!(l & (1L << 30))) {
+                if (vmgame::GunShieldOn()) {
+                    vmgame::ToggleShield();
+                } else {
+                    Log("shield: Q ignored - no shield-spear in slot 4 (the gun shield comes with one)");
+                    Refuse(kRefuseShieldSpear);
+                }
+            }
             return 0;
         }
         if (S.active && vmgame::ShieldHitKey() && w == vmgame::ShieldHitKey()) {

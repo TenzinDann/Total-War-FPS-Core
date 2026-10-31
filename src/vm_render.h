@@ -241,6 +241,7 @@ struct Settings {
     float shieldBlockHip = 0.5f;
     float shieldBlockAds = 1.0f;
     wchar_t shieldModel[520] = L"";
+    wchar_t gunShieldModel[520] = L"";
     float shieldModelMetal = 1.f;
     float meleeStrikeLead = 0.25f;
     int wh3Emissive = 0;
