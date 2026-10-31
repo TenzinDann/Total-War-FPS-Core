@@ -187,6 +187,15 @@ struct Settings {
     float shellLife = 1.0f;
     float shellSmoke = 1.0f;
     float shellSparks = 1.0f;
+    bool dof = false;
+    float dofBlur = 1.25f;
+    float dofFocus = 0.8f;
+    float dofRamp = 0.55f;
+    float dofRate = 30.f;
+    float dofHold = 0.3f;
+    float dofPx = 8.f;
+    float dofAds = 0.f;
+    int dofDebug = 0;
     int shellFollow = 1;
     int shellCaliber = 556;
     float shellOut[2] = {3.0f, 4.0f};
@@ -241,7 +250,6 @@ struct Settings {
     float shieldBlockHip = 0.5f;
     float shieldBlockAds = 1.0f;
     wchar_t shieldModel[520] = L"";
-    wchar_t gunShieldModel[520] = L"";
     float shieldModelMetal = 1.f;
     float meleeStrikeLead = 0.25f;
     int wh3Emissive = 0;
@@ -618,6 +626,34 @@ private:
     ID3D11BlendState* bs_ = nullptr;
     ID3D11RasterizerState* rs_ = nullptr;
     ID3D11DepthStencilState* dss_ = nullptr;
+    bool failed_ = false;
+};
+struct DofParams {
+    float focus, ramp;
+    float radiusPx;
+    float weight;
+    bool debug;
+};
+class NearDof {
+public:
+    bool Apply(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11ShaderResourceView* color, bool colorGamma,
+               ID3D11ShaderResourceView* depth, UINT w, UINT h, bool rtvEncodesSrgb, const DofParams& p);
+    void Release();
+private:
+    bool Init(ID3D11Device* dev);
+    bool EnsureTargets(UINT w, UINT h);
+    ID3D11Device* dev_ = nullptr;
+    ID3D11VertexShader* vs_ = nullptr;
+    ID3D11PixelShader *psDown_ = nullptr, *psBlur_ = nullptr, *psComp_ = nullptr;
+    ID3D11Buffer* cb_ = nullptr;
+    ID3D11SamplerState* samp_ = nullptr;
+    ID3D11BlendState *bsAll_ = nullptr, *bsRgb_ = nullptr;
+    ID3D11RasterizerState* rs_ = nullptr;
+    ID3D11DepthStencilState* dss_ = nullptr;
+    ID3D11Texture2D* tex_[2] = {};
+    ID3D11ShaderResourceView* srv_[2] = {};
+    ID3D11RenderTargetView* rtv_[2] = {};
+    UINT hw_ = 0, hh_ = 0;
     bool failed_ = false;
 };
 struct CastMarkerStyle {

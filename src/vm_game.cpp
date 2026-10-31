@@ -165,10 +165,6 @@ struct IniStamp {
     FILETIME time[3] = {};
 };
 IniStamp g_setStamp[kMaxModels];
-wchar_t g_gunShield[520] = L"";
-volatile LONG g_gunShieldOn = 0;
-LONG g_gunShieldGen = 1;
-LONG g_setShieldGen[kMaxModels] = {};
 void StampFile(const wchar_t* path, ULONGLONG* size, FILETIME* time) {
     WIN32_FILE_ATTRIBUTE_DATA fa;
     if (path[0] && GetFileAttributesExW(path, GetFileExInfoStandard, &fa)) {
@@ -201,38 +197,6 @@ bool SettingsUnchanged(int idx, const vm::Settings& s) {
     }
     return true;
 }
-void LoadShieldIni(int idx, vm::Settings& s, ULONGLONG* size, FILETIME* time) {
-    wchar_t rel[520], dir[MAX_PATH * 2], joined[MAX_PATH * 4], full[MAX_PATH * 2];
-    wcsncpy(rel, s.shieldModel, 519);
-    rel[519] = 0;
-    for (wchar_t* c = rel; *c; ++c)
-        if (*c == L'/') *c = L'\\';
-    bool abs = (rel[0] && rel[1] == L':') || rel[0] == L'\\';
-    ModelDir(idx, dir);
-    if (wchar_t* sl = wcsrchr(dir, L'\\')) *sl = 0;
-    swprintf(joined, MAX_PATH * 4, L"%ls%ls%ls", abs ? L"" : dir, abs ? L"" : L"\\", rel);
-    if (!GetFullPathNameW(joined, MAX_PATH * 2, full, nullptr)) wcsncpy(full, joined, MAX_PATH * 2 - 1), full[MAX_PATH * 2 - 1] = 0;
-    wcsncpy(s.shieldModel, full, 519);
-    s.shieldModel[519] = 0;
-    wchar_t shIni[MAX_PATH * 2];
-    wcsncpy(shIni, full, MAX_PATH * 2 - 16);
-    shIni[MAX_PATH * 2 - 16] = 0;
-    if (wchar_t* sl = wcsrchr(shIni, L'\\')) wcscpy(sl, L"\\shield.ini");
-    StampFile(shIni, size, time);
-    vm::LoadSettings(shIni, s);
-    wcsncpy(s.shieldModel, full, 519);
-}
-void ApplyGunShield(int idx, vm::Settings& s) {
-    if (idx < 0 || idx >= g_modelCount || g_setShieldGen[idx] == g_gunShieldGen) return;
-    g_setShieldGen[idx] = g_gunShieldGen;
-    if (!s.shieldModel[0] || !s.shieldAllow || !g_gunShield[0]) return;
-    wcsncpy(s.shieldModel, g_gunShield, 519);
-    s.shieldModel[519] = 0;
-    LoadShieldIni(idx, s, &g_setStamp[idx].size[1], &g_setStamp[idx].time[1]);
-    wchar_t side[MAX_PATH * 2];
-    SidecarIni(idx, side);
-    vm::LoadSettings(side, s);
-}
 void LoadAllSettings(int idx, vm::Settings& s) {
     IniStamp st;
     StampFile(g_ini, &st.size[0], &st.time[0]);
@@ -249,9 +213,27 @@ void LoadAllSettings(int idx, vm::Settings& s) {
     s = vm::Settings();
     vm::LoadSettings(g_ini, s);
     LoadCatBlocks();
-    if (s.shieldModel[0] && g_gunShield[0]) wcsncpy(s.shieldModel, g_gunShield, 519), s.shieldModel[519] = 0;
-    g_setShieldGen[idx] = g_gunShieldGen;
-    if (s.shieldModel[0]) LoadShieldIni(idx, s, &st.size[1], &st.time[1]);
+    if (s.shieldModel[0]) {
+        wchar_t rel[520], dir[MAX_PATH * 2], joined[MAX_PATH * 4], full[MAX_PATH * 2];
+        wcsncpy(rel, s.shieldModel, 519);
+        rel[519] = 0;
+        for (wchar_t* c = rel; *c; ++c)
+            if (*c == L'/') *c = L'\\';
+        bool abs = (rel[0] && rel[1] == L':') || rel[0] == L'\\';
+        ModelDir(idx, dir);
+        if (wchar_t* sl = wcsrchr(dir, L'\\')) *sl = 0;
+        swprintf(joined, MAX_PATH * 4, L"%ls%ls%ls", abs ? L"" : dir, abs ? L"" : L"\\", rel);
+        if (!GetFullPathNameW(joined, MAX_PATH * 2, full, nullptr)) wcsncpy(full, joined, MAX_PATH * 2 - 1), full[MAX_PATH * 2 - 1] = 0;
+        wcsncpy(s.shieldModel, full, 519);
+        s.shieldModel[519] = 0;
+        wchar_t shIni[MAX_PATH * 2];
+        wcsncpy(shIni, full, MAX_PATH * 2 - 16);
+        shIni[MAX_PATH * 2 - 16] = 0;
+        if (wchar_t* sl = wcsrchr(shIni, L'\\')) wcscpy(sl, L"\\shield.ini");
+        StampFile(shIni, &st.size[1], &st.time[1]);
+        vm::LoadSettings(shIni, s);
+        wcsncpy(s.shieldModel, full, 519);
+    }
     wchar_t side[MAX_PATH * 2];
     SidecarIni(idx, side);
     vm::LoadSettings(side, s);
@@ -1528,7 +1510,7 @@ void ShieldPoseMatrix(const float* p, const float* rd, float* m) {
 }
 void ShieldStep(vm::Look& l, double now, float dt) {
     const vm::Settings& s = Wp().set;
-    bool allowed = g_fp && s.shieldAllow && g_gunShieldOn && Wp().rend.ArmRig() && !s.mirrorX;
+    bool allowed = g_fp && s.shieldAllow && Wp().rend.ArmRig() && !s.mirrorX;
     bool meleeBlock = g_fp && MeleeWeapon() && (melee::g.act == melee::kBlock || melee::Guarding(now));
     g_sh.meleeBlock = meleeBlock ? 1 : 0;
     auto blockNow = [&]() {
@@ -1981,7 +1963,7 @@ void PrefetchWork(int idx, const vm::Settings& s, void** pcm, int* nPcm) {
     }
     int sf = 0;
     size_t sb = 0;
-    if (s.shieldAllow && g_gunShieldOn && s.shieldModel[0]) vm::prefetch::ShieldModel(kShieldPreTag, s.shieldModel, &sf, &sb);
+    if (s.shieldAllow && s.shieldModel[0]) vm::prefetch::ShieldModel(kShieldPreTag, s.shieldModel, &sf, &sb);
     long built = 0, taken = 0;
     vm::prefetch::Counters(&built, &taken);
     g_log("prefetch: [%d] model %s (%d files, %.1f MB) %.1f ms, %d sounds %.1f ms%s (textures built in the background so far %ld, used %ld)", idx,
@@ -2192,7 +2174,6 @@ bool EnsureWeapon(int idx, ID3D11Device* dev) {
             MagApply();
         }
     }
-    ApplyGunShield(idx, w.set);
     if (w.fxDirty && !g_initOnly) {
         LoadWeaponFx(idx, dev);
         PrefetchDiscard(idx);
@@ -2556,21 +2537,6 @@ void RosterStep(ID3D11Device* dev) {
     if (!n) g_roster[n++] = g_modelIdx;
     for (int k = 0; k < kSlots; ++k) InterlockedExchange(&g_slot[k], slot[k]);
     InterlockedExchange(&g_rosterN, n);
-    {
-        int sp = slot[3];
-        for (LONG k = 0; all && sp < 0 && k < n; ++k)
-            if (g_w[g_roster[k]].set.gunShieldModel[0]) sp = g_roster[k];
-        const wchar_t* gs = sp >= 0 ? g_w[sp].set.gunShieldModel : L"";
-        if (wcscmp(gs, g_gunShield)) {
-            wcsncpy(g_gunShield, gs, 519);
-            g_gunShield[519] = 0;
-            ++g_gunShieldGen;
-        }
-        InterlockedExchange(&g_gunShieldOn, g_gunShield[0] ? 1 : 0);
-        g_log("shield: gun shield %ls (slot 4 = model %d %ls)", g_gunShield[0] ? g_gunShield : L"off - no shield-spear in slot 4", sp,
-              sp >= 0 ? g_w[sp].set.weaponId : L"-");
-        for (LONG k = 0; k < n; ++k) ApplyGunShield(g_roster[k], g_w[g_roster[k]].set);
-    }
     g_log("weapon: roster %ld from %s (armory file %s, mode '%s', owned '%s', loadout '%s')", n, from, mode[0] || owned[0] ? "found" : "missing",
           mode, owned, loadout);
     bool curOk = false;
@@ -2616,10 +2582,6 @@ void UnloadStep() {
 void ShieldPreload(ID3D11Device* dev) {
     if (g_shieldPreDone) return;
     g_shieldPreDone = true;
-    if (!g_gunShieldOn) {
-        vm::prefetch::Drop(kShieldPreTag);
-        return;
-    }
     const vm::Settings* s = Wp().set.shieldAllow ? &Wp().set : nullptr;
     for (LONG k = 0; !s && k < g_rosterN; ++k)
         if (g_w[g_roster[k]].set.shieldAllow) s = &g_w[g_roster[k]].set;
@@ -2884,6 +2846,31 @@ void WarmStep(IDXGISwapChain* sc) {
     }
     dev->Release();
 }
+vm::NearDof g_dof;
+float g_dofW = 0.f;
+double g_dofT = -1.0;
+int g_dofDebugForce = -1;
+void DofStep(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11Texture2D* bb, UINT w, UINT h, bool hw, bool gunDrawn) {
+    const vm::Settings& s = Wp().set;
+    const double now = Now();
+    const float dt = g_dofT < 0.0 ? 0.f : static_cast<float>(std::fmin(now - g_dofT, 0.25));
+    g_dofT = now;
+    if (!s.dof) {
+        g_dofW = 0.f;
+        return;
+    }
+    float target = 0.f;
+    if (g_fp && Wp().lastShotAt > 0.0 && now - Wp().lastShotAt < s.dofHold) target = 1.f - g_mo.adsW * (1.f - s.dofAds);
+    g_dofW += (target - g_dofW) * (1.f - std::exp(-s.dofRate * dt));
+    const bool debug = (g_dofDebugForce >= 0 ? g_dofDebugForce : s.dofDebug) != 0;
+    if (!gunDrawn || g_dofW < 0.004f) return;
+    bool dg = false;
+    ID3D11ShaderResourceView* col = Wp().rend.CopyForDistort(ctx, bb, w, h, &dg);
+    ID3D11ShaderResourceView* dep = Wp().rend.DistortDepth();
+    if (!col || !dep) return;
+    const vm::DofParams p = {s.dofFocus, s.dofRamp, s.dofBlur * s.dofPx * static_cast<float>(h) / 1080.f, g_dofW, debug};
+    g_dof.Apply(ctx, rtv, col, dg, dep, w, h, hw, p);
+}
 void CastMarkerDraw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool hw) {
     if (!g_cmStyle.enabled) return;
     bool on;
@@ -3021,7 +3008,8 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                         g_fprof.Mark("hud-save");
                         if (g_fp) CastMarkerDraw(ctx, rtv, td.Width, td.Height, hw);
                         g_fprof.Mark("cast-marker");
-                        if (Wp().rend.Draw(ctx, rtv, bb, td.Width, td.Height, hw, Wp().set, look)) ++g_st.draws;
+                        const bool gunDrawn = Wp().rend.Draw(ctx, rtv, bb, td.Width, td.Height, hw, Wp().set, look);
+                        if (gunDrawn) ++g_st.draws;
                         g_fprof.Mark("gun");
                         gunProf = vm::g_drawProf;
                         mv = Wp().rend.Muzzle(&mx, &my, &ma);
@@ -3062,6 +3050,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                             }
                         }
                         g_fprof.Mark("shells");
+                        DofStep(ctx, rtv, bb, td.Width, td.Height, hw, gunDrawn);
                         {
                             static const bool preGun = getenv("HFPS_DISTORT_PRE_GUN") != nullptr;
                             bool dg = false;
@@ -3776,7 +3765,6 @@ float ShieldBlockFraction() { return static_cast<float>(g_sh.blockMilli) * 0.001
 void DebugShieldHit() {
     if (Enabled() && g_fp) ShieldHit();
 }
-bool GunShieldOn() { return g_gunShieldOn != 0; }
 bool ShieldWanted() { return g_sh.want != 0 && g_sh.allowed != 0; }
 void ShieldGame(float* weight, float* moveScale, float* zoomKeep) {
     float w = g_sh.wUs * 1e-6f;

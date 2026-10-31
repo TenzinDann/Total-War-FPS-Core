@@ -110,7 +110,6 @@ bool Muzzle(float* ndcX, float* ndcY, float* aspect);
 UINT ShieldKey();
 UINT ShieldHitKey();
 void ToggleShield();
-bool GunShieldOn();
 void DebugShieldHit();
 void ShieldHit();
 float ShieldBlockFraction();
