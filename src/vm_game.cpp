@@ -318,7 +318,6 @@ struct AnimSound {
     float t, vol;
     vm::GunSound snd;
     bool shell = false;
-    bool ammo = false;
 };
 constexpr int kMaxAnimSounds = 48;
 struct Weapon {
@@ -375,34 +374,6 @@ void RefreshFireRate() {
 }
 FILETIME g_armoryTime = {};
 volatile LONG g_reqRoster = 0;
-struct CharCfg {
-    char units[256];
-    wchar_t arms[MAX_PATH * 6];
-};
-constexpr int kMaxChars = 8;
-CharCfg g_chars[kMaxChars];
-int g_charN = 0;
-char g_charUnits[2048] = "";
-volatile LONG g_armsWant = -1;
-int g_armsApplied = -1;
-size_t g_armsLogShown = 0;
-bool CsvHas(const char* csv, const char* key) {
-    const size_t kl = strlen(key);
-    for (const char* p = csv; *p;) {
-        const char* e = strchr(p, ',');
-        const size_t l = e ? static_cast<size_t>(e - p) : strlen(p);
-        if (l == kl && !strncmp(p, key, kl)) return true;
-        if (!e) break;
-        p = e + 1;
-    }
-    return false;
-}
-int CharFor(const char* unitKey) {
-    if (!unitKey || !unitKey[0]) return -1;
-    for (int i = 0; i < g_charN; ++i)
-        if (CsvHas(g_chars[i].units, unitKey)) return i;
-    return -1;
-}
 volatile LONG g_reqWeapon = 0;
 volatile LONG g_wantIdx = 0;
 volatile LONG g_switching = 0;
@@ -992,10 +963,6 @@ struct Anim {
     int cur = -1, prev = -1, idle = -1, fireNext = 0, cycleNext = 0, stance = 0;
     int reloadKind = 0;
     double reloadAt = 0;
-    int shellSeq = -1;
-    LONG shellTarget = 0;
-    int shellLoops = 0;
-    bool shellEmpty = false;
     int spinSeen = 0;
     int evClip = -1;
     double evStart = 0, evLast = -1;
@@ -1036,23 +1003,6 @@ void Play(int clip, double now, double fade, double rate = 1.0) {
     g_an.fadeStart = now;
     g_an.fadeLen = g_an.prev >= 0 ? fade : 0;
     g_an.curveClip = -1;
-}
-bool ShellReload() {
-    for (int i = 0; i < 4; ++i)
-        if (!Wp().set.reloadShellClips[i][0] || Wp().rend.FindClip(Wp().set.reloadShellClips[i]) < 0) return false;
-    return true;
-}
-void ShellAmmoEvent() {
-    if (g_mag.reload == 0 || g_mag.size <= 0) return;
-    LONG res = g_mag.reserve, have = g_mag.ammo < 0 ? 0 : g_mag.ammo;
-    if (res != 0 && have < g_mag.size) {
-        InterlockedExchange(&g_mag.ammo, ++have);
-        if (res > 0) InterlockedExchange(&g_mag.reserve, res - 1);
-    }
-    const bool done = have >= g_mag.size || have >= g_an.shellTarget || g_mag.reserve == 0;
-    if (done) InterlockedExchange(&g_mag.reload, 0);
-    static int logs = 0;
-    if (logs++ < 4) g_log("reload: shell in -> %ld / %ld (reserve %ld)%s", have, g_mag.size, g_mag.reserve, done ? ", done" : "");
 }
 void MarkCurveClip(int clip, bool down) {
     if (CurveAdsOn() && clip >= 0 && g_an.cur == clip) g_an.curveClip = clip, g_an.curveDown = down;
@@ -1237,8 +1187,7 @@ void AnimStep(vm::Look& l, double now) {
         LONG raw = g_fp ? g_stance : 0;
         int st = (raw & 4) ? 3 : (raw & 2) ? 2 : (raw & 1) ? 1 : 0;
         bool reloadAnim = g_mag.reload != 0 && g_an.cur >= 0 &&
-                          (g_an.cur == Wp().rend.FindClip("reload") || g_an.cur == Wp().rend.FindClip("reload_empty") ||
-                           g_an.cur == g_an.shellSeq);
+                          (g_an.cur == Wp().rend.FindClip("reload") || g_an.cur == Wp().rend.FindClip("reload_empty"));
         if (st != g_an.stance && Wp().set.fireMode && g_spin.state != 0 && st < 2 && g_an.stance < 2) {
             g_an.stance = st;
             if (g_spin.state == 2) {
@@ -1364,24 +1313,8 @@ void AnimStep(vm::Look& l, double now) {
     }
     if (g_an.reloadKind && now >= g_an.reloadAt) {
         if (g_mag.reload == g_an.reloadKind) {
-            int c = -1;
-            if (ShellReload()) {
-                const auto& rs = Wp().set.reloadShellClips;
-                const auto& r2 = Wp().set.reloadShellClips2;
-                c = Wp().rend.FindClip(rs[g_an.reloadKind == 2 ? 1 : 0]);
-                LONG size = g_mag.size, have = g_mag.ammo < 0 ? 0 : g_mag.ammo, res = g_mag.reserve;
-                g_an.shellTarget = res < 0 || have + res >= size ? size : have + res;
-                if (g_an.reloadKind == 1 && g_an.shellTarget - have >= 2 && r2[0][0] && Wp().rend.FindClip(r2[0]) >= 0)
-                    c = Wp().rend.FindClip(r2[0]);
-                g_an.shellSeq = c;
-                g_an.shellLoops = 0;
-                g_an.shellEmpty = g_an.reloadKind == 2;
-                static int logs = 0;
-                if (logs++ < 6) g_log("reload: shell by shell %ld -> %ld (clip %d)", have, g_an.shellTarget, c);
-            } else {
-                c = g_an.reloadKind == 2 ? Wp().rend.FindClip("reload_empty") : -1;
-                if (c < 0) c = Wp().rend.FindClip("reload");
-            }
+            int c = g_an.reloadKind == 2 ? Wp().rend.FindClip("reload_empty") : -1;
+            if (c < 0) c = Wp().rend.FindClip("reload");
             Play(c, now, 0.1);
             InterlockedExchange64(&g_mag.t0Us, static_cast<LONG64>(now * 1e6));
         }
@@ -1406,54 +1339,20 @@ void AnimStep(vm::Look& l, double now) {
         Weapon& w = Wp();
         for (int i = 0; i < w.nAnim; ++i) {
             AnimSound& a = w.anim[i];
-            if (a.clip == g_an.cur && a.t > g_an.evLast && a.t <= t && (a.ammo || a.t > t - 0.2)) {
-                if (a.ammo) {
-                    ShellAmmoEvent();
-                } else if (a.shell) {
+            if (a.clip == g_an.cur && a.t > g_an.evLast && a.t <= t && a.t > t - 0.2) {
+                if (a.shell) {
                     if (w.set.shellEject) w.shells.Trigger(g_mo.adsW);
                 } else {
                     a.snd.Play(a.vol * w.set.animSoundVolume);
                 }
                 static int logs = 0;
-                if (!a.ammo && logs < 24) {
+                if (logs < 80) {
                     ++logs;
                     g_log("anim %s: clip %d at %.2f s (event %.2f s)", a.shell ? "shell" : "sound", a.clip, t, a.t);
                 }
             }
         }
         g_an.evLast = t;
-    }
-    if (g_an.shellSeq >= 0) {
-        if (g_an.cur != g_an.shellSeq) {
-            g_an.shellSeq = -1;
-            if (g_mag.reload != 0 && g_an.reloadKind == 0) InterlockedExchange(&g_mag.reload, 0);
-        } else {
-            const double t = ClipT(now), dur = Wp().rend.ClipDuration(g_an.cur);
-            if (t >= dur) {
-                const auto& rs = Wp().set.reloadShellClips;
-                const auto& r2 = Wp().set.reloadShellClips2;
-                auto find = [](const char* n) { return n[0] ? Wp().rend.FindClip(n) : -1; };
-                int loop = -1;
-                if (g_an.shellTarget - g_mag.ammo >= 2) {
-                    if (g_an.shellEmpty) loop = find(r2[2]);
-                    if (loop < 0) loop = find(r2[1]);
-                }
-                if (loop < 0 && g_an.shellEmpty) loop = find(rs[4]);
-                if (loop < 0) loop = find(rs[2]);
-                int end = g_an.shellEmpty ? find(rs[5]) : -1;
-                if (end < 0) end = find(rs[3]);
-                const double over = (t - dur) / (g_an.curRate > 0 ? g_an.curRate : 1.0);
-                if (g_mag.reload != 0 && g_mag.ammo < g_an.shellTarget && g_an.shellLoops < g_mag.size + 2 && loop >= 0) {
-                    Play(loop, now - over, 0.0);
-                    g_an.shellSeq = loop;
-                    ++g_an.shellLoops;
-                } else {
-                    if (g_mag.reload != 0) InterlockedExchange(&g_mag.reload, 0);
-                    Play(end, now - over, 0.0);
-                    g_an.shellSeq = -1;
-                }
-            }
-        }
     }
     if (g_an.cur >= 0 && !Wp().rend.ClipLoops(g_an.cur) && g_an.cur != StanceIdle() &&
         ClipT(now) >= Wp().rend.ClipDuration(g_an.cur))
@@ -1750,7 +1649,6 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
                       {&w.stepSprint, w.set.stepClothSprint, "step cloth sprint"}, {&w.stepRattle, w.set.stepRattle, "step rattle"},
                       {&w.spinUp, w.set.spinUpSound, "spin up"}, {&w.spinLoop, w.set.spinLoopSound, "spin loop"},
                       {&w.spinDown, w.set.spinDownSound, "spin down"}};
-        w.spinLoop.SetLoopBegin(w.set.spinLoopStart);
         for (Step& st : steps) {
             st.snd->Release();
             if (!st.list[0]) continue;
@@ -1789,8 +1687,7 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
                     a.t = t;
                     a.vol = v;
                     a.shell = !strcmp(file, "!shell");
-                    a.ammo = !strcmp(file, "!ammo");
-                    if (a.shell || a.ammo) {
+                    if (a.shell) {
                         if (a.clip >= 0)
                             ++w.nAnim;
                         else if (bad++ < 4)
@@ -1815,7 +1712,7 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
         }
     }
     w.flash.Release();
-    if (w.set.flashFx[0] || w.set.effectFx[0] || (w.set.flashGas && w.set.flashGasFx[0]) || w.set.flameFx[0]) {
+    if (w.set.flashFx[0] || w.set.effectFx[0] || (w.set.flashGas && w.set.flashGasFx[0])) {
         err[0] = 0;
         wchar_t eff[MAX_PATH * 2] = L"", gas[MAX_PATH * 2] = L"";
         path[0] = 0;
@@ -1829,13 +1726,6 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
                   w.set.effectFx, w.flash.GasLoaded(), w.set.flashGasFx, w.set.flashGasScale, w.set.flashGasAlpha);
         else
             g_log("viewmodel: [%d] muzzle fx failed: %s", idx, err);
-        if (w.flash.Loaded() && w.set.flameFx[0]) {
-            wchar_t fl[MAX_PATH * 2];
-            swprintf(fl, MAX_PATH * 2, L"%ls\\%ls", dir, w.set.flameFx);
-            w.flash.LoadFlame(fl, w.set);
-            g_log("viewmodel: [%d] flame fx from %ls: layers %ls / %ls / %ls / %ls", idx, w.set.flameFx, w.set.flame[0].tex, w.set.flame[1].tex,
-                  w.set.flame[2].tex, w.set.flame[3].tex);
-        }
     }
     w.shells.Release();
     if (w.set.shellEject) {
@@ -2112,18 +2002,6 @@ bool PrefetchReady(int i) {
 bool g_initOnly = false;
 bool g_shieldPreDone = false;
 bool g_rosterNoLoad = false;
-void ArmsLogFlush() {
-    const char* s = vm::ArmsOverrideLog();
-    size_t n = strlen(s);
-    if (n < g_armsLogShown) g_armsLogShown = 0;
-    for (const char* p = s + g_armsLogShown; *p;) {
-        const char* e = strchr(p, '\n');
-        size_t l = e ? static_cast<size_t>(e - p) : strlen(p);
-        g_log("arms: %.*s", static_cast<int>(l), p);
-        p += l + (e ? 1 : 0);
-    }
-    g_armsLogShown = n;
-}
 bool EnsureWeapon(int idx, ID3D11Device* dev) {
     if (idx < 0 || idx >= g_modelCount) return false;
     Weapon& w = g_w[idx];
@@ -2139,7 +2017,6 @@ bool EnsureWeapon(int idx, ID3D11Device* dev) {
         }
         g_log("viewmodel: [%d] ready on device %p: %u triangles, %u bones, %u clips, model %ls (init %.1f ms)", idx, (void*)dev,
               w.rend.Triangles(), w.rend.Bones(), w.rend.Clips(), g_models[idx], (Now() - t0) * 1000.0);
-        ArmsLogFlush();
         w.fxDirty = true;
         if (idx == g_modelIdx) {
             AnimReset(Now());
@@ -2337,20 +2214,6 @@ void LoadWeaponParams(const wchar_t* armoryPath, const char* flag) {
     if (want || was)
         g_log("weapon-params: custom weapon stats %s (wparams='%s', file %s, %d entries: %d weapons, %d melee classes%s)%s", on ? "ON" : "off", flag,
               read ? "read" : "missing", nEnt, nW, nC, g_mpBattle ? "; multiplayer / not verified - ignored this battle" : "", line);
-}
-void ArmsSync() {
-    const int want = static_cast<int>(g_armsWant);
-    if (want == g_armsApplied) return;
-    g_armsApplied = want;
-    vm::SetArmsOverride(want >= 0 ? g_chars[want].arms : L"");
-    g_armsLogShown = 0;
-    int n = 0;
-    for (int i = 0; i < g_modelCount; ++i)
-        if (g_w[i].rend.Ready()) UnloadWeapon(i), ++n;
-    g_log("arms: %s -> %d arms kits loaded, %d loaded weapons reload with them", want >= 0 ? g_chars[want].units : "weapon's own arms",
-          vm::ArmsOverrideCount(), n);
-    ArmsLogFlush();
-    InterlockedExchange(&g_reqRoster, 1);
 }
 void RosterStep(ID3D11Device* dev) {
     if (!InterlockedExchange(&g_reqRoster, 0)) return;
@@ -2785,7 +2648,6 @@ void WarmStep(IDXGISwapChain* sc) {
     FrameProf wp;
     wp.Start(Now());
     CheckDevice(dev);
-    ArmsSync();
     wp.Mark("device");
     bool ok = EnsureWeapon(g_modelIdx, dev);
     wp.Mark("current");
@@ -2877,7 +2739,6 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
     PrefetchDevice(dev);
     if (part != kPartCross) {
         CheckDevice(dev);
-        ArmsSync();
         g_fprof.Mark("device");
         if (!EnsureWeapon(g_modelIdx, dev)) {
             g_failed = true;
@@ -3117,12 +2978,6 @@ bool VerifyStatic(uintptr_t exeBase, LogFn log, const RenderAddrs& addrs) {
         g_viewRouteOk ? "ok" : "does not match this exe - with anti-aliasing off the gun stays at Present (drawn over the UI)");
     return ok;
 }
-void SetHeroKey(const char* unitKey) {
-    const int ci = CharFor(unitKey);
-    const LONG was = InterlockedExchange(&g_armsWant, ci);
-    if (was != ci) g_log("arms: hero unit key '%s' -> %s", unitKey ? unitKey : "", ci >= 0 ? g_chars[ci].units : "weapon's own arms");
-}
-const char* UnitKeys() { return g_charUnits; }
 void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
     g_base = exeBase;
     g_log = log;
@@ -3150,37 +3005,6 @@ void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
         if (*tok) swprintf(g_models[g_modelCount++], MAX_PATH * 2, L"%ls\\%ls", dllDir, tok);
         if (!end) break;
         tok = end + 1;
-    }
-    {
-        g_charN = 0;
-        g_charUnits[0] = 0;
-        for (int ci = 1; ci <= kMaxChars; ++ci) {
-            wchar_t sec[16], cu[256], ca[MAX_PATH * 2];
-            if (ci == 1)
-                wcscpy(sec, L"character");
-            else
-                swprintf(sec, 16, L"character%d", ci);
-            GetPrivateProfileStringW(sec, L"units", L"", cu, 256, g_ini);
-            GetPrivateProfileStringW(sec, L"arms", L"", ca, MAX_PATH * 2, g_ini);
-            if (!cu[0] || !ca[0]) continue;
-            CharCfg& c = g_chars[g_charN++];
-            char u8[256];
-            WideCharToMultiByte(CP_UTF8, 0, cu, -1, u8, sizeof u8, nullptr, nullptr);
-            size_t n = 0;
-            for (const char* p = u8; *p && n + 1 < sizeof c.units; ++p)
-                if (*p != ' ' && *p != '\t') c.units[n++] = *p;
-            c.units[n] = 0;
-            c.arms[0] = 0;
-            wchar_t* actx = nullptr;
-            for (wchar_t* tok = wcstok(ca, L";", &actx); tok; tok = wcstok(nullptr, L";", &actx)) {
-                while (*tok == L' ') ++tok;
-                const size_t m = wcslen(c.arms);
-                if (*tok) swprintf(c.arms + m, MAX_PATH * 6 - m, L"%ls%ls\\%ls", m ? L";" : L"", dllDir, tok);
-            }
-            const size_t ul = strlen(g_charUnits);
-            snprintf(g_charUnits + ul, sizeof g_charUnits - ul, "%s%s", ul ? "," : "", c.units);
-            log("viewmodel: character %d [%ls]: units '%s', arms %ls", g_charN, sec, c.units, c.arms);
-        }
     }
     if (!g_modelCount) swprintf(g_models[g_modelCount++], MAX_PATH * 2, L"%ls\\tenzin_fps_vm\\m7\\m7.hvm", dllDir);
     for (int i = 0; i < g_modelCount; ++i) LoadAllSettings(i, g_w[i].set);
@@ -3425,15 +3249,6 @@ void MagApply() {
     int cTac = Wp().rend.FindClip("reload"), cEmpty = Wp().rend.FindClip("reload_empty");
     InterlockedExchange(&g_mag.refillUs[1], refill(Wp().set.reloadRefill, cTac));
     InterlockedExchange(&g_mag.refillUs[2], refill(Wp().set.reloadEmptyRefill, cEmpty >= 0 ? cEmpty : cTac));
-    if (ShellReload()) {
-        const auto& rs = Wp().set.reloadShellClips;
-        const float d = Wp().rend.ClipDuration(Wp().rend.FindClip(rs[0])) + Wp().rend.ClipDuration(Wp().rend.FindClip(rs[1])) +
-                        static_cast<float>(size > 0 ? size : 1) * Wp().rend.ClipDuration(Wp().rend.FindClip(rs[2])) +
-                        Wp().rend.ClipDuration(Wp().rend.FindClip(rs[3])) + 3.f;
-        InterlockedExchange(&g_mag.refillUs[1], static_cast<LONG>(d * 1e6f));
-        InterlockedExchange(&g_mag.refillUs[2], static_cast<LONG>(d * 1e6f));
-        g_log("viewmodel: shell-by-shell reload (%s / %s / %s / %s), fallback refill %.1f s", rs[0], rs[1], rs[2], rs[3], d);
-    }
     bool same = g_mag.loadedModel == g_modelIdx;
     g_mag.loadedModel = g_modelIdx;
     LONG keep = g_modelIdx < kMaxModels ? g_mag.ammoByModel[g_modelIdx] : -1;
@@ -3737,7 +3552,6 @@ void MeleeHitFeedback(int hits) {
 }
 const char* WeaponProjectile(int idx) { return idx >= 0 && idx < g_modelCount ? g_w[idx].set.projectile : ""; }
 float WeaponFireRange(int idx) { return idx >= 0 && idx < g_modelCount ? g_w[idx].set.fireRange : 0.f; }
-const char* WeaponProjectileAds(int idx) { return idx >= 0 && idx < g_modelCount ? g_w[idx].set.projectileAds : ""; }
 bool ScopeWheel(int delta) {
     const int i = g_modelIdx;
     const int k = ScopeLevelIdx(i);
@@ -3794,77 +3608,6 @@ void SpreadDir(const float fwd[3], const float right[3], const float up[3], floa
     }
     n = 1.f / std::sqrt(n);
     for (int i = 0; i < 3; ++i) out[i] *= n;
-}
-int ShotPattern(float adsW, const float fwd[3], const float right[3], const float up[3], float (*out)[3], int maxOut, float* range, bool* focus) {
-    const int idx = CurrentWeapon();
-    const bool foc = adsW >= 0.5f;
-    int n = 1;
-    float fan = 0.f, rg = 0.f, cone = 0.f;
-    if (idx >= 0 && idx < g_modelCount) {
-        const auto& s = g_w[idx].set;
-        n = foc ? s.pelletsAds : s.pellets;
-        const float aw = std::fmin(std::fmax(adsW, 0.f), 1.f);
-        cone = (s.pelletSpread + (s.pelletSpreadAds - s.pelletSpread) * aw) * 0.01745329f;
-        fan = (foc ? s.pelletFanAds : s.pelletFan) * 0.01745329f;
-        rg = foc && s.fireRangeAds > 0.f ? s.fireRangeAds : s.fireRange;
-    }
-    if (n > maxOut) n = maxOut;
-    if (n < 1) n = 1;
-    for (int k = 0; k < n; ++k) {
-        g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
-        const float u = static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
-        const float yw = fan > 0.f ? -fan + 2.f * fan * (static_cast<float>(k) + u) / static_cast<float>(n) : 0.f;
-        const float c = std::cos(yw), sn = std::sin(yw);
-        float d[3], r[3];
-        for (int i = 0; i < 3; ++i) d[i] = fwd[i] * c + right[i] * sn, r[i] = right[i] * c - fwd[i] * sn;
-        SpreadDir(d, r, up, out[k]);
-        if (cone > 0.f) {
-            g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
-            const float u1 = static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
-            g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
-            const float th = 6.2831853f * static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
-            const float rr = std::tan(cone * std::sqrt(u1)), a = rr * std::cos(th), b = rr * std::sin(th);
-            float o[3], len = 0.f;
-            for (int i = 0; i < 3; ++i) o[i] = out[k][i] + r[i] * a + up[i] * b, len += o[i] * o[i];
-            len = 1.f / std::sqrt(len);
-            for (int i = 0; i < 3; ++i) out[k][i] = o[i] * len;
-        }
-    }
-    if (range) *range = rg;
-    if (focus) *focus = foc;
-    return n;
-}
-bool WeaponBurst(int idx, float* minDist, float* scatterAds, int* pierceAds, float* reachAds) {
-    if (idx < 0 || idx >= g_modelCount || !g_w[idx].set.burst) return false;
-    if (minDist) *minDist = g_w[idx].set.burstMin;
-    if (scatterAds) *scatterAds = g_w[idx].set.burstScatterAds;
-    if (pierceAds) *pierceAds = g_w[idx].set.burstPierceAds;
-    if (reachAds) *reachAds = g_w[idx].set.burstReachAds;
-    return true;
-}
-bool WeaponBurstCover(int idx, float* tick, int* cap, float* fanDeg, int* clip, float* lead) {
-    if (idx < 0 || idx >= g_modelCount || !g_w[idx].set.burst || !(g_w[idx].set.burstCover > 0.f)) return false;
-    *tick = g_w[idx].set.burstCover;
-    *cap = g_w[idx].set.burstCoverMax;
-    *fanDeg = g_w[idx].set.pelletFan;
-    if (clip) *clip = g_w[idx].set.burstCoverClip;
-    if (lead) *lead = g_w[idx].set.burstCoverLead;
-    return true;
-}
-float BurstDistance(float minDist, float range) {
-    if (!(range > minDist)) return range;
-    g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
-    const float u = static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
-    return std::sqrt(minDist * minDist + u * (range * range - minDist * minDist));
-}
-void BurstScatter(float radius, float* dx, float* dz) {
-    g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
-    const float u = static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
-    g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
-    const float th = 6.2831853f * static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
-    const float r = radius > 0.f ? radius * std::sqrt(u) : 0.f;
-    *dx = r * std::cos(th);
-    *dz = r * std::sin(th);
 }
 bool CurveAdsState(float* frac, float* adsFovAlt) {
     LONG f = g_curveFracMicro;
