@@ -2953,6 +2953,13 @@ bool FlameDirectPush(uintptr_t e, uint32_t dmg, double now, float react, float f
     if (!ok) InterlockedIncrement(&g_fq.overflow);
     return ok;
 }
+uint32_t HitLayers(uintptr_t hero) {
+    uint32_t v = 0, c = 0;
+    Rd(hero + 0x6c, v);
+    const uintptr_t m = Ptr(hero + 0x2e0);
+    if (m && Rd(m + 0x6c, c)) v |= c & 3u;
+    return v;
+}
 void FlameDirectStep(uintptr_t world, uintptr_t hero) {
     if (!g_fq.n) return;
     static FlameReq batch[kFlameQ];
@@ -2966,7 +2973,7 @@ void FlameDirectStep(uintptr_t world, uintptr_t hero) {
     const uintptr_t outer = Ptr(hero + 0x58);
     uint32_t heroHp = 0, heroL6c = 0;
     Rd(hero + 0xb1c, heroHp);
-    Rd(hero + 0x6c, heroL6c);
+    heroL6c = HitLayers(hero);
     if (!outer || Ptr(outer + 0x440) != world || !heroHp) {
         InterlockedExchangeAdd(&g_fq.skipped, n);
         return;
@@ -3228,7 +3235,7 @@ void MeleeEngineRun(uintptr_t world, uintptr_t hero, const MeleeReq* reqs, int n
     }
     uint32_t heroHp = 0, heroL6c = 0;
     Rd(hero + 0xb1c, heroHp);
-    Rd(hero + 0x6c, heroL6c);
+    heroL6c = HitLayers(hero);
     uintptr_t heroSide = Ptr(hero + 0x80), heroUnit = Ptr(hero + 0x2e8);
     if (!heroHp) return;
     using FnCanHit = char (*)(uintptr_t e);
