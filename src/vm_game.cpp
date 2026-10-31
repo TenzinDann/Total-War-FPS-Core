@@ -2822,6 +2822,32 @@ void GameThreadAdd(double ms) {
     ReleaseSRWLockExclusive(&g_gtLock);
 }
 int g_profLogs = 0, g_warmProfLogs = 0;
+vm::NearDof g_dof;
+float g_dofW = 0.f;
+double g_dofT = -1.0;
+int g_dofDebugForce = -1;
+bool g_dofOff = false;
+void DofStep(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11Texture2D* bb, UINT w, UINT h, bool hw, bool gunDrawn) {
+    const vm::Settings& s = Wp().set;
+    const double now = Now();
+    const float dt = g_dofT < 0.0 ? 0.f : static_cast<float>(std::fmin(now - g_dofT, 0.25));
+    g_dofT = now;
+    if (!s.dof) {
+        g_dofW = 0.f;
+        return;
+    }
+    float target = 0.f;
+    if (!g_dofOff && g_fp && Wp().lastShotAt > 0.0 && now - Wp().lastShotAt < s.dofHold) target = 1.f - g_mo.adsW * (1.f - s.dofAds);
+    g_dofW += (target - g_dofW) * (1.f - std::exp(-s.dofRate * dt));
+    const bool debug = (g_dofDebugForce >= 0 ? g_dofDebugForce : s.dofDebug) != 0;
+    if (!gunDrawn || g_dofW < 0.004f) return;
+    bool dg = false;
+    ID3D11ShaderResourceView* col = Wp().rend.CopyForDistort(ctx, bb, w, h, &dg);
+    ID3D11ShaderResourceView* dep = Wp().rend.DistortDepth();
+    if (!col || !dep) return;
+    const vm::DofParams p = {s.dofFocus, s.dofRamp, s.dofBlur * s.dofPx * static_cast<float>(h) / 1080.f, g_dofW, debug};
+    g_dof.Apply(ctx, rtv, col, dg, dep, w, h, hw, p);
+}
 void LayerPrewarm(IDXGISwapChain* sc, ID3D11Device* dev) {
     const double t0 = Now();
     ID3D11Texture2D* bb = nullptr;
@@ -2833,9 +2859,10 @@ void LayerPrewarm(IDXGISwapChain* sc, ID3D11Device* dev) {
     const bool gpu = g_gpuTimer && g_gpu.Ensure(dev);
     const bool cross = g_cross.Prewarm(dev), cm = g_cmR.Prewarm(dev);
     const bool screen = td.Width && Wp().rend.Ready() && Wp().rend.PrewarmScreen(td);
-    g_log("warm: first-person GPU objects made before first person in %.1f ms: GPU timer %s, crosshair %s, cast marker %s, screen buffers %ux%u %s",
+    const bool dof = td.Width && g_dof.Prewarm(dev, td.Width, td.Height);
+    g_log("warm: first-person GPU objects made before first person in %.1f ms: GPU timer %s, crosshair %s, cast marker %s, screen buffers %ux%u %s, alt dof %s",
           (Now() - t0) * 1000.0, gpu ? "ok" : g_gpuTimer ? "failed" : "off", cross ? "ok" : "failed", cm ? "ok" : "failed", td.Width, td.Height,
-          screen ? "ok" : "not made");
+          screen ? "ok" : "not made", dof ? "ok" : "not made");
 }
 void WarmStep(IDXGISwapChain* sc) {
     ID3D11Device* dev = nullptr;
@@ -3021,7 +3048,8 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                         g_fprof.Mark("hud-save");
                         if (g_fp) CastMarkerDraw(ctx, rtv, td.Width, td.Height, hw);
                         g_fprof.Mark("cast-marker");
-                        if (Wp().rend.Draw(ctx, rtv, bb, td.Width, td.Height, hw, Wp().set, look)) ++g_st.draws;
+                        const bool gunDrawn = Wp().rend.Draw(ctx, rtv, bb, td.Width, td.Height, hw, Wp().set, look);
+                        if (gunDrawn) ++g_st.draws;
                         g_fprof.Mark("gun");
                         gunProf = vm::g_drawProf;
                         mv = Wp().rend.Muzzle(&mx, &my, &ma);
@@ -3062,6 +3090,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                             }
                         }
                         g_fprof.Mark("shells");
+                        DofStep(ctx, rtv, bb, td.Width, td.Height, hw, gunDrawn);
                         {
                             static const bool preGun = getenv("HFPS_DISTORT_PRE_GUN") != nullptr;
                             bool dg = false;
