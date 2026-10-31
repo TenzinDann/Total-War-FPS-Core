@@ -233,6 +233,12 @@ const CodePrint kArmorPrints904[] = {
 const CodePrint kMoraleLockPrints904[] = {
     {0x3033e40, 0x31, 0x9c69c6976f544645ull},
     {0x304c190, 0x1cd, 0x618f86e8ee295c36ull}};
+const CodePrint kVocalPrints904[] = {
+    {0x30352f8, 0x1a, 0x9244fb1be7bc4eedull},
+    {0x2e2af50, 0x1047, 0xd4cff9c6358a904full},
+    {0x2e8c2e8, 0x568, 0x093abc0c1e7f42e9ull}};
+constexpr uintptr_t oUnitVoGroup = 0x3ea4;
+constexpr uint32_t kVoGroupSilent = 0xb744cd04;
 const CodePrint kAggroPrints904[] = {
     {0x2ef045c, 0x3a, 0x088f6732f2da7a66ull},
     {0x2ef0364, 0x47, 0x97ae22b45236fc06ull},
@@ -513,6 +519,7 @@ constexpr uintptr_t oUnitAttrScript = 0x36f0;
 constexpr int32_t kAttrMeleeDisabled = 0x2a;
 bool g_meleeOk = false;
 constexpr int32_t kAttrUnbreakable = 0x15;
+bool g_vocalOk = false;
 bool g_moraleLockOk = false;
 bool g_aggroOk = false;
 bool g_shotOk = false;
@@ -605,6 +612,7 @@ struct Config {
     bool ghost = false;
     bool revealEnemies = true;
     bool noMelee = true;
+    bool muteVocal = true;
     bool lockMorale = true;
     bool aggro = true;
     float aggroRadius = 60.f, aggroRelease = 80.f, aggroHitHold = 20.f, aggroInterval = 2.f;
@@ -932,6 +940,7 @@ void LoadConfig() {
     cfg.revealEnemies = GetPrivateProfileIntW(L"hero", L"reveal_enemies", 1, ini) != 0;
     cfg.noMelee = GetPrivateProfileIntW(L"hero", L"no_melee", 1, ini) != 0;
     cfg.lockMorale = GetPrivateProfileIntW(L"hero", L"lock_morale", 1, ini) != 0;
+    cfg.muteVocal = GetPrivateProfileIntW(L"hero", L"mute_vocalisation", 1, ini) != 0;
     cfg.aggro = GetPrivateProfileIntW(L"aggro", L"enabled", 1, ini) != 0;
     cfg.aggroRadius = IniF(L"aggro", L"radius", 60.f, ini);
     cfg.aggroRelease = IniF(L"aggro", L"release_radius", 80.f, ini);
@@ -1356,6 +1365,9 @@ struct State {
     uintptr_t meleeUnit = 0, meleeBattle = 0, meleeSkipUnit = 0;
     unsigned meleeLogs = 0;
     uintptr_t moraleUnit = 0, moraleBattle = 0, moraleSkipUnit = 0;
+    uintptr_t vocalUnit = 0, vocalBattle = 0;
+    uint32_t vocalOrig = 0;
+    unsigned vocalLogs = 0;
     unsigned moraleLogs = 0;
     int heroAlliance = -1;
     double tStat = 0;
@@ -5659,6 +5671,39 @@ void MoraleStep() {
         Log("morale: hero %p unbreakable set (morale locked in first person: no wavering / routing; [hero] lock_morale=0 turns it off) issued %d",
             (void*)S.unit, ok);
 }
+void VocalStep() {
+    bool want = S.active && cfg.muteVocal && g_vocalOk && S.unit;
+    if (!want && !S.vocalUnit) return;
+    uintptr_t battle = 0;
+    CmdQueue(&battle);
+    if (S.vocalUnit && battle != S.vocalBattle) {
+        Log("vocal: battle changed, forgetting the silenced voice group on %p", (void*)S.vocalUnit);
+        S.vocalUnit = 0;
+    }
+    if (S.vocalUnit && (!want || S.vocalUnit != S.unit)) {
+        uint32_t cur = 0;
+        bool ours = Rd(S.vocalUnit + oUnitVoGroup, cur) && cur == kVoGroupSilent;
+        bool ok = ours && Wr(S.vocalUnit + oUnitVoGroup, S.vocalOrig);
+        if (S.vocalLogs++ < 20)
+            Log("vocal: hero %p voice group restored to 0x%08x (%s) - its own vocalisations play again", (void*)S.vocalUnit, S.vocalOrig,
+                ok ? "ok" : ours ? "write failed" : "changed by someone else, left as it is");
+        S.vocalUnit = 0;
+    }
+    if (!want || S.vocalUnit) return;
+    uint32_t cur = 0;
+    if (!Rd(S.unit + oUnitVoGroup, cur)) return;
+    if (cur == kVoGroupSilent) return;
+    if (!Wr(S.unit + oUnitVoGroup, kVoGroupSilent)) {
+        if (S.vocalLogs++ < 20) Log("vocal: hero %p voice group write failed", (void*)S.unit);
+        return;
+    }
+    S.vocalUnit = S.unit;
+    S.vocalBattle = battle;
+    S.vocalOrig = cur;
+    if (S.vocalLogs++ < 20)
+        Log("vocal: hero %p voice group 0x%08x -> wh_silent (no pain / grunt / breathing / roar from the hero in first person; "
+            "[hero] mute_vocalisation=0 turns it off)", (void*)S.unit, cur);
+}
 struct ControlCmd {
     uintptr_t vt;
     uintptr_t unit;
@@ -8967,6 +9012,9 @@ bool VerifyGame() {
         Log("hero: no-melee switch (melee_disabled) %s", g_meleeOk ? "ok" : "OFF");
         g_moraleLockOk = g_meleeOk && PrintsMatch(Prints(kMoraleLockPrints904), "morale lock (unbreakable)");
         Log("hero: morale lock in first person (unbreakable) %s", g_moraleLockOk ? "ok" : "OFF - morale can still break in first person");
+        g_vocalOk = PrintsMatch(Prints(kVocalPrints904), "hero vocalisations (unit voice group)");
+        Log("hero: mute own vocalisations in first person (unit voice group -> wh_silent) %s",
+            g_vocalOk ? "ok" : "OFF - pain / grunt sounds of the hero still play in first person");
         g_uiOk = PrintsMatch(game->ui, "battle hud hide");
         Log("ui: battle hud hiding %s", g_uiOk ? "ok" : "OFF");
         g_selMarkOk = g_uiOk && PrintsMatch(Prints(kSelMarkPrints904), "selection markers");
@@ -9708,6 +9756,10 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
         Log("morale: forgetting unbreakable on %p (left over from the previous battle)", (void*)S.moraleUnit);
         S.moraleUnit = 0;
     }
+    if (staleFp && S.vocalUnit) {
+        Log("vocal: forgetting the silenced voice group on %p (left over from the previous battle)", (void*)S.vocalUnit);
+        S.vocalUnit = 0;
+    }
     if (g_fpDetached) {
         g_fpDetached = false;
         if (mgr == g_detachMgr && !staleFp) {
@@ -9741,6 +9793,7 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     RevealStep(mgr);
     MeleeStep();
     MoraleStep();
+    VocalStep();
     AggroStep();
     NoKnockStep();
     UiStep();
