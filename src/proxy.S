@@ -143,45 +143,6 @@ hfps_hero_1c8_slow:
     pop rcx
     jmp qword ptr [rip + g_orig_hero_1c8]
     .seh_endproc
-    .globl hfps_after_step_thunk
-    .def hfps_after_step_thunk; .scl 2; .type 32; .endef
-hfps_after_step_thunk:
-    mov rax, qword ptr [rsp]
-    cmp rax, qword ptr [rip + g_after_step_ret]
-    je hfps_after_step_slow
-    jmp qword ptr [rip + g_orig_after_step]
-    .globl hfps_after_step_slow
-    .def hfps_after_step_slow; .scl 2; .type 32; .endef
-    .seh_proc hfps_after_step_slow
-hfps_after_step_slow:
-    push rcx
-    .seh_pushreg rcx
-    push rdx
-    .seh_pushreg rdx
-    push r8
-    .seh_pushreg r8
-    push r9
-    .seh_pushreg r9
-    sub rsp, 104
-    .seh_stackalloc 104
-    .seh_endprologue
-    movdqu xmmword ptr [rsp + 32], xmm0
-    movdqu xmmword ptr [rsp + 48], xmm1
-    movdqu xmmword ptr [rsp + 64], xmm2
-    movdqu xmmword ptr [rsp + 80], xmm3
-    mov rdx, rdi
-    call hfps_after_step_pre
-    movdqu xmm0, xmmword ptr [rsp + 32]
-    movdqu xmm1, xmmword ptr [rsp + 48]
-    movdqu xmm2, xmmword ptr [rsp + 64]
-    movdqu xmm3, xmmword ptr [rsp + 80]
-    add rsp, 104
-    pop r9
-    pop r8
-    pop rdx
-    pop rcx
-    jmp qword ptr [rip + g_orig_after_step]
-    .seh_endproc
     .globl hfps_cam_update_thunk
     .def hfps_cam_update_thunk; .scl 2; .type 32; .endef
     .seh_proc hfps_cam_update_thunk
