@@ -65,6 +65,11 @@ struct MagState {
     volatile LONG fireUs = 0;
     volatile LONG disposable = 0;
     volatile LONG reserve = -1;
+    volatile LONG shellMode = 0;
+    volatile LONG shellStop = 0;
+    volatile LONG shellWait = 0;
+    volatile LONG trigUp = 1;
+    volatile LONG64 firePendUs = 0;
     LONG ammoByModel[kMaxModels];
     LONG reserveByModel[kMaxModels];
     MagState() {
@@ -165,6 +170,10 @@ struct IniStamp {
     FILETIME time[3] = {};
 };
 IniStamp g_setStamp[kMaxModels];
+wchar_t g_gunShield[520] = L"";
+volatile LONG g_gunShieldOn = 0;
+LONG g_gunShieldGen = 1;
+LONG g_setShieldGen[kMaxModels] = {};
 void StampFile(const wchar_t* path, ULONGLONG* size, FILETIME* time) {
     WIN32_FILE_ATTRIBUTE_DATA fa;
     if (path[0] && GetFileAttributesExW(path, GetFileExInfoStandard, &fa)) {
@@ -197,6 +206,38 @@ bool SettingsUnchanged(int idx, const vm::Settings& s) {
     }
     return true;
 }
+void LoadShieldIni(int idx, vm::Settings& s, ULONGLONG* size, FILETIME* time) {
+    wchar_t rel[520], dir[MAX_PATH * 2], joined[MAX_PATH * 4], full[MAX_PATH * 2];
+    wcsncpy(rel, s.shieldModel, 519);
+    rel[519] = 0;
+    for (wchar_t* c = rel; *c; ++c)
+        if (*c == L'/') *c = L'\\';
+    bool abs = (rel[0] && rel[1] == L':') || rel[0] == L'\\';
+    ModelDir(idx, dir);
+    if (wchar_t* sl = wcsrchr(dir, L'\\')) *sl = 0;
+    swprintf(joined, MAX_PATH * 4, L"%ls%ls%ls", abs ? L"" : dir, abs ? L"" : L"\\", rel);
+    if (!GetFullPathNameW(joined, MAX_PATH * 2, full, nullptr)) wcsncpy(full, joined, MAX_PATH * 2 - 1), full[MAX_PATH * 2 - 1] = 0;
+    wcsncpy(s.shieldModel, full, 519);
+    s.shieldModel[519] = 0;
+    wchar_t shIni[MAX_PATH * 2];
+    wcsncpy(shIni, full, MAX_PATH * 2 - 16);
+    shIni[MAX_PATH * 2 - 16] = 0;
+    if (wchar_t* sl = wcsrchr(shIni, L'\\')) wcscpy(sl, L"\\shield.ini");
+    StampFile(shIni, size, time);
+    vm::LoadSettings(shIni, s);
+    wcsncpy(s.shieldModel, full, 519);
+}
+void ApplyGunShield(int idx, vm::Settings& s) {
+    if (idx < 0 || idx >= g_modelCount || g_setShieldGen[idx] == g_gunShieldGen) return;
+    g_setShieldGen[idx] = g_gunShieldGen;
+    if (!s.shieldModel[0] || !s.shieldAllow || !g_gunShield[0]) return;
+    wcsncpy(s.shieldModel, g_gunShield, 519);
+    s.shieldModel[519] = 0;
+    LoadShieldIni(idx, s, &g_setStamp[idx].size[1], &g_setStamp[idx].time[1]);
+    wchar_t side[MAX_PATH * 2];
+    SidecarIni(idx, side);
+    vm::LoadSettings(side, s);
+}
 void LoadAllSettings(int idx, vm::Settings& s) {
     IniStamp st;
     StampFile(g_ini, &st.size[0], &st.time[0]);
@@ -213,27 +254,9 @@ void LoadAllSettings(int idx, vm::Settings& s) {
     s = vm::Settings();
     vm::LoadSettings(g_ini, s);
     LoadCatBlocks();
-    if (s.shieldModel[0]) {
-        wchar_t rel[520], dir[MAX_PATH * 2], joined[MAX_PATH * 4], full[MAX_PATH * 2];
-        wcsncpy(rel, s.shieldModel, 519);
-        rel[519] = 0;
-        for (wchar_t* c = rel; *c; ++c)
-            if (*c == L'/') *c = L'\\';
-        bool abs = (rel[0] && rel[1] == L':') || rel[0] == L'\\';
-        ModelDir(idx, dir);
-        if (wchar_t* sl = wcsrchr(dir, L'\\')) *sl = 0;
-        swprintf(joined, MAX_PATH * 4, L"%ls%ls%ls", abs ? L"" : dir, abs ? L"" : L"\\", rel);
-        if (!GetFullPathNameW(joined, MAX_PATH * 2, full, nullptr)) wcsncpy(full, joined, MAX_PATH * 2 - 1), full[MAX_PATH * 2 - 1] = 0;
-        wcsncpy(s.shieldModel, full, 519);
-        s.shieldModel[519] = 0;
-        wchar_t shIni[MAX_PATH * 2];
-        wcsncpy(shIni, full, MAX_PATH * 2 - 16);
-        shIni[MAX_PATH * 2 - 16] = 0;
-        if (wchar_t* sl = wcsrchr(shIni, L'\\')) wcscpy(sl, L"\\shield.ini");
-        StampFile(shIni, &st.size[1], &st.time[1]);
-        vm::LoadSettings(shIni, s);
-        wcsncpy(s.shieldModel, full, 519);
-    }
+    if (s.shieldModel[0] && g_gunShield[0]) wcsncpy(s.shieldModel, g_gunShield, 519), s.shieldModel[519] = 0;
+    g_setShieldGen[idx] = g_gunShieldGen;
+    if (s.shieldModel[0]) LoadShieldIni(idx, s, &st.size[1], &st.time[1]);
     wchar_t side[MAX_PATH * 2];
     SidecarIni(idx, side);
     vm::LoadSettings(side, s);
@@ -280,6 +303,12 @@ struct HitQueue {
     int n = 0;
 } g_hitq;
 int g_hitFxCount = 0, g_hitFxKills = 0;
+struct HitMarkState {
+    SRWLOCK lock = SRWLOCK_INIT;
+    double tHit = -1.0, tKill = -1.0;
+    int hits = 0, kills = 0;
+} g_mark;
+int g_markHitFrames = 0, g_markKillFrames = 0;
 bool ReadCam(vm::WorldCam* c) {
     for (int k = 0; k < 4; ++k) {
         LONG s1 = g_cam.seq;
@@ -318,6 +347,7 @@ struct AnimSound {
     float t, vol;
     vm::GunSound snd;
     bool shell = false;
+    bool ammo = false;
 };
 constexpr int kMaxAnimSounds = 48;
 struct Weapon {
@@ -355,6 +385,28 @@ volatile LONG g_infAmmo = 0;
 volatile LONG g_infTac = 0;
 volatile LONG g_showSelMark = 0;
 volatile LONG g_kbAzerty = 0;
+volatile LONG g_mouseSensPct = 100;
+LONG ReadMouseSensPct(const wchar_t* armoryPath, char* raw, size_t rawSize) {
+    wchar_t path[MAX_PATH * 2];
+    wcsncpy(path, armoryPath, MAX_PATH * 2 - 1);
+    path[MAX_PATH * 2 - 1] = 0;
+    wchar_t* slash = wcsrchr(path, L'\\');
+    wcscpy(slash ? slash + 1 : path, L"tenzin_fps_mouse.txt");
+    raw[0] = 0;
+    if (FILE* f = _wfopen(path, L"r")) {
+        char line[64];
+        while (fgets(line, sizeof line, f)) {
+            size_t n = strlen(line);
+            while (n && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' ')) line[--n] = 0;
+            if (!strncmp(line, "sens=", 5)) snprintf(raw, rawSize, "%s", line + 5);
+        }
+        fclose(f);
+    }
+    double v = 0.0;
+    char tail = 0;
+    if (sscanf(raw, "%lf%c", &v, &tail) != 1 || !(v >= 10.0 && v <= 300.0)) return 100;
+    return static_cast<LONG>(std::floor(v + 0.5));
+}
 volatile LONG g_wpOn = 0;
 volatile LONG g_wDmgPct[kMaxModels] = {};
 volatile LONG g_wPenSet[kMaxModels] = {};
@@ -374,6 +426,34 @@ void RefreshFireRate() {
 }
 FILETIME g_armoryTime = {};
 volatile LONG g_reqRoster = 0;
+struct CharCfg {
+    char units[256];
+    wchar_t arms[MAX_PATH * 6];
+};
+constexpr int kMaxChars = 8;
+CharCfg g_chars[kMaxChars];
+int g_charN = 0;
+char g_charUnits[2048] = "";
+volatile LONG g_armsWant = -1;
+int g_armsApplied = -1;
+size_t g_armsLogShown = 0;
+bool CsvHas(const char* csv, const char* key) {
+    const size_t kl = strlen(key);
+    for (const char* p = csv; *p;) {
+        const char* e = strchr(p, ',');
+        const size_t l = e ? static_cast<size_t>(e - p) : strlen(p);
+        if (l == kl && !strncmp(p, key, kl)) return true;
+        if (!e) break;
+        p = e + 1;
+    }
+    return false;
+}
+int CharFor(const char* unitKey) {
+    if (!unitKey || !unitKey[0]) return -1;
+    for (int i = 0; i < g_charN; ++i)
+        if (CsvHas(g_chars[i].units, unitKey)) return i;
+    return -1;
+}
 volatile LONG g_reqWeapon = 0;
 volatile LONG g_wantIdx = 0;
 volatile LONG g_switching = 0;
@@ -963,6 +1043,12 @@ struct Anim {
     int cur = -1, prev = -1, idle = -1, fireNext = 0, cycleNext = 0, stance = 0;
     int reloadKind = 0;
     double reloadAt = 0;
+    int shellSeq = -1;
+    LONG shellTarget = 0;
+    int shellLoops = 0;
+    bool shellEmpty = false;
+    int shellEnd = -1;
+    double shellEndStart = 0;
     int spinSeen = 0;
     int evClip = -1;
     double evStart = 0, evLast = -1;
@@ -1003,6 +1089,29 @@ void Play(int clip, double now, double fade, double rate = 1.0) {
     g_an.fadeStart = now;
     g_an.fadeLen = g_an.prev >= 0 ? fade : 0;
     g_an.curveClip = -1;
+}
+bool ShellReload() {
+    for (int i = 0; i < 4; ++i)
+        if (!Wp().set.reloadShellClips[i][0] || Wp().rend.FindClip(Wp().set.reloadShellClips[i]) < 0) return false;
+    return true;
+}
+int ShellEndClip() {
+    const auto& rs = Wp().set.reloadShellClips;
+    int c = g_an.shellEmpty && rs[5][0] ? Wp().rend.FindClip(rs[5]) : -1;
+    return c >= 0 ? c : Wp().rend.FindClip(rs[3]);
+}
+constexpr double kShellFireAt = 0.65, kShellFinish = 0.15, kShellCutFade = 0.15, kFirePendSec = 1.5;
+void ShellAmmoEvent() {
+    if (g_mag.reload == 0 || g_mag.size <= 0) return;
+    LONG res = g_mag.reserve, have = g_mag.ammo < 0 ? 0 : g_mag.ammo;
+    if (res != 0 && have < g_mag.size) {
+        InterlockedExchange(&g_mag.ammo, ++have);
+        if (res > 0) InterlockedExchange(&g_mag.reserve, res - 1);
+    }
+    const bool done = have >= g_mag.size || have >= g_an.shellTarget || g_mag.reserve == 0;
+    if (done) InterlockedExchange(&g_mag.reload, 0);
+    static int logs = 0;
+    if (logs++ < 4) g_log("reload: shell in -> %ld / %ld (reserve %ld)%s", have, g_mag.size, g_mag.reserve, done ? ", done" : "");
 }
 void MarkCurveClip(int clip, bool down) {
     if (CurveAdsOn() && clip >= 0 && g_an.cur == clip) g_an.curveClip = clip, g_an.curveDown = down;
@@ -1187,7 +1296,8 @@ void AnimStep(vm::Look& l, double now) {
         LONG raw = g_fp ? g_stance : 0;
         int st = (raw & 4) ? 3 : (raw & 2) ? 2 : (raw & 1) ? 1 : 0;
         bool reloadAnim = g_mag.reload != 0 && g_an.cur >= 0 &&
-                          (g_an.cur == Wp().rend.FindClip("reload") || g_an.cur == Wp().rend.FindClip("reload_empty"));
+                          (g_an.cur == Wp().rend.FindClip("reload") || g_an.cur == Wp().rend.FindClip("reload_empty") ||
+                           g_an.cur == g_an.shellSeq);
         if (st != g_an.stance && Wp().set.fireMode && g_spin.state != 0 && st < 2 && g_an.stance < 2) {
             g_an.stance = st;
             if (g_spin.state == 2) {
@@ -1313,8 +1423,24 @@ void AnimStep(vm::Look& l, double now) {
     }
     if (g_an.reloadKind && now >= g_an.reloadAt) {
         if (g_mag.reload == g_an.reloadKind) {
-            int c = g_an.reloadKind == 2 ? Wp().rend.FindClip("reload_empty") : -1;
-            if (c < 0) c = Wp().rend.FindClip("reload");
+            int c = -1;
+            if (ShellReload()) {
+                const auto& rs = Wp().set.reloadShellClips;
+                const auto& r2 = Wp().set.reloadShellClips2;
+                c = Wp().rend.FindClip(rs[g_an.reloadKind == 2 ? 1 : 0]);
+                LONG size = g_mag.size, have = g_mag.ammo < 0 ? 0 : g_mag.ammo, res = g_mag.reserve;
+                g_an.shellTarget = res < 0 || have + res >= size ? size : have + res;
+                if (g_an.reloadKind == 1 && g_an.shellTarget - have >= 2 && r2[0][0] && Wp().rend.FindClip(r2[0]) >= 0)
+                    c = Wp().rend.FindClip(r2[0]);
+                g_an.shellSeq = c;
+                g_an.shellLoops = 0;
+                g_an.shellEmpty = g_an.reloadKind == 2;
+                static int logs = 0;
+                if (logs++ < 6) g_log("reload: shell by shell %ld -> %ld (clip %d)", have, g_an.shellTarget, c);
+            } else {
+                c = g_an.reloadKind == 2 ? Wp().rend.FindClip("reload_empty") : -1;
+                if (c < 0) c = Wp().rend.FindClip("reload");
+            }
             Play(c, now, 0.1);
             InterlockedExchange64(&g_mag.t0Us, static_cast<LONG64>(now * 1e6));
         }
@@ -1329,6 +1455,29 @@ void AnimStep(vm::Look& l, double now) {
         }
         Play(c, now, 0.15);
     }
+    if (InterlockedExchange(&g_mag.shellStop, 0) && g_mag.reload != 0) {
+        int how = 0;
+        if (g_an.shellSeq >= 0 && g_an.cur == g_an.shellSeq && !g_an.reloadKind) {
+            const double left = (Wp().rend.ClipDuration(g_an.cur) - ClipT(now)) / (g_an.curRate > 0 ? g_an.curRate : 1.0);
+            how = g_an.shellTarget == g_mag.ammo ? 3 : 1;
+            g_an.shellTarget = g_mag.ammo;
+            if (left > kShellFinish) {
+                InterlockedExchange(&g_mag.reload, 0);
+                const int end = ShellEndClip();
+                Play(end, now, kShellCutFade);
+                g_an.shellSeq = -1;
+                g_an.shellEnd = end, g_an.shellEndStart = g_an.curStart;
+                how = 2;
+            }
+        } else {
+            g_an.reloadKind = 0;
+            InterlockedExchange(&g_mag.reload, 0);
+        }
+        static int logs = 0;
+        if (how != 3 && logs++ < 8)
+            g_log("reload: fire pressed -> stop shell reload at %ld / %ld (%s)", g_mag.ammo, g_mag.size,
+                  how == 2 ? "fade into end" : how == 1 ? "finish this segment, then end" : "reload not started, cancelled");
+    }
     if (g_an.cur != g_an.evClip || g_an.curStart != g_an.evStart) {
         g_an.evClip = g_an.cur;
         g_an.evStart = g_an.curStart;
@@ -1339,14 +1488,16 @@ void AnimStep(vm::Look& l, double now) {
         Weapon& w = Wp();
         for (int i = 0; i < w.nAnim; ++i) {
             AnimSound& a = w.anim[i];
-            if (a.clip == g_an.cur && a.t > g_an.evLast && a.t <= t && a.t > t - 0.2) {
-                if (a.shell) {
+            if (a.clip == g_an.cur && a.t > g_an.evLast && a.t <= t && (a.ammo || a.t > t - 0.2)) {
+                if (a.ammo) {
+                    ShellAmmoEvent();
+                } else if (a.shell) {
                     if (w.set.shellEject) w.shells.Trigger(g_mo.adsW);
                 } else {
                     a.snd.Play(a.vol * w.set.animSoundVolume);
                 }
                 static int logs = 0;
-                if (logs < 80) {
+                if (!a.ammo && logs < 24) {
                     ++logs;
                     g_log("anim %s: clip %d at %.2f s (event %.2f s)", a.shell ? "shell" : "sound", a.clip, t, a.t);
                 }
@@ -1354,9 +1505,52 @@ void AnimStep(vm::Look& l, double now) {
         }
         g_an.evLast = t;
     }
+    if (g_an.shellSeq >= 0) {
+        if (g_an.cur != g_an.shellSeq) {
+            g_an.shellSeq = -1;
+            if (g_mag.reload != 0 && g_an.reloadKind == 0) InterlockedExchange(&g_mag.reload, 0);
+        } else {
+            const double t = ClipT(now), dur = Wp().rend.ClipDuration(g_an.cur);
+            if (t >= dur) {
+                const auto& rs = Wp().set.reloadShellClips;
+                const auto& r2 = Wp().set.reloadShellClips2;
+                auto find = [](const char* n) { return n[0] ? Wp().rend.FindClip(n) : -1; };
+                int loop = -1;
+                if (g_an.shellTarget - g_mag.ammo >= 2) {
+                    if (g_an.shellEmpty) loop = find(r2[2]);
+                    if (loop < 0) loop = find(r2[1]);
+                }
+                if (loop < 0 && g_an.shellEmpty) loop = find(rs[4]);
+                if (loop < 0) loop = find(rs[2]);
+                const int end = ShellEndClip();
+                const double over = (t - dur) / (g_an.curRate > 0 ? g_an.curRate : 1.0);
+                if (g_mag.reload != 0 && g_mag.ammo < g_an.shellTarget && g_an.shellLoops < g_mag.size + 2 && loop >= 0) {
+                    Play(loop, now - over, 0.0);
+                    g_an.shellSeq = loop;
+                    ++g_an.shellLoops;
+                } else {
+                    if (g_mag.reload != 0) InterlockedExchange(&g_mag.reload, 0);
+                    Play(end, now - over, 0.0);
+                    g_an.shellSeq = -1;
+                    g_an.shellEnd = end, g_an.shellEndStart = g_an.curStart;
+                }
+            }
+        }
+    }
     if (g_an.cur >= 0 && !Wp().rend.ClipLoops(g_an.cur) && g_an.cur != StanceIdle() &&
         ClipT(now) >= Wp().rend.ClipDuration(g_an.cur))
         Play(StanceIdle(), now, g_an.stance == 1 ? 0.05 : 0.15);
+    {
+        bool wait = g_an.shellSeq >= 0 && g_an.cur == g_an.shellSeq;
+        if (!wait && g_an.shellEnd >= 0) {
+            if (g_an.cur == g_an.shellEnd && g_an.curStart == g_an.shellEndStart)
+                wait = ClipT(now) < Wp().rend.ClipDuration(g_an.cur) * kShellFireAt;
+            else
+                g_an.shellEnd = -1;
+        }
+        InterlockedExchange(&g_mag.shellWait, wait ? 1 : 0);
+        if (g_mag.firePendUs && (g_an.stance >= 2 || g_sw.phase != 0)) InterlockedExchange64(&g_mag.firePendUs, 0);
+    }
     l.clip = g_an.cur;
     l.clipTime = static_cast<float>(ClipT(now));
     l.clipPrev = g_an.prev;
@@ -1381,7 +1575,7 @@ void ShieldPoseMatrix(const float* p, const float* rd, float* m) {
 }
 void ShieldStep(vm::Look& l, double now, float dt) {
     const vm::Settings& s = Wp().set;
-    bool allowed = g_fp && s.shieldAllow && Wp().rend.ArmRig() && !s.mirrorX;
+    bool allowed = g_fp && s.shieldAllow && g_gunShieldOn && Wp().rend.ArmRig() && !s.mirrorX;
     bool meleeBlock = g_fp && MeleeWeapon() && (melee::g.act == melee::kBlock || melee::Guarding(now));
     g_sh.meleeBlock = meleeBlock ? 1 : 0;
     auto blockNow = [&]() {
@@ -1649,6 +1843,7 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
                       {&w.stepSprint, w.set.stepClothSprint, "step cloth sprint"}, {&w.stepRattle, w.set.stepRattle, "step rattle"},
                       {&w.spinUp, w.set.spinUpSound, "spin up"}, {&w.spinLoop, w.set.spinLoopSound, "spin loop"},
                       {&w.spinDown, w.set.spinDownSound, "spin down"}};
+        w.spinLoop.SetLoopBegin(w.set.spinLoopStart);
         for (Step& st : steps) {
             st.snd->Release();
             if (!st.list[0]) continue;
@@ -1687,7 +1882,8 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
                     a.t = t;
                     a.vol = v;
                     a.shell = !strcmp(file, "!shell");
-                    if (a.shell) {
+                    a.ammo = !strcmp(file, "!ammo");
+                    if (a.shell || a.ammo) {
                         if (a.clip >= 0)
                             ++w.nAnim;
                         else if (bad++ < 4)
@@ -1712,7 +1908,7 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
         }
     }
     w.flash.Release();
-    if (w.set.flashFx[0] || w.set.effectFx[0] || (w.set.flashGas && w.set.flashGasFx[0])) {
+    if (w.set.flashFx[0] || w.set.effectFx[0] || (w.set.flashGas && w.set.flashGasFx[0]) || w.set.flameFx[0]) {
         err[0] = 0;
         wchar_t eff[MAX_PATH * 2] = L"", gas[MAX_PATH * 2] = L"";
         path[0] = 0;
@@ -1726,6 +1922,13 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
                   w.set.effectFx, w.flash.GasLoaded(), w.set.flashGasFx, w.set.flashGasScale, w.set.flashGasAlpha);
         else
             g_log("viewmodel: [%d] muzzle fx failed: %s", idx, err);
+        if (w.flash.Loaded() && w.set.flameFx[0]) {
+            wchar_t fl[MAX_PATH * 2];
+            swprintf(fl, MAX_PATH * 2, L"%ls\\%ls", dir, w.set.flameFx);
+            w.flash.LoadFlame(fl, w.set);
+            g_log("viewmodel: [%d] flame fx from %ls: layers %ls / %ls / %ls / %ls", idx, w.set.flameFx, w.set.flame[0].tex, w.set.flame[1].tex,
+                  w.set.flame[2].tex, w.set.flame[3].tex);
+        }
     }
     w.shells.Release();
     if (w.set.shellEject) {
@@ -1825,7 +2028,7 @@ void PrefetchWork(int idx, const vm::Settings& s, void** pcm, int* nPcm) {
     }
     int sf = 0;
     size_t sb = 0;
-    if (s.shieldAllow && s.shieldModel[0]) vm::prefetch::ShieldModel(kShieldPreTag, s.shieldModel, &sf, &sb);
+    if (s.shieldAllow && g_gunShieldOn && s.shieldModel[0]) vm::prefetch::ShieldModel(kShieldPreTag, s.shieldModel, &sf, &sb);
     long built = 0, taken = 0;
     vm::prefetch::Counters(&built, &taken);
     g_log("prefetch: [%d] model %s (%d files, %.1f MB) %.1f ms, %d sounds %.1f ms%s (textures built in the background so far %ld, used %ld)", idx,
@@ -2002,6 +2205,18 @@ bool PrefetchReady(int i) {
 bool g_initOnly = false;
 bool g_shieldPreDone = false;
 bool g_rosterNoLoad = false;
+void ArmsLogFlush() {
+    const char* s = vm::ArmsOverrideLog();
+    size_t n = strlen(s);
+    if (n < g_armsLogShown) g_armsLogShown = 0;
+    for (const char* p = s + g_armsLogShown; *p;) {
+        const char* e = strchr(p, '\n');
+        size_t l = e ? static_cast<size_t>(e - p) : strlen(p);
+        g_log("arms: %.*s", static_cast<int>(l), p);
+        p += l + (e ? 1 : 0);
+    }
+    g_armsLogShown = n;
+}
 bool EnsureWeapon(int idx, ID3D11Device* dev) {
     if (idx < 0 || idx >= g_modelCount) return false;
     Weapon& w = g_w[idx];
@@ -2017,12 +2232,14 @@ bool EnsureWeapon(int idx, ID3D11Device* dev) {
         }
         g_log("viewmodel: [%d] ready on device %p: %u triangles, %u bones, %u clips, model %ls (init %.1f ms)", idx, (void*)dev,
               w.rend.Triangles(), w.rend.Bones(), w.rend.Clips(), g_models[idx], (Now() - t0) * 1000.0);
+        ArmsLogFlush();
         w.fxDirty = true;
         if (idx == g_modelIdx) {
             AnimReset(Now());
             MagApply();
         }
     }
+    ApplyGunShield(idx, w.set);
     if (w.fxDirty && !g_initOnly) {
         LoadWeaponFx(idx, dev);
         PrefetchDiscard(idx);
@@ -2215,6 +2432,20 @@ void LoadWeaponParams(const wchar_t* armoryPath, const char* flag) {
         g_log("weapon-params: custom weapon stats %s (wparams='%s', file %s, %d entries: %d weapons, %d melee classes%s)%s", on ? "ON" : "off", flag,
               read ? "read" : "missing", nEnt, nW, nC, g_mpBattle ? "; multiplayer / not verified - ignored this battle" : "", line);
 }
+void ArmsSync() {
+    const int want = static_cast<int>(g_armsWant);
+    if (want == g_armsApplied) return;
+    g_armsApplied = want;
+    vm::SetArmsOverride(want >= 0 ? g_chars[want].arms : L"");
+    g_armsLogShown = 0;
+    int n = 0;
+    for (int i = 0; i < g_modelCount; ++i)
+        if (g_w[i].rend.Ready()) UnloadWeapon(i), ++n;
+    g_log("arms: %s -> %d arms kits loaded, %d loaded weapons reload with them", want >= 0 ? g_chars[want].units : "weapon's own arms",
+          vm::ArmsOverrideCount(), n);
+    ArmsLogFlush();
+    InterlockedExchange(&g_reqRoster, 1);
+}
 void RosterStep(ID3D11Device* dev) {
     if (!InterlockedExchange(&g_reqRoster, 0)) return;
     wchar_t path[MAX_PATH * 2];
@@ -2285,6 +2516,12 @@ void RosterStep(ID3D11Device* dev) {
         if (InterlockedExchange(&g_kbAzerty, az) != az || az)
             g_log("keys: %s layout (MCT kb_azerty='%s')%s", az ? "AZERTY" : "QWERTY", kbAzerty,
                   az ? " - move Z/Q/S/D, gun shield A, Alt+) / Alt+= cast slots 11 / 12" : "");
+    }
+    {
+        char sensRaw[32];
+        const LONG pct = ReadMouseSensPct(path, sensRaw, sizeof sensRaw);
+        if (InterlockedExchange(&g_mouseSensPct, pct) != pct || pct != 100)
+            g_log("mouse: sensitivity %ld%% (MCT sens='%s')", static_cast<long>(pct), sensRaw);
     }
     RefreshFireRate();
     WIN32_FILE_ATTRIBUTE_DATA fa;
@@ -2366,6 +2603,21 @@ void RosterStep(ID3D11Device* dev) {
     if (!n) g_roster[n++] = g_modelIdx;
     for (int k = 0; k < kSlots; ++k) InterlockedExchange(&g_slot[k], slot[k]);
     InterlockedExchange(&g_rosterN, n);
+    {
+        int sp = slot[3];
+        for (LONG k = 0; all && sp < 0 && k < n; ++k)
+            if (g_w[g_roster[k]].set.gunShieldModel[0]) sp = g_roster[k];
+        const wchar_t* gs = sp >= 0 ? g_w[sp].set.gunShieldModel : L"";
+        if (wcscmp(gs, g_gunShield)) {
+            wcsncpy(g_gunShield, gs, 519);
+            g_gunShield[519] = 0;
+            ++g_gunShieldGen;
+        }
+        InterlockedExchange(&g_gunShieldOn, g_gunShield[0] ? 1 : 0);
+        g_log("shield: gun shield %ls (slot 4 = model %d %ls)", g_gunShield[0] ? g_gunShield : L"off - no shield-spear in slot 4", sp,
+              sp >= 0 ? g_w[sp].set.weaponId : L"-");
+        for (LONG k = 0; k < n; ++k) ApplyGunShield(g_roster[k], g_w[g_roster[k]].set);
+    }
     g_log("weapon: roster %ld from %s (armory file %s, mode '%s', owned '%s', loadout '%s')", n, from, mode[0] || owned[0] ? "found" : "missing",
           mode, owned, loadout);
     bool curOk = false;
@@ -2411,6 +2663,10 @@ void UnloadStep() {
 void ShieldPreload(ID3D11Device* dev) {
     if (g_shieldPreDone) return;
     g_shieldPreDone = true;
+    if (!g_gunShieldOn) {
+        vm::prefetch::Drop(kShieldPreTag);
+        return;
+    }
     const vm::Settings* s = Wp().set.shieldAllow ? &Wp().set : nullptr;
     for (LONG k = 0; !s && k < g_rosterN; ++k)
         if (g_w[g_roster[k]].set.shieldAllow) s = &g_w[g_roster[k]].set;
@@ -2613,6 +2869,32 @@ void GameThreadAdd(double ms) {
     ReleaseSRWLockExclusive(&g_gtLock);
 }
 int g_profLogs = 0, g_warmProfLogs = 0;
+vm::NearDof g_dof;
+float g_dofW = 0.f;
+double g_dofT = -1.0;
+int g_dofDebugForce = -1;
+bool g_dofOff = false;
+void DofStep(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11Texture2D* bb, UINT w, UINT h, bool hw, bool gunDrawn) {
+    const vm::Settings& s = Wp().set;
+    const double now = Now();
+    const float dt = g_dofT < 0.0 ? 0.f : static_cast<float>(std::fmin(now - g_dofT, 0.25));
+    g_dofT = now;
+    if (!s.dof) {
+        g_dofW = 0.f;
+        return;
+    }
+    float target = 0.f;
+    if (!g_dofOff && g_fp && Wp().lastShotAt > 0.0 && now - Wp().lastShotAt < s.dofHold) target = 1.f - g_mo.adsW * (1.f - s.dofAds);
+    g_dofW += (target - g_dofW) * (1.f - std::exp(-s.dofRate * dt));
+    const bool debug = (g_dofDebugForce >= 0 ? g_dofDebugForce : s.dofDebug) != 0;
+    if (!gunDrawn || g_dofW < 0.004f) return;
+    bool dg = false;
+    ID3D11ShaderResourceView* col = Wp().rend.CopyForDistort(ctx, bb, w, h, &dg);
+    ID3D11ShaderResourceView* dep = Wp().rend.DistortDepth();
+    if (!col || !dep) return;
+    const vm::DofParams p = {s.dofFocus, s.dofRamp, s.dofBlur * s.dofPx * static_cast<float>(h) / 1080.f, g_dofW, debug};
+    g_dof.Apply(ctx, rtv, col, dg, dep, w, h, hw, p);
+}
 void LayerPrewarm(IDXGISwapChain* sc, ID3D11Device* dev) {
     const double t0 = Now();
     ID3D11Texture2D* bb = nullptr;
@@ -2624,9 +2906,10 @@ void LayerPrewarm(IDXGISwapChain* sc, ID3D11Device* dev) {
     const bool gpu = g_gpuTimer && g_gpu.Ensure(dev);
     const bool cross = g_cross.Prewarm(dev), cm = g_cmR.Prewarm(dev);
     const bool screen = td.Width && Wp().rend.Ready() && Wp().rend.PrewarmScreen(td);
-    g_log("warm: first-person GPU objects made before first person in %.1f ms: GPU timer %s, crosshair %s, cast marker %s, screen buffers %ux%u %s",
+    const bool dof = td.Width && g_dof.Prewarm(dev, td.Width, td.Height);
+    g_log("warm: first-person GPU objects made before first person in %.1f ms: GPU timer %s, crosshair %s, cast marker %s, screen buffers %ux%u %s, alt dof %s",
           (Now() - t0) * 1000.0, gpu ? "ok" : g_gpuTimer ? "failed" : "off", cross ? "ok" : "failed", cm ? "ok" : "failed", td.Width, td.Height,
-          screen ? "ok" : "not made");
+          screen ? "ok" : "not made", dof ? "ok" : "not made");
 }
 void WarmStep(IDXGISwapChain* sc) {
     ID3D11Device* dev = nullptr;
@@ -2648,6 +2931,7 @@ void WarmStep(IDXGISwapChain* sc) {
     FrameProf wp;
     wp.Start(Now());
     CheckDevice(dev);
+    ArmsSync();
     wp.Mark("device");
     bool ok = EnsureWeapon(g_modelIdx, dev);
     wp.Mark("current");
@@ -2688,11 +2972,32 @@ void CastMarkerDraw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT 
     if (logs < 6 && drawn) ++logs, g_log("cast-marker: drawn %d vertices (%d lines, %d fill tris%s%s) on %ux%u", g_cmR.Verts(), g_cmDraw.nLines,
                                           g_cmDraw.nTris, g_cmDraw.pillar ? ", pillar" : "", g_cmDraw.chevron ? ", chevron" : "", w, h);
 }
+double g_spinSilenceUntil = 0;
+void SpinSilenceStep() {
+    if (g_modelIdx < 0 || g_modelIdx >= g_modelCount) return;
+    const double now = Now();
+    if (g_spin.state != 0 || g_an.spinSeen != 0) {
+        const LONG st = InterlockedExchange(&g_spin.state, 0);
+        g_an.spinSeen = 0;
+        Wp().spinUp.FadeAll();
+        Wp().spinLoop.FadeAll();
+        Wp().spinDown.FadeAll();
+        g_spinSilenceUntil = now + 0.3;
+        g_log("viewmodel: first person off while spinning (state %ld) - spin up / loop / down sounds faded out", static_cast<long>(st));
+    }
+    if (g_spinSilenceUntil > 0) {
+        Wp().spinUp.Update();
+        Wp().spinLoop.Update();
+        Wp().spinDown.Update();
+        if (now >= g_spinSilenceUntil) g_spinSilenceUntil = 0;
+    }
+}
 void DrawLayer(IDXGISwapChain* sc, int part) {
     if (g_failed || !(g_testLayer || g_fp)) {
         LayerTargetDrop();
         if (!g_failed && g_warm && part == kPartAll) WarmStep(sc);
         g_profWasFp = false;
+        if (part == kPartAll) SpinSilenceStep();
         return;
     }
     double t0 = Now();
@@ -2739,6 +3044,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
     PrefetchDevice(dev);
     if (part != kPartCross) {
         CheckDevice(dev);
+        ArmsSync();
         g_fprof.Mark("device");
         if (!EnsureWeapon(g_modelIdx, dev)) {
             g_failed = true;
@@ -2789,7 +3095,8 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                         g_fprof.Mark("hud-save");
                         if (g_fp) CastMarkerDraw(ctx, rtv, td.Width, td.Height, hw);
                         g_fprof.Mark("cast-marker");
-                        if (Wp().rend.Draw(ctx, rtv, bb, td.Width, td.Height, hw, Wp().set, look)) ++g_st.draws;
+                        const bool gunDrawn = Wp().rend.Draw(ctx, rtv, bb, td.Width, td.Height, hw, Wp().set, look);
+                        if (gunDrawn) ++g_st.draws;
                         g_fprof.Mark("gun");
                         gunProf = vm::g_drawProf;
                         mv = Wp().rend.Muzzle(&mx, &my, &ma);
@@ -2830,6 +3137,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                             }
                         }
                         g_fprof.Mark("shells");
+                        DofStep(ctx, rtv, bb, td.Width, td.Height, hw, gunDrawn);
                         {
                             static const bool preGun = getenv("HFPS_DISTORT_PRE_GUN") != nullptr;
                             bool dg = false;
@@ -2850,6 +3158,16 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                         vm::CrosshairSettings cs;
                         float cspread, calpha;
                         if (CrossFrame(cs, cspread, calpha)) g_cross.Draw(ctx, rtv, td.Width, td.Height, hw, cs, cspread, calpha);
+                    }
+                    if (part != kPartGun && g_fp) {
+                        AcquireSRWLockShared(&g_mark.lock);
+                        const double th = g_mark.tHit, tk = g_mark.tKill;
+                        ReleaseSRWLockShared(&g_mark.lock);
+                        const double nm = Now();
+                        const int drew = g_cross.DrawHitMarker(ctx, rtv, td.Width, td.Height, hw, g_crossSet, th >= 0.0 ? static_cast<float>(nm - th) : -1.f,
+                                                               tk >= 0.0 ? static_cast<float>(nm - tk) : -1.f);
+                        if (drew & 1) ++g_markHitFrames;
+                        if (drew & 2) ++g_markKillFrames;
                     }
                     g_fprof.Mark("cross");
                     g_gpu.End(ctx, gpuSlot);
@@ -2978,6 +3296,12 @@ bool VerifyStatic(uintptr_t exeBase, LogFn log, const RenderAddrs& addrs) {
         g_viewRouteOk ? "ok" : "does not match this exe - with anti-aliasing off the gun stays at Present (drawn over the UI)");
     return ok;
 }
+void SetHeroKey(const char* unitKey) {
+    const int ci = CharFor(unitKey);
+    const LONG was = InterlockedExchange(&g_armsWant, ci);
+    if (was != ci) g_log("arms: hero unit key '%s' -> %s", unitKey ? unitKey : "", ci >= 0 ? g_chars[ci].units : "weapon's own arms");
+}
+const char* UnitKeys() { return g_charUnits; }
 void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
     g_base = exeBase;
     g_log = log;
@@ -3005,6 +3329,37 @@ void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log) {
         if (*tok) swprintf(g_models[g_modelCount++], MAX_PATH * 2, L"%ls\\%ls", dllDir, tok);
         if (!end) break;
         tok = end + 1;
+    }
+    {
+        g_charN = 0;
+        g_charUnits[0] = 0;
+        for (int ci = 1; ci <= kMaxChars; ++ci) {
+            wchar_t sec[16], cu[256], ca[MAX_PATH * 2];
+            if (ci == 1)
+                wcscpy(sec, L"character");
+            else
+                swprintf(sec, 16, L"character%d", ci);
+            GetPrivateProfileStringW(sec, L"units", L"", cu, 256, g_ini);
+            GetPrivateProfileStringW(sec, L"arms", L"", ca, MAX_PATH * 2, g_ini);
+            if (!cu[0] || !ca[0]) continue;
+            CharCfg& c = g_chars[g_charN++];
+            char u8[256];
+            WideCharToMultiByte(CP_UTF8, 0, cu, -1, u8, sizeof u8, nullptr, nullptr);
+            size_t n = 0;
+            for (const char* p = u8; *p && n + 1 < sizeof c.units; ++p)
+                if (*p != ' ' && *p != '\t') c.units[n++] = *p;
+            c.units[n] = 0;
+            c.arms[0] = 0;
+            wchar_t* actx = nullptr;
+            for (wchar_t* tok = wcstok(ca, L";", &actx); tok; tok = wcstok(nullptr, L";", &actx)) {
+                while (*tok == L' ') ++tok;
+                const size_t m = wcslen(c.arms);
+                if (*tok) swprintf(c.arms + m, MAX_PATH * 6 - m, L"%ls%ls\\%ls", m ? L";" : L"", dllDir, tok);
+            }
+            const size_t ul = strlen(g_charUnits);
+            snprintf(g_charUnits + ul, sizeof g_charUnits - ul, "%s%s", ul ? "," : "", c.units);
+            log("viewmodel: character %d [%ls]: units '%s', arms %ls", g_charN, sec, c.units, c.arms);
+        }
     }
     if (!g_modelCount) swprintf(g_models[g_modelCount++], MAX_PATH * 2, L"%ls\\tenzin_fps_vm\\m7\\m7.hvm", dllDir);
     for (int i = 0; i < g_modelCount; ++i) LoadAllSettings(i, g_w[i].set);
@@ -3196,6 +3551,7 @@ bool Reloading() {
 bool InfTacStamina() { return g_infTac != 0; }
 bool ShowSelMarkers() { return g_showSelMark != 0; }
 bool KbAzerty() { return g_kbAzerty != 0; }
+float MouseSensScale() { return static_cast<float>(g_mouseSensPct) * 0.01f; }
 void AmmoInfo(int* ammo, int* size, bool* reloading, int* reserve) {
     LONG s = g_mag.size, a = g_mag.ammo, r = g_mag.reserve;
     *size = s > 0 ? static_cast<int>(s) : 0;
@@ -3209,6 +3565,8 @@ bool StartMagReload() {
     if (size <= 0 || g_mag.reload != 0 || g_mag.ammo >= size) return false;
     if (g_mag.reserve == 0) return false;
     LONG kind = g_mag.ammo > 0 ? 1 : 2;
+    InterlockedExchange(&g_mag.trigUp, 0);
+    InterlockedExchange64(&g_mag.firePendUs, 0);
     InterlockedExchange64(&g_mag.t0Us, static_cast<LONG64>(Now() * 1e6));
     if (InterlockedCompareExchange(&g_mag.reload, kind, 0) != 0) return false;
     InterlockedExchange(&g_mag.reqAnim, kind);
@@ -3219,12 +3577,25 @@ bool CanFire() {
     if (g_spin.mode && g_spin.state != 2) return false;
     if (g_mag.size <= 0) return true;
     MagTick();
+    if (g_mag.shellMode && g_mag.ammo > 0 && ((g_mag.reload != 0 && g_mag.trigUp) || (g_mag.reload == 0 && g_mag.shellWait))) {
+        if (g_mag.reload != 0) InterlockedExchange(&g_mag.shellStop, 1);
+        if (!g_mag.firePendUs) InterlockedExchange64(&g_mag.firePendUs, static_cast<LONG64>(Now() * 1e6));
+        return false;
+    }
     if (g_mag.reload != 0) return false;
     if (g_mag.ammo <= 0) {
         if (!g_mag.disposable) StartMagReload();
         return false;
     }
+    if (g_mag.firePendUs) InterlockedExchange64(&g_mag.firePendUs, 0);
     return true;
+}
+bool FirePending() {
+    const LONG64 t = g_mag.firePendUs;
+    if (!t) return false;
+    if (static_cast<LONG64>(Now() * 1e6) - t < static_cast<LONG64>(kFirePendSec * 1e6)) return true;
+    InterlockedCompareExchange64(&g_mag.firePendUs, 0, t);
+    return false;
 }
 void MagApply() {
     if (g_mag.loadedModel >= 0 && g_mag.loadedModel < kMaxModels && g_mag.size > 0) {
@@ -3233,6 +3604,11 @@ void MagApply() {
     }
     InterlockedExchange(&g_mag.reload, 0);
     InterlockedExchange(&g_mag.reqAnim, 0);
+    InterlockedExchange(&g_mag.shellMode, ShellReload() ? 1 : 0);
+    InterlockedExchange(&g_mag.shellStop, 0);
+    InterlockedExchange(&g_mag.shellWait, 0);
+    InterlockedExchange64(&g_mag.firePendUs, 0);
+    g_an.shellEnd = -1;
     InterlockedExchange(&g_spin.mode, Wp().set.fireMode == 1 ? 1 : 0);
     InterlockedExchange(&g_spin.state, 0);
     InterlockedExchange(&g_spin.upUs, static_cast<LONG>((Wp().set.spinUpTime > 0.f ? Wp().set.spinUpTime : 0.f) * 1e6f));
@@ -3249,6 +3625,15 @@ void MagApply() {
     int cTac = Wp().rend.FindClip("reload"), cEmpty = Wp().rend.FindClip("reload_empty");
     InterlockedExchange(&g_mag.refillUs[1], refill(Wp().set.reloadRefill, cTac));
     InterlockedExchange(&g_mag.refillUs[2], refill(Wp().set.reloadEmptyRefill, cEmpty >= 0 ? cEmpty : cTac));
+    if (ShellReload()) {
+        const auto& rs = Wp().set.reloadShellClips;
+        const float d = Wp().rend.ClipDuration(Wp().rend.FindClip(rs[0])) + Wp().rend.ClipDuration(Wp().rend.FindClip(rs[1])) +
+                        static_cast<float>(size > 0 ? size : 1) * Wp().rend.ClipDuration(Wp().rend.FindClip(rs[2])) +
+                        Wp().rend.ClipDuration(Wp().rend.FindClip(rs[3])) + 3.f;
+        InterlockedExchange(&g_mag.refillUs[1], static_cast<LONG>(d * 1e6f));
+        InterlockedExchange(&g_mag.refillUs[2], static_cast<LONG>(d * 1e6f));
+        g_log("viewmodel: shell-by-shell reload (%s / %s / %s / %s), fallback refill %.1f s", rs[0], rs[1], rs[2], rs[3], d);
+    }
     bool same = g_mag.loadedModel == g_modelIdx;
     g_mag.loadedModel = g_modelIdx;
     LONG keep = g_modelIdx < kMaxModels ? g_mag.ammoByModel[g_modelIdx] : -1;
@@ -3350,6 +3735,27 @@ void HitFxStats(int* shown, int* kills) {
     *kills = g_hitFxKills;
 }
 void GameThreadTime(double ms) { GameThreadAdd(ms); }
+void HitMark(bool kill) {
+    const double now = Now();
+    AcquireSRWLockExclusive(&g_mark.lock);
+    if (kill) {
+        g_mark.tKill = now;
+        ++g_mark.kills;
+    } else {
+        g_mark.tHit = now;
+        ++g_mark.hits;
+    }
+    ReleaseSRWLockExclusive(&g_mark.lock);
+}
+bool HitMarkOn() { return g_crossSet.hitMarker; }
+void HitMarkStats(int* hits, int* kills, int* hitFrames, int* killFrames) {
+    AcquireSRWLockShared(&g_mark.lock);
+    *hits = g_mark.hits;
+    *kills = g_mark.kills;
+    ReleaseSRWLockShared(&g_mark.lock);
+    *hitFrames = g_markHitFrames;
+    *killFrames = g_markKillFrames;
+}
 void HitFx(const float pos[3], const float dir[3], bool kill) {
     AcquireSRWLockExclusive(&g_hitq.lock);
     if (g_hitq.n < 16) {
@@ -3405,6 +3811,7 @@ void CycleWeapon(int dir) {
 }
 bool Busy() { return g_switching != 0 || Reloading(); }
 void SetTrigger(bool held) {
+    if (!held && !g_mag.trigUp) InterlockedExchange(&g_mag.trigUp, 1);
     if (!g_spin.mode || !Enabled() || !g_fp) return;
     LONG64 now = static_cast<LONG64>(Now() * 1e6);
     LONG st = g_spin.state;
@@ -3466,6 +3873,7 @@ float ShieldBlockFraction() { return static_cast<float>(g_sh.blockMilli) * 0.001
 void DebugShieldHit() {
     if (Enabled() && g_fp) ShieldHit();
 }
+bool GunShieldOn() { return g_gunShieldOn != 0; }
 bool ShieldWanted() { return g_sh.want != 0 && g_sh.allowed != 0; }
 void ShieldGame(float* weight, float* moveScale, float* zoomKeep) {
     float w = g_sh.wUs * 1e-6f;
@@ -3552,6 +3960,7 @@ void MeleeHitFeedback(int hits) {
 }
 const char* WeaponProjectile(int idx) { return idx >= 0 && idx < g_modelCount ? g_w[idx].set.projectile : ""; }
 float WeaponFireRange(int idx) { return idx >= 0 && idx < g_modelCount ? g_w[idx].set.fireRange : 0.f; }
+const char* WeaponProjectileAds(int idx) { return idx >= 0 && idx < g_modelCount ? g_w[idx].set.projectileAds : ""; }
 bool ScopeWheel(int delta) {
     const int i = g_modelIdx;
     const int k = ScopeLevelIdx(i);
@@ -3608,6 +4017,90 @@ void SpreadDir(const float fwd[3], const float right[3], const float up[3], floa
     }
     n = 1.f / std::sqrt(n);
     for (int i = 0; i < 3; ++i) out[i] *= n;
+}
+int ShotPattern(float adsW, const float fwd[3], const float right[3], const float up[3], float (*out)[3], int maxOut, float* range, bool* focus) {
+    const int idx = CurrentWeapon();
+    const bool foc = adsW >= 0.5f;
+    int n = 1;
+    float fan = 0.f, rg = 0.f, cone = 0.f;
+    if (idx >= 0 && idx < g_modelCount) {
+        const auto& s = g_w[idx].set;
+        n = foc ? s.pelletsAds : s.pellets;
+        const float aw = std::fmin(std::fmax(adsW, 0.f), 1.f);
+        cone = (s.pelletSpread + (s.pelletSpreadAds - s.pelletSpread) * aw) * 0.01745329f;
+        fan = (foc ? s.pelletFanAds : s.pelletFan) * 0.01745329f;
+        rg = foc && s.fireRangeAds > 0.f ? s.fireRangeAds : s.fireRange;
+    }
+    if (n > maxOut) n = maxOut;
+    if (n < 1) n = 1;
+    for (int k = 0; k < n; ++k) {
+        g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
+        const float u = static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
+        const float yw = fan > 0.f ? -fan + 2.f * fan * (static_cast<float>(k) + u) / static_cast<float>(n) : 0.f;
+        const float c = std::cos(yw), sn = std::sin(yw);
+        float d[3], r[3];
+        for (int i = 0; i < 3; ++i) d[i] = fwd[i] * c + right[i] * sn, r[i] = right[i] * c - fwd[i] * sn;
+        SpreadDir(d, r, up, out[k]);
+        if (cone > 0.f) {
+            g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
+            const float u1 = static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
+            g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
+            const float th = 6.2831853f * static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
+            const float rr = std::tan(cone * std::sqrt(u1)), a = rr * std::cos(th), b = rr * std::sin(th);
+            float o[3], len = 0.f;
+            for (int i = 0; i < 3; ++i) o[i] = out[k][i] + r[i] * a + up[i] * b, len += o[i] * o[i];
+            len = 1.f / std::sqrt(len);
+            for (int i = 0; i < 3; ++i) out[k][i] = o[i] * len;
+        }
+    }
+    if (range) *range = rg;
+    if (focus) *focus = foc;
+    return n;
+}
+bool WeaponBurst(int idx, float* minDist, float* scatterAds, int* pierceAds, float* reachAds) {
+    if (idx < 0 || idx >= g_modelCount || !g_w[idx].set.burst) return false;
+    if (minDist) *minDist = g_w[idx].set.burstMin;
+    if (scatterAds) *scatterAds = g_w[idx].set.burstScatterAds;
+    if (pierceAds) *pierceAds = g_w[idx].set.burstPierceAds;
+    if (reachAds) *reachAds = g_w[idx].set.burstReachAds;
+    return true;
+}
+bool WeaponBurstCover(int idx, float* tick, int* cap, float* fanDeg, int* clip, float* lead, float* direct, float* react, float* fx, float* margin,
+                      float* visFan) {
+    if (idx < 0 || idx >= g_modelCount || !g_w[idx].set.burst || !(g_w[idx].set.burstCover > 0.f)) return false;
+    *tick = g_w[idx].set.burstCover;
+    *cap = g_w[idx].set.burstCoverMax;
+    *fanDeg = g_w[idx].set.pelletFan;
+    if (clip) *clip = g_w[idx].set.burstCoverClip;
+    if (lead) *lead = g_w[idx].set.burstCoverLead;
+    if (direct) *direct = g_w[idx].set.burstCoverDirect;
+    if (react) *react = g_w[idx].set.burstCoverDirectReact;
+    if (fx) *fx = g_w[idx].set.burstCoverDirectFx;
+    if (margin) *margin = g_w[idx].set.burstCoverMargin;
+    if (visFan) *visFan = g_w[idx].set.flameFan;
+    return true;
+}
+bool WeaponBurstFocusDirect(int idx, float* dmg, float* react, float* fx) {
+    if (idx < 0 || idx >= g_modelCount || !g_w[idx].set.burst || !(g_w[idx].set.burstDirectAds > 0.f)) return false;
+    *dmg = g_w[idx].set.burstDirectAds;
+    if (react) *react = g_w[idx].set.burstCoverDirectReact;
+    if (fx) *fx = g_w[idx].set.burstCoverDirectFx;
+    return true;
+}
+float BurstDistance(float minDist, float range) {
+    if (!(range > minDist)) return range;
+    g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
+    const float u = static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
+    return std::sqrt(minDist * minDist + u * (range * range - minDist * minDist));
+}
+void BurstScatter(float radius, float* dx, float* dz) {
+    g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
+    const float u = static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
+    g_spreadRng = g_spreadRng * 1664525u + 1013904223u;
+    const float th = 6.2831853f * static_cast<float>((g_spreadRng >> 8) & 0xffffff) / 16777216.f;
+    const float r = radius > 0.f ? radius * std::sqrt(u) : 0.f;
+    *dx = r * std::cos(th);
+    *dz = r * std::sin(th);
 }
 bool CurveAdsState(float* frac, float* adsFovAlt) {
     LONG f = g_curveFracMicro;
