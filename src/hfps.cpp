@@ -7090,7 +7090,7 @@ void Apply(uintptr_t mgr) {
         }
     }
     float zoomNow = 1.f + (zoomMax - 1.f) * shieldZoom * zoomCurve;
-    float rad = cfg.sensitivity * kPi / 180.f / zoomNow;
+    float rad = cfg.sensitivity * vmgame::MouseSensScale() * kPi / 180.f / zoomNow;
     S.yaw += dx * rad;
     S.pitch += (cfg.invertY ? dy : -dy) * rad;
     const float lim = 85.f * kPi / 180.f;

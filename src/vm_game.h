@@ -61,6 +61,7 @@ void RefillAmmo(float frac);
 bool InfTacStamina();
 bool ShowSelMarkers();
 bool KbAzerty();
+float MouseSensScale();
 bool StartMagReload();
 void SelectWeapon(int n);
 void CycleWeapon(int dir);

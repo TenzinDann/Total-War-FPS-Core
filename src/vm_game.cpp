@@ -356,6 +356,28 @@ volatile LONG g_infAmmo = 0;
 volatile LONG g_infTac = 0;
 volatile LONG g_showSelMark = 0;
 volatile LONG g_kbAzerty = 0;
+volatile LONG g_mouseSensPct = 100;
+LONG ReadMouseSensPct(const wchar_t* armoryPath, char* raw, size_t rawSize) {
+    wchar_t path[MAX_PATH * 2];
+    wcsncpy(path, armoryPath, MAX_PATH * 2 - 1);
+    path[MAX_PATH * 2 - 1] = 0;
+    wchar_t* slash = wcsrchr(path, L'\\');
+    wcscpy(slash ? slash + 1 : path, L"tenzin_fps_mouse.txt");
+    raw[0] = 0;
+    if (FILE* f = _wfopen(path, L"r")) {
+        char line[64];
+        while (fgets(line, sizeof line, f)) {
+            size_t n = strlen(line);
+            while (n && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' ')) line[--n] = 0;
+            if (!strncmp(line, "sens=", 5)) snprintf(raw, rawSize, "%s", line + 5);
+        }
+        fclose(f);
+    }
+    double v = 0.0;
+    char tail = 0;
+    if (sscanf(raw, "%lf%c", &v, &tail) != 1 || !(v >= 10.0 && v <= 300.0)) return 100;
+    return static_cast<LONG>(std::floor(v + 0.5));
+}
 volatile LONG g_wpOn = 0;
 volatile LONG g_wDmgPct[kMaxModels] = {};
 volatile LONG g_wPenSet[kMaxModels] = {};
@@ -2423,6 +2445,12 @@ void RosterStep(ID3D11Device* dev) {
             g_log("keys: %s layout (MCT kb_azerty='%s')%s", az ? "AZERTY" : "QWERTY", kbAzerty,
                   az ? " - move Z/Q/S/D, gun shield A, Alt+) / Alt+= cast slots 11 / 12" : "");
     }
+    {
+        char sensRaw[32];
+        const LONG pct = ReadMouseSensPct(path, sensRaw, sizeof sensRaw);
+        if (InterlockedExchange(&g_mouseSensPct, pct) != pct || pct != 100)
+            g_log("mouse: sensitivity %ld%% (MCT sens='%s')", static_cast<long>(pct), sensRaw);
+    }
     RefreshFireRate();
     WIN32_FILE_ATTRIBUTE_DATA fa;
     if (GetFileAttributesExW(path, GetFileExInfoStandard, &fa) &&
@@ -3372,6 +3400,7 @@ bool Reloading() {
 bool InfTacStamina() { return g_infTac != 0; }
 bool ShowSelMarkers() { return g_showSelMark != 0; }
 bool KbAzerty() { return g_kbAzerty != 0; }
+float MouseSensScale() { return static_cast<float>(g_mouseSensPct) * 0.01f; }
 void AmmoInfo(int* ammo, int* size, bool* reloading, int* reserve) {
     LONG s = g_mag.size, a = g_mag.ammo, r = g_mag.reserve;
     *size = s > 0 ? static_cast<int>(s) : 0;
