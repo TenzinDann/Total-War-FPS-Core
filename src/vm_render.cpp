@@ -1460,6 +1460,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
                   {L"shield_block_ads", &s.shieldBlockAds, 0.f, 1.f, d.shieldBlockAds},
                   {L"shield_rest", &s.shieldRest, 0.f, 1.f, d.shieldRest}};
         GetPrivateProfileStringW(L"viewmodel", L"shield_model", s.shieldModel, s.shieldModel, 520, ini);
+        GetPrivateProfileStringW(L"viewmodel", L"gun_shield_model", s.gunShieldModel, s.gunShieldModel, 520, ini);
         for (F& f : fs) {
             *f.v = IniFloat(ini, f.key, *f.v);
             if (!(*f.v >= f.lo && *f.v <= f.hi)) *f.v = f.def;
