@@ -447,6 +447,8 @@ cbuffer CMat : register(b2) {
     float4 uEmStop;
     float4 uEmC1, uEmC2, uEmC3, uEmC4;
     float4 uIrA, uIrB;
+    float4 uGlow;
+    float4 uCnt0, uCnt1, uCnt2, uCnt3;
 };
 Texture2D tAlbedo : register(t0);
 Texture2D tNormal : register(t1);
@@ -455,6 +457,7 @@ Texture2D tScene : register(t3);
 Texture2D tEmMask : register(t4);
 Texture2D tEmTex : register(t5);
 Texture2D tEmDist : register(t6);
+Texture2D tCounter : register(t7);
 SamplerState sLinear : register(s0);
 struct VSIn {
     float3 pos : POSITION; float3 nrm : NORMAL; float4 tan : TANGENT; float2 uv : TEXCOORD0;
@@ -527,6 +530,16 @@ float Reticle(float2 d, float R) {
 float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
     float4 alb = tAlbedo.Sample(sLinear, i.uv);
     if (uMat3.y > 0.5 && alb.a < 0.5) discard;
+    float2 cntF = (i.uv - uCnt1.xy) / (abs(uCnt1.zw) > 1e-8 ? uCnt1.zw : 1);
+    float2 cntDx = ddx(cntF) * float2(0.1, 1), cntDy = ddy(cntF) * float2(0.1, 1);
+    if (uCnt0.x > 0.5 && cntF.x >= 0 && cntF.x < uCnt0.x && cntF.y >= 0 && cntF.y < 1) {
+        int cj = (int)cntF.x;
+        float cd = cj == 0 ? uCnt2.x : cj == 1 ? uCnt2.y : cj == 2 ? uCnt2.z : uCnt2.w;
+        if (cd >= 0) {
+            float cov = tCounter.SampleGrad(sLinear, float2((cd + frac(cntF.x)) * 0.1, cntF.y), cntDx, cntDy).r;
+            alb.rgb = lerp(alb.rgb, uCnt3.rgb, saturate(cov));
+        }
+    }
     float3 N = normalize(i.n);
     float3 V = normalize(-i.vpos);
     if (dot(N, V) < 0) N = -N;
@@ -588,6 +601,7 @@ float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
             else g = uEmC4.rgb;
             e = g * uEm0.y * uEm1.rgb;
         }
+        if (uMat3.y > 0.5) e *= alb.a;
         float d = max(max(max(e.r, e.g), e.b), 1);
         float el = dot(e, float3(0.2126, 0.7152, 0.0722));
         alb.rgb = 1 - (1 - alb.rgb) * (1 - e / d);
@@ -622,7 +636,7 @@ float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
     float3 spec = D * G * F / (4 * NdL * NdV + 1e-4);
     float3 diff = (1 - F) * (1 - metal) * alb.rgb / 3.14159265;
     float3 direct = (diff + spec) * lightCol * NdL;
-    if (uFlashCol.w > 0) {
+    if (uFlashCol.w > 0 && uEm0.x < 0.5) {
         float3 Lp = uFlashPos.xyz - i.vpos;
         float dist = length(Lp);
         float3 Lf = Lp / max(dist, 1e-4);
@@ -660,6 +674,54 @@ float4 PS(PSIn i, bool front : SV_IsFrontFace) : SV_Target {
         c = lerp(c, sc, saturate(uLens1.z));
     }
     return float4(c, 1);
+}
+float4 PS_GlowSrc(PSIn i) : SV_Target {
+    float4 alb = tAlbedo.Sample(sLinear, i.uv);
+    if (uMat3.y > 0.5 && alb.a < 0.5) discard;
+    float3 N = normalize(i.n);
+    float3 V = normalize(-i.vpos);
+    float fr = 1 - saturate(abs(dot(N, V)));
+    fr *= fr;
+    float maskA = tEmMask.Sample(sLinear, i.uv).a;
+    float2 dn = tEmDist.Sample(sLinear, i.uv).rb;
+    float2 euv = (i.uv + dn * uEm0.w + uEm2.xy) * uEm2.zw;
+    float et = tEmTex.Sample(sLinear, euv).r;
+    float3 e;
+    if (uEm0.x > 1.5) {
+        e = uEm1.rgb * ((uEm0.y * et + uEm1.w + uEm0.z * fr) * maskA);
+    } else {
+        float v = (et + uEm1.w + uEm0.z * fr) * maskA;
+        float3 g;
+        if (v <= uEmStop.x) g = uEmC1.rgb;
+        else if (v <= uEmStop.y) g = lerp(uEmC1.rgb, uEmC2.rgb, (v - uEmStop.x) / (uEmStop.y - uEmStop.x + 0.001));
+        else if (v <= uEmStop.z) g = lerp(uEmC2.rgb, uEmC3.rgb, (v - uEmStop.y) / (uEmStop.z - uEmStop.y + 0.001));
+        else if (v <= uEmStop.w) g = lerp(uEmC3.rgb, uEmC4.rgb, (v - uEmStop.z) / (uEmStop.w - uEmStop.z + 0.001));
+        else g = uEmC4.rgb;
+        e = g * uEm0.y * uEm1.rgb;
+    }
+    if (uMat3.y > 0.5) e *= alb.a;
+    return float4(max(e, 0), 1);
+}
+struct FsOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+FsOut VS_Full(uint id : SV_VertexID) {
+    FsOut o;
+    float2 p = float2((id << 1) & 2, id & 2);
+    o.uv = p;
+    o.pos = float4(p * float2(2, -2) + float2(-1, 1), 0, 1);
+    return o;
+}
+float4 PS_Blur(FsOut i) : SV_Target {
+    const float w[5] = {0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216};
+    float3 c = tScene.Sample(sLinear, i.uv).rgb * w[0];
+    [unroll] for (int k = 1; k < 5; ++k)
+        c += (tScene.Sample(sLinear, i.uv + uGlow.xy * k).rgb + tScene.Sample(sLinear, i.uv - uGlow.xy * k).rgb) * w[k];
+    return float4(c, 1);
+}
+float4 PS_Comp(FsOut i) : SV_Target {
+    float inside = tEmMask.Sample(sLinear, i.uv).a;
+    float3 c = tScene.Sample(sLinear, i.uv).rgb * uGlow.z * uParams.x * lerp(1, uGlow.w, inside);
+    if (uParams.y > 0.5) c = SrgbEncode(c);
+    return float4(c, 0);
 }
 )HLSL";
 typedef HRESULT(WINAPI* FnD3DCompile)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*, LPCSTR, LPCSTR,
@@ -726,7 +788,7 @@ struct StateBackup {
     UINT sampleMask = 0;
     UINT stencilRef = 0;
     ID3D11DepthStencilState* dss = nullptr;
-    ID3D11ShaderResourceView* psSrv[7] = {};
+    ID3D11ShaderResourceView* psSrv[8] = {};
     ID3D11SamplerState* psSampler = nullptr;
     ID3D11PixelShader* ps = nullptr;
     ID3D11VertexShader* vs = nullptr;
@@ -751,7 +813,7 @@ struct StateBackup {
         c->OMGetBlendState(&bs, blendFactor, &sampleMask);
         c->OMGetDepthStencilState(&dss, &stencilRef);
         c->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, &dsv);
-        c->PSGetShaderResources(0, 7, psSrv);
+        c->PSGetShaderResources(0, 8, psSrv);
         c->PSGetSamplers(0, 1, &psSampler);
         psInstCount = vsInstCount = gsInstCount = hsInstCount = dsInstCount = 256;
         c->PSGetShader(&ps, psInst, &psInstCount);
@@ -778,7 +840,7 @@ struct StateBackup {
         c->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, dsv);
         for (auto*& r : rtv) SafeRelease(r);
         SafeRelease(dsv);
-        c->PSSetShaderResources(0, 7, psSrv);
+        c->PSSetShaderResources(0, 8, psSrv);
         for (auto*& s : psSrv) SafeRelease(s);
         c->PSSetSamplers(0, 1, &psSampler);
         SafeRelease(psSampler);
@@ -892,6 +954,17 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (GetFileAttributesW(ini) == INVALID_FILE_ATTRIBUTES) return false;
     s.fovDeg = IniFloat(ini, L"fov", s.fovDeg);
     IniVec3(ini, L"offset", s.offset);
+    GetPrivateProfileStringW(L"viewmodel", L"counter_part", s.counterPart, s.counterPart, 64, ini);
+    GetPrivateProfileStringW(L"viewmodel", L"counter_glyphs", s.counterGlyphs, s.counterGlyphs, 260, ini);
+    {
+        float r[4];
+        if (IniFloatList(ini, L"counter_rect", r, 4) == 4) memcpy(s.counterRect, r, sizeof r);
+    }
+    IniVec3(ini, L"counter_colour", s.counterColour);
+    s.counterDigits = static_cast<int>(IniFloat(ini, L"counter_digits", static_cast<float>(s.counterDigits)));
+    if (s.counterDigits < 1) s.counterDigits = 1;
+    if (s.counterDigits > 4) s.counterDigits = 4;
+    s.counterLeadZero = IniFloat(ini, L"counter_lead_zero", s.counterLeadZero ? 1.f : 0.f) > 0.5f;
     IniVec3(ini, L"rotation", s.rotDeg);
     IniVec3(ini, L"tilt", s.tiltDeg);
     s.scale = IniFloat(ini, L"scale", s.scale);
@@ -989,6 +1062,24 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.meleeStrikeLead = IniFloat(ini, L"melee_strike_lead", s.meleeStrikeLead);
     if (!(s.meleeStrikeLead >= 0.f && s.meleeStrikeLead <= 0.6f)) s.meleeStrikeLead = 0.25f;
     {
+        static const wchar_t* const kKind[5] = {L"stab", L"sweep", L"heavy_sweep", L"heavy", L"bash"};
+        static const wchar_t* const kFld[7] = {L"reach", L"arc", L"damage", L"max", L"splash_radius", L"splash_damage", L"splash_max"};
+        static const float kLo[7] = {0.3f, 1.f, 0.f, 0.f, 0.f, 0.f, 0.f}, kHi[7] = {12.f, 360.f, 20.f, 16.f, 6.f, 5.f, 32.f};
+        static const wchar_t* const kCat[5] = {L"melee_damage_scale", L"melee_fallback_damage", L"melee_always_hit", L"melee_block", L"melee_block_angle"};
+        static const float kCatHi[5] = {20.f, 5000.f, 1.f, 1.f, 180.f};
+        wchar_t key[64];
+        for (int k = 0; k < 5; ++k)
+            for (int f = 0; f < 7; ++f) {
+                swprintf(key, 64, L"melee_%ls_%ls", kKind[k], kFld[f]);
+                float v = IniFloat(ini, key, -1.f);
+                if (v >= kLo[f] && v <= kHi[f]) s.meleeOwn[k * 7 + f] = v;
+            }
+        for (int c = 0; c < 5; ++c) {
+            float v = IniFloat(ini, kCat[c], -1.f);
+            if (v >= 0.f && v <= kCatHi[c]) s.meleeOwn[35 + c] = v;
+        }
+    }
+    {
         wchar_t buf[128];
         GetPrivateProfileStringW(L"viewmodel", L"wh3_shader", L"\x01", buf, 128, ini);
         if (buf[0] != 1) {
@@ -1039,6 +1130,16 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
         s.emissiveScale = IniFloat(ini, L"emissive_scale", s.emissiveScale);
         if (!(s.emissiveScale >= 0.f && s.emissiveScale <= 100.f)) s.emissiveScale = 1.f;
         s.emissiveSoft = IniFloat(ini, L"emissive_soft", s.emissiveSoft ? 1.f : 0.f) != 0.f;
+        s.emissiveGlow = IniFloat(ini, L"emissive_glow", s.emissiveGlow);
+        if (!(s.emissiveGlow >= 0.f && s.emissiveGlow <= 20.f)) s.emissiveGlow = 0.f;
+        s.emissiveGlowRadius = IniFloat(ini, L"emissive_glow_radius", s.emissiveGlowRadius);
+        if (!(s.emissiveGlowRadius >= 2.f && s.emissiveGlowRadius <= 200.f)) s.emissiveGlowRadius = 30.f;
+        s.emissiveGlowInner = IniFloat(ini, L"emissive_glow_inner", s.emissiveGlowInner);
+        if (!(s.emissiveGlowInner >= 0.f && s.emissiveGlowInner <= 1.f)) s.emissiveGlowInner = 0.3f;
+        s.emissiveLight = IniFloat(ini, L"emissive_light", s.emissiveLight);
+        if (!(s.emissiveLight >= 0.f && s.emissiveLight <= 20.f)) s.emissiveLight = 0.f;
+        s.emissiveLightRadius = IniFloat(ini, L"emissive_light_radius", s.emissiveLightRadius);
+        if (!(s.emissiveLightRadius > 0.01f && s.emissiveLightRadius <= 5.f)) s.emissiveLightRadius = 0.6f;
     }
     for (int i = 0; i < kMeleeSfx; ++i) {
         wchar_t key[64];
@@ -1059,52 +1160,17 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (!(s.meleeSfxSwingPre <= 1.f)) s.meleeSfxSwingPre = -1.f;
     s.fireRpm = IniFloat(ini, L"fire_rpm", s.fireRpm);
     s.magSize = static_cast<int>(IniFloat(ini, L"mag_size", static_cast<float>(s.magSize)));
+    s.ammoPerShot = static_cast<int>(IniFloat(ini, L"ammo_per_shot", static_cast<float>(s.ammoPerShot)));
+    if (s.ammoPerShot < 1 || s.ammoPerShot > 100) s.ammoPerShot = 1;
     s.magDisposable = IniFloat(ini, L"mag_disposable", s.magDisposable ? 1.f : 0.f) != 0.f;
     s.ammoTotal = static_cast<int>(IniFloat(ini, L"ammo_total", static_cast<float>(s.ammoTotal)));
     s.ammoUpgrade = static_cast<int>(IniFloat(ini, L"ammo_upgrade", static_cast<float>(s.ammoUpgrade)));
     if (s.ammoUpgrade < 0 || s.ammoUpgrade > 10000) s.ammoUpgrade = 0;
     s.reloadRefill = IniFloat(ini, L"reload_refill", s.reloadRefill);
     s.reloadEmptyRefill = IniFloat(ini, L"reload_empty_refill", s.reloadEmptyRefill);
-    {
-        wchar_t buf[256];
-        GetPrivateProfileStringW(L"viewmodel", L"reload_shell_clips", L"", buf, 256, ini);
-        for (auto& c : s.reloadShellClips) c[0] = 0;
-        int k = 0;
-        wchar_t* p = buf;
-        while (k < 6 && *p) {
-            wchar_t* q = wcschr(p, L',');
-            if (q) *q = 0;
-            wchar_t* b = p;
-            while (*b == L' ') ++b;
-            wchar_t* e = b + wcslen(b);
-            while (e > b && e[-1] == L' ') *--e = 0;
-            if (WideCharToMultiByte(CP_UTF8, 0, b, -1, s.reloadShellClips[k], sizeof s.reloadShellClips[k], nullptr, nullptr) <= 0)
-                s.reloadShellClips[k][0] = 0;
-            ++k;
-            if (!q) break;
-            p = q + 1;
-        }
-        if (k < 4)
-            for (auto& c : s.reloadShellClips) c[0] = 0;
-        GetPrivateProfileStringW(L"viewmodel", L"reload_shell_clips2", L"", buf, 256, ini);
-        for (auto& c : s.reloadShellClips2) c[0] = 0;
-        k = 0;
-        p = buf;
-        while (k < 3 && *p) {
-            wchar_t* q = wcschr(p, L',');
-            if (q) *q = 0;
-            wchar_t* b = p;
-            while (*b == L' ') ++b;
-            wchar_t* e = b + wcslen(b);
-            while (e > b && e[-1] == L' ') *--e = 0;
-            if (WideCharToMultiByte(CP_UTF8, 0, b, -1, s.reloadShellClips2[k], sizeof s.reloadShellClips2[k], nullptr, nullptr) <= 0)
-                s.reloadShellClips2[k][0] = 0;
-            ++k;
-            if (!q) break;
-            p = q + 1;
-        }
-    }
     GetPrivateProfileStringW(L"viewmodel", L"weapon_id", s.weaponId, s.weaponId, 64, ini);
+    GetPrivateProfileStringW(L"viewmodel", L"weapon_owner", s.weaponOwner, s.weaponOwner, 160, ini);
+    GetPrivateProfileStringW(L"viewmodel", L"weapon_guest", s.weaponGuest, s.weaponGuest, 160, ini);
     GetPrivateProfileStringW(L"viewmodel", L"anim_sounds", s.animSounds, s.animSounds, 128, ini);
     s.animSoundVolume = IniFloat(ini, L"anim_sound_volume", s.animSoundVolume);
     GetPrivateProfileStringW(L"viewmodel", L"step_foot", s.stepFoot, s.stepFoot, 512, ini);
@@ -1147,8 +1213,6 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     GetPrivateProfileStringW(L"viewmodel", L"spin_loop_sound", s.spinLoopSound, s.spinLoopSound, 512, ini);
     GetPrivateProfileStringW(L"viewmodel", L"spin_down_sound", s.spinDownSound, s.spinDownSound, 512, ini);
     s.spinVolume = IniFloat(ini, L"spin_volume", s.spinVolume);
-    s.spinLoopStart = IniFloat(ini, L"spin_loop_start", s.spinLoopStart);
-    if (!(s.spinLoopStart >= 0.f && s.spinLoopStart <= 30.f)) s.spinLoopStart = 0.f;
     s.spinBarrels = IniFloat(ini, L"spin_barrels", s.spinBarrels);
     if (!(s.spinBarrels >= 1.f && s.spinBarrels <= 24.f)) s.spinBarrels = 6.f;
     s.spinDownTime = IniFloat(ini, L"spin_down_time", s.spinDownTime);
@@ -1193,51 +1257,6 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     }
     s.fireRange = IniFloat(ini, L"fire_range", s.fireRange);
     if (!(s.fireRange == 0.f || (s.fireRange >= 5.f && s.fireRange <= 2000.f))) s.fireRange = 0.f;
-    {
-        wchar_t pw[64] = L"";
-        GetPrivateProfileStringW(L"viewmodel", L"projectile_ads", L"", pw, 64, ini);
-        if (pw[0] && WideCharToMultiByte(CP_UTF8, 0, pw, -1, s.projectileAds, sizeof s.projectileAds, nullptr, nullptr) <= 0) s.projectileAds[0] = 0;
-    }
-    s.fireRangeAds = IniFloat(ini, L"fire_range_ads", s.fireRangeAds);
-    if (!(s.fireRangeAds == 0.f || (s.fireRangeAds >= 5.f && s.fireRangeAds <= 2000.f))) s.fireRangeAds = 0.f;
-    s.pellets = static_cast<int>(IniFloat(ini, L"pellets", static_cast<float>(s.pellets)) + 0.5f);
-    s.pelletsAds = static_cast<int>(IniFloat(ini, L"pellets_ads", static_cast<float>(s.pelletsAds)) + 0.5f);
-    if (s.pellets < 1 || s.pellets > 16) s.pellets = 1;
-    if (s.pelletsAds < 1 || s.pelletsAds > 16) s.pelletsAds = 1;
-    s.pelletFan = IniFloat(ini, L"pellet_fan", s.pelletFan);
-    s.pelletFanAds = IniFloat(ini, L"pellet_fan_ads", s.pelletFanAds);
-    if (!(s.pelletFan >= 0.f && s.pelletFan <= 60.f)) s.pelletFan = 0.f;
-    if (!(s.pelletFanAds >= 0.f && s.pelletFanAds <= 60.f)) s.pelletFanAds = 0.f;
-    s.pelletSpread = IniFloat(ini, L"pellet_spread", s.pelletSpread);
-    s.pelletSpreadAds = IniFloat(ini, L"pellet_spread_ads", s.pelletSpread);
-    if (!(s.pelletSpread >= 0.f && s.pelletSpread <= 30.f)) s.pelletSpread = 0.f;
-    if (!(s.pelletSpreadAds >= 0.f && s.pelletSpreadAds <= 30.f)) s.pelletSpreadAds = s.pelletSpread;
-    s.burst = IniFloat(ini, L"burst", static_cast<float>(s.burst)) != 0.f ? 1 : 0;
-    s.burstMin = IniFloat(ini, L"burst_min", s.burstMin);
-    if (!(s.burstMin >= 0.5f && s.burstMin <= 20.f)) s.burstMin = 2.f;
-    s.burstScatterAds = IniFloat(ini, L"burst_scatter_ads", s.burstScatterAds);
-    if (!(s.burstScatterAds >= 0.f && s.burstScatterAds <= 10.f)) s.burstScatterAds = 0.f;
-    s.burstPierceAds = static_cast<int>(IniFloat(ini, L"burst_pierce_ads", static_cast<float>(s.burstPierceAds)) + 0.5f);
-    if (s.burstPierceAds < 0 || s.burstPierceAds > 64) s.burstPierceAds = 0;
-    s.burstReachAds = IniFloat(ini, L"burst_reach_ads", s.burstReachAds);
-    if (!(s.burstReachAds >= 0.55f && s.burstReachAds <= 5.f)) s.burstReachAds = 0.55f;
-    s.burstCover = IniFloat(ini, L"burst_cover", s.burstCover);
-    if (!(s.burstCover == 0.f || (s.burstCover >= 0.05f && s.burstCover <= 2.f))) s.burstCover = 0.f;
-    s.burstCoverMax = static_cast<int>(IniFloat(ini, L"burst_cover_max", static_cast<float>(s.burstCoverMax)) + 0.5f);
-    if (s.burstCoverMax < 1 || s.burstCoverMax > 128) s.burstCoverMax = 64;
-    s.burstCoverClip = IniFloat(ini, L"burst_cover_clip", static_cast<float>(s.burstCoverClip)) != 0.f ? 1 : 0;
-    s.burstCoverLead = IniFloat(ini, L"burst_cover_lead", s.burstCoverLead);
-    if (!(s.burstCoverLead >= -0.5f && s.burstCoverLead <= 1.f)) s.burstCoverLead = 0.f;
-    s.burstCoverDirect = IniFloat(ini, L"burst_cover_direct", s.burstCoverDirect);
-    if (!(s.burstCoverDirect >= 0.f && s.burstCoverDirect <= 1000.f)) s.burstCoverDirect = 0.f;
-    s.burstCoverDirectReact = IniFloat(ini, L"burst_cover_direct_react", s.burstCoverDirectReact);
-    if (!(s.burstCoverDirectReact >= 0.f && s.burstCoverDirectReact <= 5.f)) s.burstCoverDirectReact = 0.f;
-    s.burstCoverDirectFx = IniFloat(ini, L"burst_cover_direct_fx", s.burstCoverDirectFx);
-    if (!(s.burstCoverDirectFx >= 0.f && s.burstCoverDirectFx <= 5.f)) s.burstCoverDirectFx = 0.f;
-    s.burstCoverMargin = IniFloat(ini, L"burst_cover_margin", s.burstCoverMargin);
-    if (!(s.burstCoverMargin >= 0.5f && s.burstCoverMargin <= 5.f)) s.burstCoverMargin = 1.f;
-    s.burstDirectAds = IniFloat(ini, L"burst_direct_ads", s.burstDirectAds);
-    if (!(s.burstDirectAds >= 0.f && s.burstDirectAds <= 1000.f)) s.burstDirectAds = 0.f;
     if (!(s.fireLfeVolume >= 0.f && s.fireLfeVolume <= 2.f)) s.fireLfeVolume = 0.7f;
     if (!(s.fireAtmoVolume >= 0.f && s.fireAtmoVolume <= 2.f)) s.fireAtmoVolume = 0.7f;
     if (!(s.fireTailVolume >= 0.f && s.fireTailVolume <= 2.f)) s.fireTailVolume = 0.7f;
@@ -1255,89 +1274,10 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.flashLight = IniFloat(ini, L"flash_light", s.flashLight);
     s.flashSmoke = IniFloat(ini, L"flash_smoke", s.flashSmoke ? 1.f : 0.f) != 0.f;
     s.flashFlame = IniFloat(ini, L"flash_flame", s.flashFlame ? 1.f : 0.f) != 0.f;
-    GetPrivateProfileStringW(L"viewmodel", L"flame_fx", s.flameFx, s.flameFx, 128, ini);
-    s.flameAim = IniFloat(ini, L"flame_aim", s.flameAim);
-    s.flameGap = IniFloat(ini, L"flame_gap", s.flameGap);
-    if (!(s.flameAim >= 2.f && s.flameAim <= 500.f)) s.flameAim = 30.f;
-    if (!(s.flameGap >= 0.02f && s.flameGap <= 1.f)) s.flameGap = 0.09f;
-    s.flameFan = IniFloat(ini, L"flame_fan", s.flameFan);
-    s.flameFanAds = IniFloat(ini, L"flame_fan_ads", s.flameFanAds);
-    s.flameAimAds = IniFloat(ini, L"flame_aim_ads", s.flameAimAds);
-    if (!(s.flameFan >= 0.f && s.flameFan <= 80.f)) s.flameFan = 0.f;
-    if (!(s.flameFanAds >= 0.f && s.flameFanAds <= 80.f)) s.flameFanAds = 0.f;
-    if (!(s.flameAimAds == 0.f || (s.flameAimAds >= 2.f && s.flameAimAds <= 500.f))) s.flameAimAds = 0.f;
-    for (int li = 0; li < 4; ++li) {
-        Settings::FlameLayer& L = s.flame[li];
-        wchar_t k[48];
-        auto key = [&](const wchar_t* n) {
-            swprintf(k, 48, L"flame%d_%ls", li + 1, n);
-            return k;
-        };
-        GetPrivateProfileStringW(L"viewmodel", key(L"tex"), L.tex, L.tex, 64, ini);
-        float c2[2] = {static_cast<float>(L.cx), static_cast<float>(L.cy)};
-        IniVec2(ini, key(L"cells"), c2);
-        L.cx = std::max(1, std::min(32, static_cast<int>(c2[0] + 0.5f)));
-        L.cy = std::max(1, std::min(32, static_cast<int>(c2[1] + 0.5f)));
-        L.fps = IniFloat(ini, key(L"fps"), L.fps);
-        L.randFrame = IniFloat(ini, key(L"rand_frame"), L.randFrame ? 1.f : 0.f) != 0.f;
-        L.rate = IniFloat(ini, key(L"rate"), L.rate);
-        IniVec2(ini, key(L"speed"), L.speed);
-        IniVec2(ini, key(L"life"), L.life);
-        IniVec2(ini, key(L"size"), L.size);
-        L.sizeEase = IniFloat(ini, key(L"size_ease"), L.sizeEase);
-        L.gravity = IniFloat(ini, key(L"gravity"), L.gravity);
-        L.drag = IniFloat(ini, key(L"drag"), L.drag);
-        L.spread = IniFloat(ini, key(L"spread"), L.spread);
-        L.jitter = IniFloat(ini, key(L"jitter"), L.jitter);
-        IniVec3(ini, key(L"color"), L.col0);
-        memcpy(L.col1, L.col0, sizeof L.col1);
-        IniVec3(ini, key(L"color_end"), L.col1);
-        L.alpha = IniFloat(ini, key(L"alpha"), L.alpha);
-        IniVec2(ini, key(L"fade"), L.fade);
-        L.bright = IniFloat(ini, key(L"bright"), L.bright);
-        L.stretch = IniFloat(ini, key(L"stretch"), L.stretch);
-        L.spin = IniFloat(ini, key(L"spin"), L.spin);
-        L.additive = IniFloat(ini, key(L"additive"), L.additive ? 1.f : 0.f) != 0.f;
-        if (!(L.rate >= 0.f && L.rate <= 3000.f)) L.rate = 0.f;
-        for (int j = 0; j < 2; ++j) {
-            if (!(L.life[j] >= 0.02f && L.life[j] <= 20.f)) L.life[j] = 1.f;
-            if (!(L.speed[j] >= 0.f && L.speed[j] <= 300.f)) L.speed[j] = 20.f;
-            if (!(L.size[j] >= 0.f && L.size[j] <= 50.f)) L.size[j] = 0.5f;
-            L.fade[j] = std::min(std::max(L.fade[j], 0.f), 1.f);
-        }
-        if (!(L.fps >= 0.f && L.fps <= 500.f)) L.fps = 0.f;
-        if (!(L.sizeEase >= 0.f && L.sizeEase <= 20.f)) L.sizeEase = 2.f;
-        if (!(L.spread >= 0.f && L.spread <= 90.f)) L.spread = 2.f;
-        IniVec2(ini, key(L"speed_ads"), L.speedAds);
-        IniVec2(ini, key(L"life_ads"), L.lifeAds);
-        IniVec2(ini, key(L"size_ads"), L.sizeAds);
-        L.rateAds = IniFloat(ini, key(L"rate_ads"), L.rateAds);
-        L.spreadAds = IniFloat(ini, key(L"spread_ads"), L.spreadAds);
-        L.dragAds = IniFloat(ini, key(L"drag_ads"), L.dragAds);
-        IniVec2(ini, key(L"fade_ads"), L.fadeAds);
-        L.alphaAds = IniFloat(ini, key(L"alpha_ads"), L.alphaAds);
-        L.brightAds = IniFloat(ini, key(L"bright_ads"), L.brightAds);
-        L.stretchAds = IniFloat(ini, key(L"stretch_ads"), L.stretchAds);
-        if (!(L.stretchAds >= 0.f && L.stretchAds <= 1.f)) L.stretchAds = -1.f;
-        for (int j = 0; j < 2; ++j) {
-            if (!(L.speedAds[j] >= 0.f && L.speedAds[j] <= 300.f)) L.speedAds[j] = -1.f;
-            if (!(L.lifeAds[j] >= 0.02f && L.lifeAds[j] <= 20.f)) L.lifeAds[j] = -1.f;
-            if (!(L.sizeAds[j] >= 0.f && L.sizeAds[j] <= 50.f)) L.sizeAds[j] = -1.f;
-            if (!(L.fadeAds[j] >= 0.f && L.fadeAds[j] <= 1.f)) L.fadeAds[j] = -1.f;
-        }
-        if (!(L.rateAds >= 0.f && L.rateAds <= 3000.f)) L.rateAds = -1.f;
-        if (!(L.spreadAds >= 0.f && L.spreadAds <= 90.f)) L.spreadAds = -1.f;
-        if (!(L.dragAds >= 0.f && L.dragAds <= 50.f)) L.dragAds = -1.f;
-        if (!(L.alphaAds >= 0.f && L.alphaAds <= 4.f)) L.alphaAds = -1.f;
-        if (!(L.brightAds >= 0.f && L.brightAds <= 20.f)) L.brightAds = -1.f;
-    }
     s.hitFx = IniFloat(ini, L"hit_fx", s.hitFx ? 1.f : 0.f) != 0.f;
     s.hitFxScale = IniFloat(ini, L"hit_fx_scale", s.hitFxScale);
     s.hitFxAlpha = IniFloat(ini, L"hit_fx_alpha", s.hitFxAlpha);
     IniVec3(ini, L"hit_fx_color", s.hitFxColor);
-    IniVec3(ini, L"tracer_tint", s.tracerTint);
-    for (float& c : s.tracerTint)
-        if (!(c >= 0.f && c <= 8.f)) c = 1.f;
     s.flashGas =IniFloat(ini, L"flash_gas", s.flashGas ? 1.f : 0.f) != 0.f;
     GetPrivateProfileStringW(L"viewmodel", L"flash_gas_fx", s.flashGasFx, s.flashGasFx, 128, ini);
     s.flashGasScale = IniFloat(ini, L"flash_gas_scale", s.flashGasScale);
@@ -1351,27 +1291,11 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.flashGasLinger = IniFloat(ini, L"flash_gas_linger", s.flashGasLinger);
     if (!(s.flashGasLinger >= 0.f && s.flashGasLinger <= 5.f)) s.flashGasLinger = 1.f;
     s.flashGasStyle = static_cast<int>(IniFloat(ini, L"flash_gas_style", static_cast<float>(s.flashGasStyle)));
-    if (s.flashGasStyle < 0 || s.flashGasStyle > 7) s.flashGasStyle = 1;
+    if (s.flashGasStyle < 0 || s.flashGasStyle > 1) s.flashGasStyle = 1;
     s.flashGasSidePuff = IniFloat(ini, L"flash_gas_side_puff", s.flashGasSidePuff);
     if (!(s.flashGasSidePuff >= 0.f && s.flashGasSidePuff <= 5.f)) s.flashGasSidePuff = 1.f;
     s.flashGasAds = IniFloat(ini, L"flash_gas_ads", s.flashGasAds);
     if (!(s.flashGasAds >= 0.f && s.flashGasAds <= 1.f)) s.flashGasAds = 1.f;
-    s.dof = IniFloat(ini, L"dof", s.dof ? 1.f : 0.f) != 0.f;
-    s.dofBlur = IniFloat(ini, L"dof_blur", s.dofBlur);
-    if (!(s.dofBlur >= 0.f && s.dofBlur <= 10.f)) s.dofBlur = 1.25f;
-    s.dofFocus = IniFloat(ini, L"dof_focus", s.dofFocus);
-    if (!(s.dofFocus >= 0.05f && s.dofFocus <= 5.f)) s.dofFocus = 0.8f;
-    s.dofRamp = IniFloat(ini, L"dof_ramp", s.dofRamp);
-    if (!(s.dofRamp >= 0.01f && s.dofRamp <= 5.f)) s.dofRamp = 0.55f;
-    s.dofRate = IniFloat(ini, L"dof_rate", s.dofRate);
-    if (!(s.dofRate >= 0.1f && s.dofRate <= 200.f)) s.dofRate = 30.f;
-    s.dofHold = IniFloat(ini, L"dof_hold", s.dofHold);
-    if (!(s.dofHold >= 0.f && s.dofHold <= 5.f)) s.dofHold = 0.3f;
-    s.dofPx = IniFloat(ini, L"dof_px", s.dofPx);
-    if (!(s.dofPx >= 0.f && s.dofPx <= 64.f)) s.dofPx = 8.f;
-    s.dofAds = IniFloat(ini, L"dof_ads", s.dofAds);
-    if (!(s.dofAds >= 0.f && s.dofAds <= 1.f)) s.dofAds = 0.f;
-    s.dofDebug = static_cast<int>(IniFloat(ini, L"dof_debug", static_cast<float>(s.dofDebug)));
     s.shellEject = IniFloat(ini, L"shell_eject", s.shellEject ? 1.f : 0.f) != 0.f;
     s.shellEjectAnim = IniFloat(ini, L"shell_eject_anim", s.shellEjectAnim ? 1.f : 0.f) != 0.f;
     s.shellScale = IniFloat(ini, L"shell_scale", s.shellScale);
@@ -1387,7 +1311,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.shellFollow = static_cast<int>(IniFloat(ini, L"shell_follow", static_cast<float>(s.shellFollow)));
     if (s.shellFollow < 0 || s.shellFollow > 1) s.shellFollow = 1;
     s.shellCaliber = static_cast<int>(IniFloat(ini, L"shell_caliber", static_cast<float>(s.shellCaliber)));
-    if (s.shellCaliber != 556 && s.shellCaliber != 762 && s.shellCaliber != 12) s.shellCaliber = 556;
+    if (s.shellCaliber != 556 && s.shellCaliber != 762) s.shellCaliber = 556;
     IniVec2(ini, L"shell_out", s.shellOut);
     IniVec2(ini, L"shell_fwd", s.shellFwd);
     IniVec2(ini, L"shell_up", s.shellUp);
@@ -1460,7 +1384,6 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
                   {L"shield_block_ads", &s.shieldBlockAds, 0.f, 1.f, d.shieldBlockAds},
                   {L"shield_rest", &s.shieldRest, 0.f, 1.f, d.shieldRest}};
         GetPrivateProfileStringW(L"viewmodel", L"shield_model", s.shieldModel, s.shieldModel, 520, ini);
-        GetPrivateProfileStringW(L"viewmodel", L"gun_shield_model", s.gunShieldModel, s.gunShieldModel, 520, ini);
         for (F& f : fs) {
             *f.v = IniFloat(ini, f.key, *f.v);
             if (!(*f.v >= f.lo && *f.v <= f.hi)) *f.v = f.def;
@@ -1542,7 +1465,7 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
     size_t len = 0;
     if (!TakePrefetched(path, true, &data, &len) && !ReadHvmV1(path, &data, &len, err, errLen)) return false;
     {
-        char note[300];
+        char note[200];
         if (ApplyArmsOverride(&data, &len, note, sizeof note) || note[0]) ArmsLogAppend(path, note);
     }
     bool ok = false;
@@ -1697,6 +1620,24 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
         }
         off += static_cast<size_t>(h.indexCount) * 4;
         indexCount_ = h.indexCount;
+        for (uint32_t s = 0; s < h.submeshCount; ++s) {
+            double acc[3] = {0, 0, 0};
+            unsigned cnt = 0, votes[256] = {};
+            for (uint32_t k = subs_[s].firstIndex; k + 2 < subs_[s].firstIndex + subs_[s].indexCount; k += 3) {
+                const unsigned char* vp = verts + static_cast<size_t>(idx[k]) * kVertexStride;
+                float p[3];
+                memcpy(p, vp, sizeof p);
+                for (int a = 0; a < 3; ++a) acc[a] += p[a];
+                ++votes[vp[48]];
+                ++cnt;
+            }
+            if (!cnt) continue;
+            for (int a = 0; a < 3; ++a) subs_[s].ctr[a] = static_cast<float>(acc[a] / cnt);
+            unsigned best = 0;
+            for (unsigned b = 1; b < 256; ++b)
+                if (votes[b] > votes[best]) best = b;
+            subs_[s].ctrBone = best < h.boneCount ? static_cast<int>(best) : -1;
+        }
         if (h.clipCount) {
             size_t totalFloats = 0;
             size_t scan = off;
@@ -1816,7 +1757,7 @@ bool Renderer::CreatePipeline(char* err, size_t errLen) {
     ok = SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbFrame_));
     bd.ByteWidth = kMaxBones * 3 * 16;
     ok = ok && SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbBones_));
-    bd.ByteWidth = 48 + 11 * 16;
+    bd.ByteWidth = 48 + 12 * 16 + 4 * 16;
     ok = ok && SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &cbMat_));
     D3D11_RASTERIZER_DESC rd = {};
     rd.FillMode = D3D11_FILL_SOLID;
@@ -1833,6 +1774,41 @@ bool Renderer::CreatePipeline(char* err, size_t errLen) {
     bld.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN |
                                                 D3D11_COLOR_WRITE_ENABLE_BLUE;
     ok = ok && SUCCEEDED(dev_->CreateBlendState(&bld, &bs_));
+    {
+        static const char* const kEntry[4][2] = {{"PS_GlowSrc", "ps_5_0"}, {"VS_Full", "vs_5_0"}, {"PS_Blur", "ps_5_0"}, {"PS_Comp", "ps_5_0"}};
+        for (int k = 0; k < 4; ++k) {
+            ID3DBlob *gb = nullptr, *gm = nullptr;
+            if (SUCCEEDED(compile(kShader, sizeof kShader - 1, "tenzin_fps_vm", nullptr, nullptr, kEntry[k][0], kEntry[k][1], D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &gb, &gm))) {
+                if (k == 1) dev_->CreateVertexShader(gb->GetBufferPointer(), gb->GetBufferSize(), nullptr, &vsFull_);
+                else dev_->CreatePixelShader(gb->GetBufferPointer(), gb->GetBufferSize(), nullptr, k == 0 ? &psGlowSrc_ : (k == 2 ? &psBlur_ : &psComp_));
+            }
+            SafeRelease(gb);
+            SafeRelease(gm);
+        }
+        D3D11_BLEND_DESC ab = {};
+        ab.RenderTarget[0].BlendEnable = TRUE;
+        ab.RenderTarget[0].SrcBlend = ab.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        ab.RenderTarget[0].DestBlend = ab.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+        ab.RenderTarget[0].BlendOp = ab.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        ab.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
+        dev_->CreateBlendState(&ab, &bsAdd_);
+        D3D11_BLEND_DESC sb = {};
+        sb.RenderTarget[0].BlendEnable = FALSE;
+        sb.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        dev_->CreateBlendState(&sb, &bsSrc_);
+        D3D11_DEPTH_STENCIL_DESC gd = {};
+        gd.DepthEnable = TRUE;
+        gd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+        gd.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+        dev_->CreateDepthStencilState(&gd, &dssRead_);
+        gd.DepthEnable = FALSE;
+        dev_->CreateDepthStencilState(&gd, &dssOff_);
+        D3D11_SAMPLER_DESC cs = {};
+        cs.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        cs.AddressU = cs.AddressV = cs.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        cs.MaxLOD = D3D11_FLOAT32_MAX;
+        dev_->CreateSamplerState(&cs, &sampClamp_);
+    }
     D3D11_SAMPLER_DESC sm = {};
     sm.Filter = D3D11_FILTER_ANISOTROPIC;
     sm.MaxAnisotropy = 8;
@@ -1905,6 +1881,29 @@ ScreenBufs& Renderer::Sb() {
     return b;
 }
 const ScreenBufs& Renderer::Sb() const { return shareScreen_ ? g_sharedScreen : own_; }
+bool Renderer::EnsureGlow(UINT w, UINT h) {
+    if (glowTex_[0] && w == glowW_ && h == glowH_) return true;
+    for (int k = 0; k < 3; ++k) SafeRelease(glowSrv_[k]), SafeRelease(glowRtv_[k]), SafeRelease(glowTex_[k]);
+    glowW_ = glowH_ = 0;
+    for (int k = 0; k < 3; ++k) {
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = k ? std::max(1u, w / 2) : w;
+        td.Height = k ? std::max(1u, h / 2) : h;
+        td.MipLevels = td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(dev_->CreateTexture2D(&td, nullptr, &glowTex_[k])) || FAILED(dev_->CreateRenderTargetView(glowTex_[k], nullptr, &glowRtv_[k])) ||
+            FAILED(dev_->CreateShaderResourceView(glowTex_[k], nullptr, &glowSrv_[k]))) {
+            for (int j = 0; j < 3; ++j) SafeRelease(glowSrv_[j]), SafeRelease(glowRtv_[j]), SafeRelease(glowTex_[j]);
+            return false;
+        }
+    }
+    glowW_ = w;
+    glowH_ = h;
+    return true;
+}
 bool Renderer::EnsureDepth(UINT w, UINT h) {
     ScreenBufs& b = Sb();
     ID3D11DepthStencilView*& dsv_ = b.dsv;
@@ -2863,6 +2862,25 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
         for (int k = 0; k < 3; ++k) cf.flashColor[k] = c[k] * 2.5f * s.flashLight * look.flashLight;
         cf.flashColor[3] = 1.f;
     }
+    if (cf.flashColor[3] <= 0.f && s.emissiveLight > 0.f && s.wh3Emissive) {
+        SetupWh3Material(s);
+        for (unsigned si = 0; wh3On_ && si < subCount_; ++si) {
+            const Submesh& gs = subs_[si];
+            if (!gs.wh3 || gs.ctrBone < 0 || gs.ctrBone >= static_cast<int>(boneCount_)) continue;
+            Aff ib;
+            memcpy(ib.m, bones_[gs.ctrBone].invBind, sizeof ib.m);
+            Aff pv = AffMul(model, AffMul(g_world[gs.ctrBone], ib));
+            for (int r = 0; r < 3; ++r)
+                cf.flashPos[r] = pv.m[r * 4] * gs.ctr[0] + pv.m[r * 4 + 1] * gs.ctr[1] + pv.m[r * 4 + 2] * gs.ctr[2] + pv.m[r * 4 + 3];
+            cf.flashPos[3] = s.emissiveLightRadius;
+            const float* g = s.emissiveGradientColour[3];
+            float gc[3] = {g[0] * s.emissiveTint[0], g[1] * s.emissiveTint[1], g[2] * s.emissiveTint[2]};
+            float mx = std::max(std::max(gc[0], gc[1]), std::max(gc[2], 1e-3f));
+            for (int k = 0; k < 3; ++k) cf.flashColor[k] = gc[k] / mx * s.emissiveLight;
+            cf.flashColor[3] = 1.f;
+            break;
+        }
+    }
     bool lensOn = false;
     const int lensBone = s.scopeBone >= 0 ? s.scopeBone : s.adsSightBone;
     if (s.scopeZoom > 1.f && aw > 0.f && lensSubs_ && lensBone >= 0 && lensBone < static_cast<int>(boneCount_)) {
@@ -2955,6 +2973,28 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
     const double tProfWh3 = ProfNow();
     SetupWh3Material(s);
     g_drawProf.wh3 = (ProfNow() - tProfWh3) * 1000.0;
+    SetupCounter(s);
+    float cnt[16] = {};
+    if (counterOn_) {
+        int v = counterValue_ >= 0 ? counterValue_ : (s.magSize > 0 ? s.magSize : 0);
+        int top = 1;
+        for (int k = 0; k < s.counterDigits; ++k) top *= 10;
+        if (v > top - 1) v = top - 1;
+        cnt[0] = static_cast<float>(s.counterDigits);
+        float cw = (s.counterRect[2] - s.counterRect[0]) / s.counterDigits;
+        cnt[4] = s.counterRect[0], cnt[5] = s.counterRect[1], cnt[6] = cw, cnt[7] = s.counterRect[3] - s.counterRect[1];
+        for (int k = 0; k < 4; ++k) cnt[8 + k] = -1.f;
+        int div = top / 10;
+        bool lead = true;
+        for (int k = 0; k < s.counterDigits; ++k, div /= 10) {
+            int d = (v / div) % 10;
+            lead = lead && d == 0 && k < s.counterDigits - 1;
+            cnt[8 + k] = (lead && !s.counterLeadZero) ? -1.f : static_cast<float>(d);
+        }
+        for (int j = 0; j < 3; ++j) cnt[12 + j] = s.counterColour[j];
+    }
+    ID3D11ShaderResourceView* t7 = counterOn_ ? counterSrv_ : white_;
+    ctx->PSSetShaderResources(7, 1, &t7);
     float em[44] = {};
     if (wh3On_) {
         if (s.wh3Emissive) {
@@ -2998,12 +3038,80 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
             memcpy(mp.pData, mat, sizeof mat);
             if (wh3On_ && sm.wh3) memcpy(static_cast<char*>(mp.pData) + sizeof mat, em, sizeof em);
             else memset(static_cast<char*>(mp.pData) + sizeof mat, 0, sizeof em);
+            memset(static_cast<char*>(mp.pData) + sizeof mat + sizeof em, 0, 16);
+            if (counterOn_ && sm.counter) memcpy(static_cast<char*>(mp.pData) + sizeof mat + sizeof em + 16, cnt, sizeof cnt);
+            else memset(static_cast<char*>(mp.pData) + sizeof mat + sizeof em + 16, 0, sizeof cnt);
             ctx->Unmap(cbMat_, 0);
         }
         ID3D11ShaderResourceView* srv[3];
         for (int k = 0; k < 3; ++k) srv[k] = sm.tex[k] >= 0 ? srv_[sm.tex[k]] : white_;
         ctx->PSSetShaderResources(0, 3, srv);
         ctx->DrawIndexed(sm.indexCount, sm.firstIndex, 0);
+    }
+    if (wh3On_ && s.wh3Emissive && s.emissiveGlow > 0.f && psGlowSrc_ && vsFull_ && psBlur_ && psComp_ && bsAdd_ && bsSrc_ && dssRead_ && dssOff_ &&
+        sampClamp_ && EnsureGlow(w, h)) {
+        ID3D11ShaderResourceView* const nul = nullptr;
+        const float zero[4] = {0, 0, 0, 0};
+        ctx->ClearRenderTargetView(glowRtv_[0], zero);
+        ctx->OMSetRenderTargets(1, &glowRtv_[0], dsv_);
+        ctx->OMSetBlendState(bsSrc_, bf, 0xffffffffu);
+        ctx->OMSetDepthStencilState(dssRead_, 0);
+        ctx->PSSetShader(psGlowSrc_, nullptr, 0);
+        for (unsigned i = 0; i < subCount_; ++i) {
+            const Submesh& sm = subs_[i];
+            if (!sm.wh3) continue;
+            float mat[12] = {static_cast<float>(sm.normalMode), sm.tex[1] >= 0 ? 1.f : 0.f, sm.tex[2] >= 0 ? 1.f : 0.f,
+                             static_cast<float>(sm.materialMode), 0.55f, 0.f, 0.f, 0.f, 0.f, ((sm.flags >> 20) & 1) ? 1.f : 0.f, 0.f, 0.f};
+            if (SUCCEEDED(ctx->Map(cbMat_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mp))) {
+                memcpy(mp.pData, mat, sizeof mat);
+                memcpy(static_cast<char*>(mp.pData) + sizeof mat, em, sizeof em);
+                memset(static_cast<char*>(mp.pData) + sizeof mat + sizeof em, 0, 16);
+                memset(static_cast<char*>(mp.pData) + sizeof mat + sizeof em + 16, 0, 64);
+                ctx->Unmap(cbMat_, 0);
+            }
+            ID3D11ShaderResourceView* srv[3];
+            for (int k = 0; k < 3; ++k) srv[k] = sm.tex[k] >= 0 ? srv_[sm.tex[k]] : white_;
+            ctx->PSSetShaderResources(0, 3, srv);
+            ctx->DrawIndexed(sm.indexCount, sm.firstIndex, 0);
+        }
+        UINT hw = std::max(1u, w / 2), hh = std::max(1u, h / 2);
+        D3D11_VIEWPORT hvp = {0, 0, static_cast<float>(hw), static_cast<float>(hh), 0, 1};
+        ctx->RSSetViewports(1, &hvp);
+        ctx->OMSetDepthStencilState(dssOff_, 0);
+        ctx->IASetInputLayout(nullptr);
+        ctx->VSSetShader(vsFull_, nullptr, 0);
+        ctx->PSSetShader(psBlur_, nullptr, 0);
+        ctx->PSSetSamplers(0, 1, &sampClamp_);
+        const float stepPx = s.emissiveGlowRadius * static_cast<float>(h) / 1080.f / 12.f;
+        const struct { int src, dst; float dx, dy; } pass[4] = {{0, 1, stepPx / w, 0}, {1, 2, 0, stepPx / h}, {2, 1, 2 * stepPx / w, 0}, {1, 2, 0, 2 * stepPx / h}};
+        for (const auto& ps : pass) {
+            ctx->PSSetShaderResources(3, 1, &nul);
+            ctx->OMSetRenderTargets(1, &glowRtv_[ps.dst], nullptr);
+            const float g[4] = {ps.dx, ps.dy, 0.f, 0.f};
+            if (SUCCEEDED(ctx->Map(cbMat_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mp))) {
+                memset(mp.pData, 0, 48 + 11 * 16);
+                memcpy(static_cast<char*>(mp.pData) + 48 + 11 * 16, g, sizeof g);
+                ctx->Unmap(cbMat_, 0);
+            }
+            ctx->PSSetShaderResources(3, 1, &glowSrv_[ps.src]);
+            ctx->Draw(3, 0);
+        }
+        ctx->PSSetShaderResources(3, 1, &nul);
+        ctx->RSSetViewports(1, &vp);
+        ctx->OMSetRenderTargets(1, &rtv, nullptr);
+        ctx->OMSetBlendState(bsAdd_, bf, 0xffffffffu);
+        ctx->PSSetShader(psComp_, nullptr, 0);
+        const float g[4] = {0.f, 0.f, s.emissiveGlow, s.emissiveGlowInner};
+        if (SUCCEEDED(ctx->Map(cbMat_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mp))) {
+            memset(mp.pData, 0, 48 + 11 * 16);
+            memcpy(static_cast<char*>(mp.pData) + 48 + 11 * 16, g, sizeof g);
+            ctx->Unmap(cbMat_, 0);
+        }
+        ctx->PSSetShaderResources(3, 1, &glowSrv_[2]);
+        ctx->PSSetShaderResources(4, 1, &glowSrv_[0]);
+        ctx->Draw(3, 0);
+        ctx->PSSetShaderResources(3, 1, &nul);
+        ctx->PSSetShaderResources(4, 1, &nul);
     }
     bk.Restore(ctx);
     g_drawProf.total = (ProfNow() - tProf0) * 1000.0;
@@ -3055,9 +3163,38 @@ void Renderer::SetupWh3Material(const Settings& s) {
     }
     wh3On_ = true;
 }
+void Renderer::SetupCounter(const Settings& s) {
+    bool any = s.counterPart[0] && s.counterGlyphs[0] && s.counterRect[2] != s.counterRect[0] && s.counterRect[3] != s.counterRect[1];
+    uint64_t key = any ? Fnv64(s.counterPart, sizeof s.counterPart) ^ Fnv64(s.counterGlyphs, sizeof s.counterGlyphs) * 3 : 0;
+    if (key == counterKey_) return;
+    counterKey_ = key;
+    counterOn_ = false;
+    SafeRelease(counterSrv_);
+    for (unsigned i = 0; i < subCount_; ++i) subs_[i].counter = false;
+    if (!any || !dev_) return;
+    wchar_t part[64];
+    wcsncpy(part, s.counterPart, 63);
+    part[63] = 0;
+    _wcslwr(part);
+    unsigned hit = 0;
+    for (unsigned i = 0; i < subCount_; ++i) {
+        int a = subs_[i].tex[0];
+        if (a < 0 || a >= static_cast<int>(kMaxTextures) || !texName_[a][0]) continue;
+        if (!wcscmp(part, texName_[a])) subs_[i].counter = true, ++hit;
+    }
+    if (!hit) return;
+    wchar_t full[MAX_PATH * 2];
+    swprintf(full, MAX_PATH * 2, L"%ls%ls", hvmDir_, s.counterGlyphs);
+    char err[256];
+    if (!LoadDds(dev_, full, false, &counterSrv_, err, sizeof err)) return;
+    counterOn_ = true;
+}
 void Renderer::Release() {
     ready_ = false;
     for (auto*& v : wh3Srv_) SafeRelease(v);
+    SafeRelease(counterSrv_);
+    counterKey_ = 0;
+    counterOn_ = false;
     wh3Key_ = 0;
     wh3On_ = false;
     SafeRelease(vb_);
@@ -3067,6 +3204,17 @@ void Renderer::Release() {
     SafeRelease(cbMat_);
     SafeRelease(vs_);
     SafeRelease(ps_);
+    SafeRelease(vsFull_);
+    SafeRelease(psGlowSrc_);
+    SafeRelease(psBlur_);
+    SafeRelease(psComp_);
+    SafeRelease(bsAdd_);
+    SafeRelease(bsSrc_);
+    SafeRelease(dssRead_);
+    SafeRelease(dssOff_);
+    SafeRelease(sampClamp_);
+    for (int k = 0; k < 3; ++k) SafeRelease(glowSrv_[k]), SafeRelease(glowRtv_[k]), SafeRelease(glowTex_[k]);
+    glowW_ = glowH_ = 0;
     SafeRelease(layout_);
     SafeRelease(rs_);
     SafeRelease(dss_);
@@ -3115,9 +3263,6 @@ VO VS(VI i) { VO o; o.p = float4(i.p, 0, 1); o.c = i.c; o.m = i.m; return o; }
 float4 PS(VO i) : SV_Target {
     float4 c = i.c;
     if (i.m.z > 0) c.a *= saturate(i.m.z - length(i.m.xy) + 0.5);
-    float2 fw = max(fwidth(i.m.xy), 1e-4);
-    if (i.m.z < 0 && i.m.z > -1.5) { float2 d = (1 - abs(i.m.xy)) / fw; c.a *= saturate(d.x + 0.5) * saturate(d.y + 0.5); }
-    if (i.m.z <= -1.5) { float2 q = float2(max(abs(i.m.x) - (-i.m.z - 2), 0), i.m.y); c.a *= saturate(0.5 - (length(q) - 1) / max(fw.x, fw.y)); }
     return c;
 }
 )HLSL";
@@ -3170,27 +3315,6 @@ void ReadCrossSection(const wchar_t* ini, const wchar_t* sec, CrosshairSettings&
     float oa = IniCross(ini, sec, L"outline_alpha", s.outlineAlpha < 0.f ? -1.f : s.outlineAlpha * 255.f);
     s.outlineAlpha = oa < 0.f ? -1.f : std::fmin(oa / 255.f, 1.f);
     IniCrossColor(ini, sec, L"color", s.color);
-    s.hitMarker = IniCross(ini, sec, L"hit_marker", s.hitMarker ? 1.f : 0.f) != 0.f;
-    s.hitMarkerRadius = IniCross(ini, sec, L"hit_marker_radius", s.hitMarkerRadius);
-    s.hitMarkerLength = IniCross(ini, sec, L"hit_marker_length", s.hitMarkerLength);
-    s.hitMarkerWidth = IniCross(ini, sec, L"hit_marker_width", s.hitMarkerWidth);
-    s.hitMarkerRound = IniCross(ini, sec, L"hit_marker_round", s.hitMarkerRound ? 1.f : 0.f) != 0.f;
-    s.hitMarkerOutline = IniCross(ini, sec, L"hit_marker_outline", s.hitMarkerOutline);
-    s.hitMarkerOutlineAlpha = IniCross(ini, sec, L"hit_marker_outline_alpha", s.hitMarkerOutlineAlpha * 255.f) / 255.f;
-    s.hitMarkerGlow = IniCross(ini, sec, L"hit_marker_glow", s.hitMarkerGlow);
-    s.hitMarkerGlowAlpha = IniCross(ini, sec, L"hit_marker_glow_alpha", s.hitMarkerGlowAlpha * 255.f) / 255.f;
-    s.hitMarkerTime = IniCross(ini, sec, L"hit_marker_time", s.hitMarkerTime);
-    IniCrossColor(ini, sec, L"hit_marker_color", s.hitMarkerColor);
-    s.killMarkerRadius = IniCross(ini, sec, L"kill_marker_radius", s.killMarkerRadius);
-    s.killMarkerLength = IniCross(ini, sec, L"kill_marker_length", s.killMarkerLength);
-    s.killMarkerWidth = IniCross(ini, sec, L"kill_marker_width", s.killMarkerWidth);
-    s.killMarkerRound = IniCross(ini, sec, L"kill_marker_round", s.killMarkerRound ? 1.f : 0.f) != 0.f;
-    s.killMarkerOutline = IniCross(ini, sec, L"kill_marker_outline", s.killMarkerOutline);
-    s.killMarkerOutlineAlpha = IniCross(ini, sec, L"kill_marker_outline_alpha", s.killMarkerOutlineAlpha * 255.f) / 255.f;
-    s.killMarkerGlow = IniCross(ini, sec, L"kill_marker_glow", s.killMarkerGlow);
-    s.killMarkerGlowAlpha = IniCross(ini, sec, L"kill_marker_glow_alpha", s.killMarkerGlowAlpha * 255.f) / 255.f;
-    s.killMarkerTime = IniCross(ini, sec, L"kill_marker_time", s.killMarkerTime);
-    IniCrossColor(ini, sec, L"kill_marker_color", s.killMarkerColor);
 }
 }
 bool LoadCrosshair(const wchar_t* ini, CrosshairSettings& s) {
@@ -3214,28 +3338,6 @@ bool LoadCrosshair(const wchar_t* ini, CrosshairSettings& s) {
     if (!(s.spreadHold >= 0.f && s.spreadHold <= 2.f)) s.spreadHold = 0.f;
     if (!(s.fadeStart >= 0.f && s.fadeStart <= 200.f)) s.fadeStart = 0.f;
     if (!(s.fadeEnd >= 0.f && s.fadeEnd <= 200.f)) s.fadeEnd = 0.f;
-    {
-        const CrosshairSettings d0;
-        auto lim = [](float& v, float lo, float hi, float def) {
-            if (!(v >= lo && v <= hi)) v = def;
-        };
-        lim(s.hitMarkerRadius, 0.f, 200.f, d0.hitMarkerRadius);
-        lim(s.hitMarkerLength, 0.5f, 100.f, d0.hitMarkerLength);
-        lim(s.hitMarkerWidth, 0.5f, 50.f, d0.hitMarkerWidth);
-        lim(s.hitMarkerOutline, 0.f, 20.f, d0.hitMarkerOutline);
-        lim(s.hitMarkerOutlineAlpha, 0.f, 1.f, d0.hitMarkerOutlineAlpha);
-        lim(s.hitMarkerGlow, 0.f, 20.f, d0.hitMarkerGlow);
-        lim(s.hitMarkerGlowAlpha, 0.f, 1.f, d0.hitMarkerGlowAlpha);
-        lim(s.hitMarkerTime, 0.01f, 3.f, d0.hitMarkerTime);
-        lim(s.killMarkerRadius, 0.f, 200.f, d0.killMarkerRadius);
-        lim(s.killMarkerLength, 0.5f, 100.f, d0.killMarkerLength);
-        lim(s.killMarkerWidth, 0.5f, 50.f, d0.killMarkerWidth);
-        lim(s.killMarkerOutline, 0.f, 20.f, d0.killMarkerOutline);
-        lim(s.killMarkerOutlineAlpha, 0.f, 1.f, d0.killMarkerOutlineAlpha);
-        lim(s.killMarkerGlow, 0.f, 20.f, d0.killMarkerGlow);
-        lim(s.killMarkerGlowAlpha, 0.f, 1.f, d0.killMarkerGlowAlpha);
-        lim(s.killMarkerTime, 0.01f, 3.f, d0.killMarkerTime);
-    }
     return true;
 }
 namespace {
@@ -3286,13 +3388,10 @@ struct FlashCb {
 };
 constexpr int kFlashTexVent = 0, kFlashTexFire = 1, kFlashTexGlow = 2, kFlashTexSmoke = 3, kFlashTexSpark = 4;
 constexpr int kFlashTexGasJet = 5, kFlashTexGasPuff = 6;
-constexpr int kFlashTexDistRing = 7, kFlashTexDistHaze = 8, kFlashTexGasBall = 9, kFlashTexGasWisp = 10;
-constexpr int kFlashTexSmoke34 = 11, kFlashTexSmoke37 = 12, kFlashTexSmoke38 = 13, kFlashTexSmoke39 = 14, kFlashTexSmokeDust = 15, kFlashTexSmokeTrail = 16,
-              kFlashTexCount = 17;
+constexpr int kFlashTexDistRing = 7, kFlashTexDistHaze = 8, kFlashTexGasBall = 9, kFlashTexGasWisp = 10, kFlashTexCount = 11;
 const wchar_t* const kFlashTexNames[kFlashTexCount] = {L"flash_vent", L"flash_fire", L"flash_glow", L"hit_mist",
                                                        L"tracer", L"gas_jet", L"gas_puff", L"dist_ring", L"dist_haze",
-                                                       L"gas_ball", L"gas_wisp", L"gas_smoke34", L"gas_smoke37", L"gas_smoke38",
-                                                       L"gas_smoke39", L"gas_dust", L"gas_trail"};
+                                                       L"gas_ball", L"gas_wisp"};
 constexpr float kTracerSpeed = 13000.f * 0.0254f, kTracerMaxLen = 500.f * 0.0254f, kTracerHalfWidth = 3.f * 0.0254f;
 ID3D11ShaderResourceView* LoadDdsBc(ID3D11Device* dev, const wchar_t* path, char* err, size_t errLen) {
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -3366,7 +3465,7 @@ void LoadSheet(const wchar_t* path, MuzzleFlash::Sheet& sh) {
         float r[4];
         char line[160];
         while (fgets(line, sizeof line, f))
-            if (sscanf(line, "%d %d %f %f %f %f", &q, &k, &r[0], &r[1], &r[2], &r[3]) == 6 && q >= 0 && q < 4 && k >= 0 && k < 64) {
+            if (sscanf(line, "%d %d %f %f %f %f", &q, &k, &r[0], &r[1], &r[2], &r[3]) == 6 && q >= 0 && q < 4 && k >= 0 && k < 16) {
                 memcpy(sh.rect[q][k], r, sizeof r);
                 if (k + 1 > sh.frames[q]) sh.frames[q] = k + 1;
             }
@@ -3432,7 +3531,7 @@ bool MuzzleFlash::InitPipeline(ID3D11Device* dev) {
     SafeRelease(vsb);
     SafeRelease(psb);
     D3D11_BUFFER_DESC bd = {};
-    bd.ByteWidth = sizeof(FlashVertex) * 6 * (kMax + kMaxTracers + kMaxImpacts * kImpactQuads + kMaxFlame);
+    bd.ByteWidth = sizeof(FlashVertex) * 6 * (kMax + kMaxTracers + kMaxImpacts * kImpactQuads);
     bd.Usage = D3D11_USAGE_DYNAMIC;
     bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -3535,18 +3634,6 @@ bool MuzzleFlash::Load(ID3D11Device* dev, const wchar_t* fxDir, const wchar_t* e
     }
     return true;
 }
-void MuzzleFlash::LoadFlame(const wchar_t* dir, const Settings& s) {
-    for (auto& t : flTex_) SafeRelease(t);
-    nFl_ = 0;
-    if (!dev_ || !dir || !dir[0]) return;
-    for (int li = 0; li < 4; ++li) {
-        if (!s.flame[li].tex[0]) continue;
-        wchar_t path[MAX_PATH * 2];
-        swprintf(path, MAX_PATH * 2, L"%ls\\%ls.dds", dir, s.flame[li].tex);
-        char e[256] = {};
-        flTex_[li] = LoadDdsBc(dev_, path, e, sizeof e);
-    }
-}
 float MuzzleFlash::Rand(float a, float b) {
     rng_ = rng_ * 1664525u + 1013904223u;
     return a + (b - a) * static_cast<float>((rng_ >> 8) & 0xffffff) / 16777216.f;
@@ -3573,248 +3660,8 @@ void MuzzleFlash::Spawn(const Settings& s) {
     if (s.flashGas) SpawnGas(s);
     if (s.shellEject && !s.shellEjectAnim) SpawnShellFx(s);
 }
-struct SmokeLayer {
-    int tex;
-    unsigned char set, view, where, trailFade, ribbon, n0, n1;
-    float chance, delay, rate, dur, fadeOut;
-    float life0, life1, w0, w1, h0, h1;
-    float a0, a1, gray;
-    float loc0[3], loc1[3], vel0[3], vel1[3];
-    float drag0, drag1, rot0, rot1, spin0, spin1;
-    unsigned char flipU;
-    float fps;
-    unsigned char nA;
-    float aK[4][2];
-    unsigned char nS;
-    float sK[4][2];
-    unsigned char nF;
-    float fK[4][2];
-};
-const SmokeLayer kSmokeLayers[] = {
-    {kFlashTexSmoke34, 0, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.25f, 0.3f, 20.f, 40.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 10.f, -3.f}, {0.f, 10.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f,
-     0.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
-     4, {{0.f, 0.f}, {0.01f, 0.329f}, {0.07f, 0.24f}, {1.f, 0.f}}, 1, {{0.f, 3.f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
-    {kFlashTexSmoke37, 0, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 40.f, 60.f, 0.f, 0.f, 0.2f, 0.5f, 1.048f, {-3.f, 10.f, -4.f}, {3.f, 10.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, -1.f, 1.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 1.f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmoke38, 0, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 45.f, 55.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 10.f, -4.f}, {3.f, 10.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 0.5f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke39, 0, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.1f, 50.f, 70.f, 25.f, 35.f, 0.2f, 1.3f, 1.033f, {0.f, 10.f, -3.f}, {0.f, 10.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 1.f, 0.f, 0.f, 1, 0.f,
-     3, {{0.f, 0.7f}, {0.3f, 0.7f}, {1.f, 0.f}}, 1, {{0.f, 2.4f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmoke34, 0, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.25f, 0.3f, 20.f, 30.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f,
-     0.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
-     4, {{0.f, 0.f}, {0.01f, 0.659f}, {0.07f, 0.479f}, {1.f, 0.f}}, 2, {{0.f, 3.f}, {1.f, 3.9f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
-    {kFlashTexSmoke38, 0, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 45.f, 55.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 0.5f}}, 1, {{0.f, 1.8f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke39, 0, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.1f, 50.f, 60.f, 25.f, 30.f, 0.2f, 1.3f, 1.033f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 1.f, 0.f, 0.f, 1, 0.f,
-     2, {{0.f, 1.f}, {1.f, 0.f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmokeTrail, 0, 0, 0, 1, 1, 1, 1, 1.f, 0.f, 30.f, 2.f, 1.f, 0.3f, 0.3f, 3.f, 3.f, 0.f, 0.f, 1.f, 1.f, 1.287f, {0.f, 0.f, -1.f}, {0.f, 0.f, -1.f}, {-3.f, -3.f, 121.f}, {3.f, 3.f, 121.f}, 0.f,
-     0.f, 0.f, 0.f, 0.f, 0.f, 0, 24.f,
-     4, {{0.f, 0.f}, {0.47f, 0.28f}, {0.54f, 0.276f}, {1.f, 0.f}}, 1, {{0.f, 1.f}}, 1, {{0.f, 0.f}}},
-    {kFlashTexSmokeDust, 0, 0, 0, 1, 0, 1, 1, 1.f, 0.06f, 5.f, 0.8f, 1.f, 0.5f, 0.75f, 11.f, 13.f, 0.f, 0.f, 1.f, 1.f, 1.115f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 20.f}, {0.f, 0.f, 80.f}, 3.f,
-     6.f, 0.f, 2.f, -0.05f, 0.05f, 0, 0.f,
-     4, {{0.f, 0.f}, {0.34f, 0.067f}, {0.67f, 0.066f}, {1.f, 0.f}}, 2, {{0.f, 1.f}, {1.f, 1.5f}}, 4, {{0.f, 5.f}, {0.47f, 32.3f}, {0.48f, 32.8f}, {1.f, 63.f}}},
-    {kFlashTexSmoke37, 0, 0, 1, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
-     7.f, 0.f, 0.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 0.6f}}, 1, {{0.f, 0.7f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke37, 0, 1, 1, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
-     7.f, -0.03f, -0.03f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 0.5f}}, 1, {{0.f, 0.4f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke34, 1, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.25f, 0.3f, 20.f, 40.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f,
-     0.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
-     4, {{0.f, 0.f}, {0.01f, 0.659f}, {0.07f, 0.479f}, {1.f, 0.f}}, 1, {{0.f, 2.f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
-    {kFlashTexSmoke37, 1, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 30.f, 50.f, 0.f, 0.f, 0.2f, 0.5f, 1.048f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, -1.f, 1.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 1.f}}, 1, {{0.f, 2.4f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmoke38, 1, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 35.f, 45.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 0.5f}}, 1, {{0.f, 2.4f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke39, 1, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.1f, 40.f, 60.f, 25.f, 35.f, 0.2f, 1.3f, 1.033f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 1.f, 0.f, 0.f, 1, 0.f,
-     3, {{0.f, 1.f}, {0.3f, 1.f}, {1.f, 0.f}}, 1, {{0.f, 1.6f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmoke34, 1, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.25f, 0.3f, 20.f, 40.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f,
-     0.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
-     4, {{0.f, 0.f}, {0.01f, 0.659f}, {0.07f, 0.479f}, {1.f, 0.f}}, 1, {{0.f, 3.f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
-    {kFlashTexSmoke37, 1, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 30.f, 50.f, 0.f, 0.f, 0.2f, 0.5f, 1.048f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, -1.f, 1.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 1.f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmoke38, 1, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 35.f, 45.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 0.5f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke39, 1, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.1f, 40.f, 60.f, 25.f, 35.f, 0.2f, 1.3f, 1.033f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 1.f, 0.f, 0.f, 1, 0.f,
-     3, {{0.f, 1.f}, {0.3f, 1.f}, {1.f, 0.f}}, 1, {{0.f, 2.4f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmoke37, 1, 0, 1, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
-     7.f, 0.f, 0.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 0.6f}}, 1, {{0.f, 0.7f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke37, 2, 0, 0, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.2f, 0.2f, 25.f, 30.f, 0.f, 0.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, -1.f, 1.f, 0.f, 0.f, 0, 0.f,
-     4, {{0.f, 1.f}, {0.2f, 0.306f}, {0.29f, 0.266f}, {1.f, 0.f}}, 4, {{0.f, 3.f}, {0.2f, 4.486f}, {0.27f, 4.513f}, {1.f, 4.65f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmoke38, 2, 0, 0, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.2f, 20.f, 25.f, 0.f, 0.f, 0.5f, 0.5f, 0.902f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
-     4, {{0.f, 0.7f}, {0.14f, 0.477f}, {0.29f, 0.319f}, {1.f, 0.f}}, 4, {{0.f, 3.f}, {0.13f, 4.102f}, {0.2f, 4.499f}, {1.f, 4.65f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke38, 2, 1, 0, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.14f, 0.15f, 30.f, 39.f, 0.f, 0.f, 0.5f, 0.5f, 0.902f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
-     4, {{0.f, 1.f}, {0.2f, 0.545f}, {0.26f, 0.478f}, {1.f, 0.f}}, 4, {{0.f, 3.f}, {0.13f, 4.102f}, {0.2f, 4.499f}, {1.f, 4.65f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke37, 2, 1, 0, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.2f, 0.2f, 35.f, 40.f, 0.f, 0.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, -1.f, 1.f, 0.f, 0.f, 0, 0.f,
-     4, {{0.f, 1.3f}, {0.2f, 0.408f}, {0.27f, 0.365f}, {1.f, 0.f}}, 4, {{0.f, 1.5f}, {0.11f, 4.25f}, {0.13f, 4.502f}, {1.f, 4.65f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmoke37, 2, 0, 1, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
-     7.f, 0.f, 0.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 0.6f}}, 1, {{0.f, 0.7f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke37, 2, 1, 1, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
-     7.f, -0.03f, -0.03f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 0.5f}}, 1, {{0.f, 0.4f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke34, 3, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.25f, 0.3f, 20.f, 40.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f,
-     0.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
-     4, {{0.f, 0.f}, {0.01f, 0.659f}, {0.07f, 0.479f}, {1.f, 0.f}}, 1, {{0.f, 3.f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
-    {kFlashTexSmoke34, 3, 0, 0, 0, 0, 4, 7, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.3f, 1.f, 85.f, 95.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-900.f, -5.f, -50.f}, {900.f, 5.f, 50.f}, 10.f,
-     10.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
-     4, {{0.f, 0.f}, {0.06f, 0.184f}, {0.59f, 0.035f}, {1.f, 0.f}}, 2, {{0.f, 0.9f}, {1.f, 7.2f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
-    {kFlashTexSmoke38, 3, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 45.f, 55.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 0.5f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke39, 3, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.1f, 70.f, 100.f, 25.f, 35.f, 0.2f, 1.3f, 1.033f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 0.f, 0.f, 0.f, 1, 0.f,
-     3, {{0.f, 1.f}, {0.3f, 1.f}, {1.f, 0.f}}, 1, {{0.f, 2.4f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmoke34, 3, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.25f, 0.3f, 20.f, 40.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f,
-     0.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
-     4, {{0.f, 0.f}, {0.01f, 0.659f}, {0.07f, 0.479f}, {1.f, 0.f}}, 1, {{0.f, 3.f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
-    {kFlashTexSmoke34, 3, 1, 0, 0, 0, 4, 7, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.3f, 1.f, 85.f, 95.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-700.f, -5.f, -50.f}, {700.f, 5.f, 50.f}, 10.f,
-     10.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
-     4, {{0.f, 0.f}, {0.06f, 0.184f}, {0.59f, 0.035f}, {1.f, 0.f}}, 2, {{0.f, 0.9f}, {1.f, 7.2f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
-    {kFlashTexSmoke37, 3, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 40.f, 60.f, 0.f, 0.f, 0.2f, 0.5f, 1.048f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, -1.f, 1.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 1.f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmoke38, 3, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 45.f, 55.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 0.5f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke39, 3, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.1f, 70.f, 100.f, 25.f, 35.f, 0.2f, 1.3f, 1.033f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 0.f, 0.f, 0.f, 1, 0.f,
-     3, {{0.f, 1.f}, {0.3f, 1.f}, {1.f, 0.f}}, 1, {{0.f, 2.4f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmokeTrail, 3, 0, 0, 1, 1, 1, 1, 1.f, 0.f, 30.f, 2.f, 1.f, 0.3f, 0.3f, 3.f, 3.f, 0.f, 0.f, 1.f, 1.f, 1.287f, {0.f, 0.f, -1.f}, {0.f, 0.f, -1.f}, {-3.f, -3.f, 121.f}, {3.f, 3.f, 121.f}, 0.f,
-     0.f, 0.f, 0.f, 0.f, 0.f, 0, 24.f,
-     4, {{0.f, 0.f}, {0.47f, 0.28f}, {0.54f, 0.276f}, {1.f, 0.f}}, 1, {{0.f, 1.f}}, 1, {{0.f, 0.f}}},
-    {kFlashTexSmokeDust, 3, 0, 0, 1, 0, 1, 1, 1.f, 0.06f, 5.f, 0.8f, 1.f, 0.5f, 0.75f, 11.f, 13.f, 0.f, 0.f, 1.f, 1.f, 1.115f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 20.f}, {0.f, 0.f, 80.f}, 3.f,
-     6.f, 0.f, 2.f, -0.05f, 0.05f, 0, 0.f,
-     4, {{0.f, 0.f}, {0.34f, 0.067f}, {0.67f, 0.066f}, {1.f, 0.f}}, 2, {{0.f, 1.f}, {1.f, 1.5f}}, 4, {{0.f, 5.f}, {0.47f, 32.3f}, {0.48f, 32.8f}, {1.f, 63.f}}},
-    {kFlashTexSmoke37, 3, 0, 1, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
-     7.f, 0.f, 0.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 0.6f}}, 1, {{0.f, 0.7f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke37, 3, 1, 1, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
-     7.f, -0.03f, -0.03f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 0.5f}}, 1, {{0.f, 0.4f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke34, 4, 2, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.25f, 0.3f, 20.f, 40.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 7.f, -3.f}, {0.f, 7.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f,
-     0.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
-     4, {{0.f, 0.f}, {0.01f, 0.329f}, {0.07f, 0.24f}, {1.f, 0.f}}, 1, {{0.f, 3.f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
-    {kFlashTexSmoke38, 4, 2, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 45.f, 55.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 7.f, -4.f}, {3.f, 7.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 0.25f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke39, 4, 2, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.1f, 50.f, 70.f, 25.f, 35.f, 0.2f, 1.3f, 1.033f, {0.f, 7.f, -3.f}, {0.f, 7.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 1.f, 0.f, 0.f, 1, 0.f,
-     3, {{0.f, 0.5f}, {0.3f, 0.5f}, {1.f, 0.f}}, 1, {{0.f, 1.8f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmokeTrail, 4, 0, 0, 1, 1, 1, 1, 1.f, 0.f, 30.f, 2.f, 1.f, 0.3f, 0.3f, 3.f, 3.f, 0.f, 0.f, 1.f, 1.f, 1.287f, {0.f, 0.f, -1.f}, {0.f, 0.f, -1.f}, {-3.f, -3.f, 121.f}, {3.f, 3.f, 121.f}, 0.f,
-     0.f, 0.f, 0.f, 0.f, 0.f, 0, 24.f,
-     4, {{0.f, 0.f}, {0.47f, 0.28f}, {0.54f, 0.276f}, {1.f, 0.f}}, 1, {{0.f, 1.f}}, 1, {{0.f, 0.f}}},
-    {kFlashTexSmokeDust, 4, 0, 0, 1, 0, 1, 1, 1.f, 0.06f, 5.f, 0.8f, 1.f, 0.5f, 0.75f, 11.f, 13.f, 0.f, 0.f, 1.f, 1.f, 1.115f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 20.f}, {0.f, 0.f, 80.f}, 3.f,
-     6.f, 0.f, 2.f, -0.05f, 0.05f, 0, 0.f,
-     4, {{0.f, 0.f}, {0.34f, 0.067f}, {0.67f, 0.066f}, {1.f, 0.f}}, 2, {{0.f, 1.f}, {1.f, 1.5f}}, 4, {{0.f, 5.f}, {0.47f, 32.3f}, {0.48f, 32.8f}, {1.f, 63.f}}},
-    {kFlashTexSmoke37, 4, 0, 1, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
-     7.f, 0.f, 0.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 0.6f}}, 1, {{0.f, 0.7f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke37, 5, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 40.f, 60.f, 0.f, 0.f, 0.2f, 0.5f, 1.048f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, -1.f, 1.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 1.f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmoke38, 5, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 45.f, 55.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 0.5f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke39, 5, 0, 0, 0, 0, 1, 2, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.1f, 50.f, 70.f, 25.f, 35.f, 0.2f, 1.3f, 1.033f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 1.f, 0.f, 0.f, 1, 0.f,
-     4, {{0.f, 0.f}, {0.29f, 0.967f}, {0.3f, 0.968f}, {1.f, 0.f}}, 1, {{0.f, 2.4f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmoke37, 5, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 40.f, 60.f, 0.f, 0.f, 0.2f, 0.5f, 1.048f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, -1.f, 1.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 1.f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmoke38, 5, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 45.f, 55.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 0.5f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke39, 5, 1, 0, 0, 0, 1, 2, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.1f, 50.f, 70.f, 25.f, 35.f, 0.2f, 1.3f, 1.033f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, 0.f, 1.f, 0.f, 0.f, 1, 0.f,
-     4, {{0.f, 0.f}, {0.29f, 0.967f}, {0.3f, 0.968f}, {1.f, 0.f}}, 1, {{0.f, 2.4f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmoke34, 5, 1, 0, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.8f, 1.2f, 20.f, 30.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 0.f, -4.f}, {0.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 7.f,
-     7.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
-     4, {{0.f, 0.f}, {0.01f, 0.182f}, {0.42f, 0.035f}, {1.f, 0.f}}, 2, {{0.f, 1.8f}, {1.f, 6.f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
-    {kFlashTexSmokeTrail, 5, 0, 0, 1, 1, 1, 1, 1.f, 0.f, 30.f, 2.f, 1.f, 0.3f, 0.3f, 3.f, 3.f, 0.f, 0.f, 1.f, 1.f, 1.287f, {0.f, 0.f, -1.f}, {0.f, 0.f, -1.f}, {-3.f, -3.f, 121.f}, {3.f, 3.f, 121.f}, 0.f,
-     0.f, 0.f, 0.f, 0.f, 0.f, 0, 24.f,
-     4, {{0.f, 0.f}, {0.47f, 0.28f}, {0.54f, 0.276f}, {1.f, 0.f}}, 1, {{0.f, 1.f}}, 1, {{0.f, 0.f}}},
-    {kFlashTexSmokeDust, 5, 0, 0, 1, 0, 1, 1, 1.f, 0.06f, 5.f, 0.8f, 1.f, 0.5f, 0.75f, 11.f, 13.f, 0.f, 0.f, 1.f, 1.f, 1.115f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 20.f}, {0.f, 0.f, 80.f}, 3.f,
-     6.f, 0.f, 2.f, -0.05f, 0.05f, 0, 0.f,
-     4, {{0.f, 0.f}, {0.34f, 0.067f}, {0.67f, 0.066f}, {1.f, 0.f}}, 2, {{0.f, 1.f}, {1.f, 1.5f}}, 4, {{0.f, 5.f}, {0.47f, 32.3f}, {0.48f, 32.8f}, {1.f, 63.f}}},
-};
-void MuzzleFlash::SpawnSmoke(const Settings& s, int where, bool trail, float t0) {
-    const float k = (s.flashGasScale > 0.f ? s.flashGasScale : 1.f) / 2.54f;
-    const int view = ads_ >= 0.5f ? 1 : 0;
-    const int set = s.flashGasStyle - 2;
-    const bool muzzleShot = where == 0 && !trail;
-    if (muzzleShot) smokeMask_ = 0;
-    for (int li = 0; li < static_cast<int>(sizeof kSmokeLayers / sizeof *kSmokeLayers); ++li) {
-        const SmokeLayer& L = kSmokeLayers[li];
-        if (L.set != set || L.where != where || (L.trailFade != 0) != trail || (L.view != 2 && L.view != view) || !tex_[L.tex]) continue;
-        if (L.rate <= 0.f && Rand(0.f, 1.f) >= L.chance) continue;
-        if (muzzleShot && li < 64) smokeMask_ |= 1ull << li;
-        const int n = L.rate > 0.f ? static_cast<int>(L.rate * L.dur + 0.5f) : L.n0 + static_cast<int>(Rand(0.f, 1.f) * (L.n1 - L.n0) + 0.5f);
-        for (int i = 0; i < n; ++i) {
-            const float t = L.delay + (L.rate > 0.f ? static_cast<float>(i) / L.rate : 0.f);
-            float fade = 1.f;
-            if (L.trailFade) {
-                if (t >= 0.75f + L.fadeOut) break;
-                if (t > 0.75f) fade = 1.f - (t - 0.75f) / L.fadeOut;
-            }
-            P* p = Add();
-            if (!p) return;
-            float loc[3], vel[3];
-            for (int c = 0; c < 3; ++c) loc[c] = Rand(L.loc0[c], L.loc1[c]), vel[c] = Rand(L.vel0[c], L.vel1[c]);
-            p->tex = static_cast<unsigned char>(L.tex);
-            p->locked = 0;
-            p->frame = static_cast<unsigned char>(where);
-            p->delay = t0 + t;
-            p->p[0] = (where ? -loc[0] : loc[1]) * k, p->p[1] = (where ? loc[1] : loc[0]) * k, p->p[2] = loc[2] * k;
-            p->v[0] = (where ? -vel[0] : vel[1]) * k, p->v[1] = (where ? vel[1] : vel[0]) * k, p->v[2] = vel[2] * k;
-            p->dragRate = Rand(L.drag0, L.drag1);
-            p->life = Rand(L.life0, L.life1);
-            const float w = Rand(L.w0, L.w1), h = L.h1 > 0.f ? Rand(L.h0, L.h1) : 0.f;
-            p->r0 = 0.5f * (h > 0.f ? h : w) * k;
-            p->aspect = h > 0.f ? w / h : 0.f;
-            p->alpha = Rand(L.a0, L.a1) * fade * s.flashGasAlpha * (where ? s.shellSmoke : 1.f);
-            p->col[0] = p->col[1] = p->col[2] = L.gray;
-            p->rot = Rand(L.rot0, L.rot1) * 6.2831853f;
-            p->rotSpeed = Rand(L.spin0, L.spin1) * 6.2831853f;
-            p->flip = L.flipU && Rand(0.f, 1.f) < 0.5f;
-            p->nA = L.nA, p->nS = L.nS, p->nF = L.nF;
-            memcpy(p->aK, L.aK, sizeof p->aK);
-            memcpy(p->sK, L.sK, sizeof p->sK);
-            memcpy(p->fK, L.fK, sizeof p->fK);
-            if (L.ribbon) {
-                p->aspect = 2.f;
-                p->rot = 1.5707963f;
-                p->rotSpeed = 0.f;
-                p->nF = 0;
-                p->frame0 = static_cast<int>(Rand(0.f, 31.99f));
-                p->fps = L.fps;
-            }
-        }
-    }
-}
 void MuzzleFlash::SpawnGas(const Settings& s) {
     if (!GasLoaded()) return;
-    if (s.flashGasStyle >= 2) {
-        SpawnSmoke(s, 0);
-        smokeTrailArmed_ = true;
-        return;
-    }
     const float k = s.flashGasScale > 0.f ? s.flashGasScale : 1.f, ka = s.flashGasAlpha, kd = s.flashGasDistort;
     auto fit = [&](P* p) {
         for (int c = 0; c < 3; ++c) p->p[c] *= k, p->v[c] *= k, p->g[c] *= k;
@@ -4013,9 +3860,7 @@ void MuzzleFlash::SpawnShellFx(const Settings& s) {
         n = 0;
         for (auto it = v.begin(); it + 1 < v.end() && n < 4; it += 2, ++n) k[n][0] = it[0], k[n][1] = it[1];
     };
-    if (s.flashGasStyle >= 2 && s.flashGas && s.shellSmoke > 0.f && GasLoaded()) {
-        SpawnSmoke(s, 1);
-    } else if (s.shellSmoke > 0.f && GasLoaded()) {
+    if (s.shellSmoke > 0.f && GasLoaded()) {
         for (int i = 0; i < 2; ++i) {
             P* p = Add();
             if (!p) break;
@@ -4226,10 +4071,6 @@ void MuzzleFlash::BeginFrame(double now, const Settings& s) {
             if (s.flashGas && GasLoaded()) SpawnBarrelSmoke(s, now);
             burst_ = 0;
         }
-        if (smokeTrailArmed_ && tLastShot_ >= 0.0 && now - tLastShot_ > 0.12 && tSpawn_ >= 0.0) {
-            smokeTrailArmed_ = false;
-            if (s.flashGasStyle >= 2 && s.flashGas && GasLoaded() && ads_ < 0.5f) SpawnSmoke(s, 0, true, static_cast<float>(now - tSpawn_));
-        }
         return;
     }
     pending_ = false;
@@ -4240,7 +4081,7 @@ void MuzzleFlash::BeginFrame(double now, const Settings& s) {
         tSpawn_ = -1;
         return;
     }
-    static P keep[kMax];
+    P keep[kMax];
     int nk = 0;
     for (int i = 0; i < n_; ++i)
         if (!parts_[i].locked && parts_[i].placed && now - tSpawn_ - parts_[i].delay <= VisibleLife(parts_[i])) {
@@ -4262,7 +4103,7 @@ float MuzzleFlash::LightLevel(double now) const {
 bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* depth, UINT w, UINT h,
                        bool rtvEncodesSrgb, double now, const MuzzleFrame* fp, const WorldCam* cam, const Settings& s) {
     if (!Loaded() || !ctx || !rtv || w < 16 || h < 16) return false;
-    static FlashVertex verts[(kMax + kMaxTracers + kMaxImpacts * kImpactQuads + kMaxFlame) * 6];
+    static FlashVertex verts[(kMax + kMaxTracers + kMaxImpacts * kImpactQuads) * 6];
     int nv = 0;
     int trStart = nv, trCount = 0;
     if (cam && tex_[kFlashTexSpark]) {
@@ -4316,7 +4157,7 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
             float wh = kTracerHalfWidth * h * 0.5f / (hv[2] * ty), wt = kTracerHalfWidth * h * 0.5f / (tv[2] * ty);
             wh = std::max(wh, 0.75f), wt = std::max(wt, 0.75f);
             auto vtx = [&](float x, float y, float off, float u, float v) {
-                return FlashVertex{x + px * off * 2.f / w, y + py * off * 2.f / h, u, v, t.col[0] * s.tracerTint[0], t.col[1] * s.tracerTint[1], t.col[2] * s.tracerTint[2], a, 1.f, 1.f, 0.f};
+                return FlashVertex{x + px * off * 2.f / w, y + py * off * 2.f / h, u, v, t.col[0], t.col[1], t.col[2], a, 1.f, 1.f, 0.f};
             };
             FlashVertex q4[4] = {vtx(hx, hy, -wh, 0.f, 0.f), vtx(hx, hy, wh, 1.f, 0.f), vtx(tx, tyy, -wt, 0.f, 1.f),
                                  vtx(tx, tyy, wt, 1.f, 1.f)};
@@ -4387,145 +4228,8 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
         nImp_ = keep;
         imCount = nv - imStart;
     }
-    int flStart[4] = {}, flCount[4] = {};
-    if (cam && s.flameFx[0]) {
-        float dtf = tFlSim_ < 0.0 ? 0.f : static_cast<float>(now - tFlSim_);
-        if (dtf < 0.f || dtf > 0.1f) dtf = 0.f;
-        tFlSim_ = now;
-        const float ty = std::tan(cam->fovY * 0.5f), aspect = static_cast<float>(w) / static_cast<float>(h);
-        int keep = 0;
-        for (int i = 0; i < nFl_; ++i) {
-            FlameP q = fl_[i];
-            const Settings::FlameLayer& L = s.flame[q.layer];
-            q.age += dtf;
-            if (q.age >= q.life) continue;
-            float k = q.drag > 0.f ? std::exp(-q.drag * dtf) : 1.f;
-            for (int c = 0; c < 3; ++c) q.v[c] *= k;
-            q.v[1] += L.gravity * dtf;
-            for (int c = 0; c < 3; ++c) q.p[c] += q.v[c] * dtf;
-            q.rot += q.spin * dtf;
-            fl_[keep++] = q;
-        }
-        nFl_ = keep;
-        const bool on = fp && tLastShot_ >= 0.0 && now - tLastShot_ < s.flameGap && dtf > 0.f;
-        if (on) {
-            const MuzzleFrame& f = *fp;
-            const float d = std::max(f.pos[2], 0.05f);
-            const float ox = f.pos[0] * f.xs / d * ty * aspect * d, oy = f.pos[1] * f.ys / d * ty * d;
-            const float ad = Clamp01(ads_);
-            auto mix = [ad](float hip, float foc) { return foc >= 0.f ? Lerp(hip, foc, ad) : hip; };
-            const float aimD = s.flameAimAds > 0.f ? Lerp(s.flameAim, s.flameAimAds, ad) : s.flameAim;
-            const float fan = Lerp(s.flameFan, s.flameFanAds, ad) * 0.01745329f;
-            float start[3], dir[3];
-            for (int c = 0; c < 3; ++c) {
-                start[c] = cam->eye[c] + cam->right[c] * ox + cam->up[c] * oy + cam->fwd[c] * d;
-                dir[c] = cam->eye[c] + cam->fwd[c] * aimD - start[c];
-            }
-            float dl = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-            for (float& c : dir) c /= dl > 1e-6f ? dl : 1.f;
-            float a1[3] = {dir[1] * cam->right[2] - dir[2] * cam->right[1], dir[2] * cam->right[0] - dir[0] * cam->right[2],
-                           dir[0] * cam->right[1] - dir[1] * cam->right[0]};
-            float al = std::sqrt(a1[0] * a1[0] + a1[1] * a1[1] + a1[2] * a1[2]);
-            for (float& c : a1) c /= al > 1e-6f ? al : 1.f;
-            float a2[3] = {dir[1] * a1[2] - dir[2] * a1[1], dir[2] * a1[0] - dir[0] * a1[2], dir[0] * a1[1] - dir[1] * a1[0]};
-            for (int li = 0; li < 4; ++li) {
-                const Settings::FlameLayer& L = s.flame[li];
-                const float rate = mix(L.rate, L.rateAds);
-                if (!flTex_[li] || rate <= 0.f) {
-                    flAcc_[li] = 0.f;
-                    continue;
-                }
-                flAcc_[li] += rate * dtf;
-                const float spread = mix(L.spread, L.spreadAds) * 0.01745329f;
-                while (flAcc_[li] >= 1.f && nFl_ < kMaxFlame) {
-                    flAcc_[li] -= 1.f;
-                    FlameP& q = fl_[nFl_++];
-                    float u = 0.f;
-                    if (fan > 0.f) {
-                        flPh_[li] += 0.6180339887f;
-                        if (flPh_[li] >= 1.f) flPh_[li] -= 1.f;
-                        u = flPh_[li] + Rand(-0.04f, 0.04f);
-                        u = u < 0.f ? u + 1.f : u >= 1.f ? u - 1.f : u;
-                    }
-                    const float yw = fan > 0.f ? -fan + 2.f * fan * u : 0.f, cy = std::cos(yw), sy = std::sin(yw);
-                    float th = Rand(0.f, 6.2831853f), ph = spread * std::sqrt(Rand(0.f, 1.f));
-                    float sp = Rand(mix(L.speed[0], L.speedAds[0]), mix(L.speed[1], L.speedAds[1])), sub = Rand(0.f, dtf);
-                    for (int c = 0; c < 3; ++c) {
-                        const float bd = dir[c] * cy + a2[c] * sy, b2 = a2[c] * cy - dir[c] * sy;
-                        float vd = bd * std::cos(ph) + (a1[c] * std::cos(th) + b2 * std::sin(th)) * std::sin(ph);
-                        q.v[c] = vd * sp;
-                        q.p[c] = start[c] + Rand(-L.jitter, L.jitter) + q.v[c] * sub;
-                    }
-                    q.age = sub;
-                    q.life = Rand(mix(L.life[0], L.lifeAds[0]), mix(L.life[1], L.lifeAds[1]));
-                    q.drag = mix(L.drag, L.dragAds);
-                    q.s0 = mix(L.size[0], L.sizeAds[0]);
-                    q.s1 = mix(L.size[1], L.sizeAds[1]);
-                    q.ad = ad;
-                    q.rot = Rand(0.f, 6.2831853f);
-                    q.spin = Rand(-L.spin, L.spin);
-                    q.layer = static_cast<unsigned char>(li);
-                    q.f0 = static_cast<unsigned short>(L.randFrame ? Rand(0.f, static_cast<float>(L.cx * L.cy) - 0.001f) : 0.f);
-                }
-            }
-        } else {
-            for (float& a : flAcc_) a = 0.f;
-        }
-        for (int li = 0; li < 4; ++li) {
-            flStart[li] = nv;
-            const Settings::FlameLayer& L = s.flame[li];
-            if (!flTex_[li]) continue;
-            const int nfr = L.cx * L.cy;
-            for (int i = 0; i < nFl_; ++i) {
-                const FlameP& q = fl_[i];
-                if (q.layer != li) continue;
-                float dd[3] = {q.p[0] - cam->eye[0], q.p[1] - cam->eye[1], q.p[2] - cam->eye[2]};
-                float z = dd[0] * cam->fwd[0] + dd[1] * cam->fwd[1] + dd[2] * cam->fwd[2];
-                if (z < 0.15f) continue;
-                float t = Clamp01(q.age / q.life);
-                auto mq = [&q](float hip, float foc) { return foc >= 0.f ? Lerp(hip, foc, q.ad) : hip; };
-                const float fa = mq(L.fade[0], L.fadeAds[0]), fb = mq(L.fade[1], L.fadeAds[1]), bright = mq(L.bright, L.brightAds);
-                float a = mq(L.alpha, L.alphaAds) * s.flashIntensity;
-                if (fa > 0.f && t < fa) a *= t / fa;
-                if (t > fb) a *= Clamp01((1.f - t) / std::max(1.f - fb, 1e-3f));
-                if (a <= 0.002f) continue;
-                float cx = (dd[0] * cam->right[0] + dd[1] * cam->right[1] + dd[2] * cam->right[2]) / (z * ty * aspect);
-                float cy = (dd[0] * cam->up[0] + dd[1] * cam->up[1] + dd[2] * cam->up[2]) / (z * ty);
-                float ge = L.sizeEase > 0.f ? 1.f - std::pow(1.f - t, L.sizeEase) : t;
-                float r = Lerp(q.s0, q.s1, ge);
-                float hy = r / (z * ty);
-                float ang = q.rot, hl = hy;
-                const float stretch = mq(L.stretch, L.stretchAds);
-                if (stretch > 0.f) {
-                    float e[3] = {dd[0] + q.v[0] * stretch, dd[1] + q.v[1] * stretch, dd[2] + q.v[2] * stretch};
-                    float ez = std::max(e[0] * cam->fwd[0] + e[1] * cam->fwd[1] + e[2] * cam->fwd[2], 0.15f);
-                    float ex = (e[0] * cam->right[0] + e[1] * cam->right[1] + e[2] * cam->right[2]) / (ez * ty * aspect);
-                    float ey = (e[0] * cam->up[0] + e[1] * cam->up[1] + e[2] * cam->up[2]) / (ez * ty);
-                    float sx = (ex - cx) * aspect, sy = ey - cy, sl = std::sqrt(sx * sx + sy * sy);
-                    if (sl > 1e-5f) ang = std::atan2(sy, sx), hl = hy + sl * 0.5f;
-                }
-                int fr = L.fps > 0.f ? (q.f0 + static_cast<int>(q.age * L.fps)) % nfr : std::min(nfr - 1, static_cast<int>(t * nfr));
-                float u0 = static_cast<float>(fr % L.cx) / L.cx, v0 = static_cast<float>(fr / L.cx) / L.cy;
-                float u1 = u0 + 1.f / L.cx, v1 = v0 + 1.f / L.cy;
-                float col[3];
-                for (int c = 0; c < 3; ++c) col[c] = Lerp(L.col0[c], L.col1[c], t);
-                float ca = std::cos(ang), sa = std::sin(ang);
-                const float cs[4][2] = {{-1, 1}, {1, 1}, {-1, -1}, {1, -1}};
-                const float tc[4][2] = {{u0, v0}, {u1, v0}, {u0, v1}, {u1, v1}};
-                FlashVertex q4[4];
-                for (int k = 0; k < 4; ++k) {
-                    float ix = cs[k][0] * hl * ca - cs[k][1] * hy * sa, iy = cs[k][0] * hl * sa + cs[k][1] * hy * ca;
-                    q4[k] = {cx + ix / aspect, cy + iy, tc[k][0], tc[k][1], col[0], col[1], col[2], a, L.additive ? 1.f : 0.f, bright, 0.9999f};
-                }
-                const int idx[6] = {0, 1, 2, 2, 1, 3};
-                for (int k = 0; k < 6; ++k) verts[nv++] = q4[idx[k]];
-            }
-            flCount[li] = nv - flStart[li];
-        }
-    }
     int counts[kFlashTexCount] = {}, starts[kFlashTexCount] = {};
-    const int order[16] = {kFlashTexDistHaze, kFlashTexDistRing, kFlashTexSmoke, kFlashTexSmokeDust, kFlashTexSmokeTrail, kFlashTexSmoke34,
-                           kFlashTexSmoke38, kFlashTexSmoke37, kFlashTexSmoke39, kFlashTexGasWisp, kFlashTexGasPuff,
+    const int order[10] = {kFlashTexDistHaze, kFlashTexDistRing, kFlashTexSmoke, kFlashTexGasWisp, kFlashTexGasPuff,
                            kFlashTexGasBall, kFlashTexGasJet, kFlashTexFire, kFlashTexVent, kFlashTexGlow};
     const bool canDist = scene_ && psDist_;
     int live = 0;
@@ -4544,7 +4248,7 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
         for (int k = 0; k < 3; ++k)
             out[k] = (point ? f.pos[k] : 0.f) + (f.fwd[k] * l[0] + f.left[k] * l[1] + f.up[k] * l[2]) * unit;
     };
-    for (int oi = 0; oi < 16; ++oi) {
+    for (int oi = 0; oi < 10; ++oi) {
         int tx = order[oi];
         starts[tx] = nv;
         for (int i = 0; i < n_; ++i) {
@@ -4607,7 +4311,6 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
             int fr = p.frame0;
             if (p.fitLife && nf > 1) fr = p.frame0 + static_cast<int>(lf * static_cast<float>(nf - p.frame0));
             else if (p.fps > 0.f && nf > 1) fr = (p.frame0 + static_cast<int>(age * p.fps)) % nf;
-            if (p.nF) fr = static_cast<int>(CurveAt(p.fK, p.nF, lf));
             if (fr >= nf) fr = nf - 1;
             if (fr < 0) fr = 0;
             const float* uv = sh.rect[q][fr];
@@ -4634,8 +4337,7 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
             float cr = std::cos(rot), sr = std::sin(rot);
             const float cs[4][2] = {{-1, 1}, {1, 1}, {-1, -1}, {1, -1}};
             const float tc[4][2] = {{u0, v0}, {u1, v0}, {u0, v1}, {u1, v1}};
-            const bool gas = tx == kFlashTexGasJet || tx == kFlashTexGasPuff || tx == kFlashTexGasBall || tx == kFlashTexGasWisp || dist ||
-                             tx >= kFlashTexSmoke34;
+            const bool gas = tx == kFlashTexGasJet || tx == kFlashTexGasPuff || tx == kFlashTexGasBall || tx == kFlashTexGasWisp || dist;
             const bool over = gas || tx == kFlashTexSmoke;
             const float zd = gas && depth && f.zf > f.zn ? f.zf / (f.zf - f.zn) * (1.f - f.zn / pos[2]) : 0.f;
             float bright = p.bright;
@@ -4706,12 +4408,7 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
         ctx->PSSetShaderResources(0, 1, &tex_[kFlashTexSmoke]);
         ctx->Draw(static_cast<UINT>(imCount), static_cast<UINT>(imStart));
     }
-    for (int li = 0; li < 4; ++li) {
-        if (!flCount[li] || !flTex_[li]) continue;
-        ctx->PSSetShaderResources(0, 1, &flTex_[li]);
-        ctx->Draw(static_cast<UINT>(flCount[li]), static_cast<UINT>(flStart[li]));
-    }
-    for (int oi = 2; oi < 16; ++oi) {
+    for (int oi = 2; oi < 10; ++oi) {
         int tx = order[oi];
         if (!counts[tx] || !tex_[tx]) continue;
         ctx->PSSetShaderResources(0, 1, &tex_[tx]);
@@ -4745,8 +4442,6 @@ void MuzzleFlash::Release() {
     SafeRelease(dssDepth_);
     SafeRelease(samp_);
     for (int i = 0; i < kFlashTexCount; ++i) SafeRelease(tex_[i]);
-    for (auto& t : flTex_) SafeRelease(t);
-    nFl_ = 0;
     scene_ = nullptr;
     sceneDepth_ = nullptr;
     burst_ = 0;
@@ -4781,7 +4476,7 @@ bool Crosshair::Init(ID3D11Device* dev) {
     SafeRelease(vsb);
     SafeRelease(psb);
     D3D11_BUFFER_DESC bd = {};
-    bd.ByteWidth = sizeof(CrossVertex) * 192;
+    bd.ByteWidth = sizeof(CrossVertex) * 128;
     bd.Usage = D3D11_USAGE_DYNAMIC;
     bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -4928,91 +4623,6 @@ bool Crosshair::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT
     bk.Restore(ctx);
     return true;
 }
-int Crosshair::DrawHitMarker(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool rtvEncodesSrgb, const CrosshairSettings& s,
-                             float hitAge, float killAge) {
-    const bool kill = killAge >= 0.f && killAge < s.killMarkerTime;
-    const bool overlap = std::fabs(s.hitMarkerRadius - s.killMarkerRadius) * 2.f < s.hitMarkerLength + s.killMarkerLength;
-    const bool hit = hitAge >= 0.f && hitAge < s.hitMarkerTime && (killAge < 0.f || hitAge < killAge) && !(kill && overlap);
-    if (!s.hitMarker || (!hit && !kill) || !ctx || !rtv || w < 16 || h < 16 || failed_) return 0;
-    ID3D11Device* dev = nullptr;
-    ctx->GetDevice(&dev);
-    if (!dev) return 0;
-    if (dev != dev_ || !vs_) {
-        if (!Init(dev)) {
-            failed_ = true;
-            dev->Release();
-            return 0;
-        }
-    }
-    dev->Release();
-    const float k = static_cast<float>(h) / 1080.f;
-    const float th = std::fmax(1.f, std::round(s.thickness * k));
-    const float dcx = std::floor(w * 0.5f) - std::floor(th * 0.5f) + th * 0.5f, dcy = std::floor(h * 0.5f) - std::floor(th * 0.5f) + th * 0.5f;
-    CrossVertex v[192];
-    int nv = 0;
-    auto stroke = [&](float ux, float uy, float r, float hl, float hw, bool round, const float* c4) {
-        if (round && hl < hw) hl = hw;
-        const float mx = dcx + ux * r, my = dcy + uy * r, el = hl + 1.f, ew = hw + 1.f;
-        const float ax = ux * el, ay = uy * el, nx = -uy * ew, ny = ux * ew;
-        const float px[4][2] = {{mx - ax - nx, my - ay - ny}, {mx + ax - nx, my + ay - ny}, {mx - ax + nx, my - ay + ny}, {mx + ax + nx, my + ay + ny}};
-        const float lu = el / (round ? hw : hl), lv = ew / hw, mz = round ? -(2.f + (hl - hw) / hw) : -1.f;
-        const float lc[4][2] = {{-lu, -lv}, {lu, -lv}, {-lu, lv}, {lu, lv}};
-        CrossVertex q[4];
-        for (int i = 0; i < 4; ++i)
-            q[i] = {px[i][0] / w * 2.f - 1.f, 1.f - px[i][1] / h * 2.f, c4[0], c4[1], c4[2], c4[3], lc[i][0], lc[i][1], mz};
-        const int idx[6] = {0, 1, 2, 2, 1, 3};
-        for (int i = 0; i < 6; ++i) v[nv++] = q[idx[i]];
-    };
-    const float d = 0.70710678f;
-    const float dirs[4][2] = {{d, d}, {-d, d}, {d, -d}, {-d, -d}};
-    auto mark = [&](float r, float len, float wid, bool round, float ol, float olA, float glow, float glowA, const float* src) {
-        float col[4] = {src[0], src[1], src[2], src[3]};
-        if (rtvEncodesSrgb)
-            for (int c = 0; c < 3; ++c) col[c] = SrgbToLinear(col[c]);
-        const float black[4] = {0.f, 0.f, 0.f, olA * src[3]};
-        const float hl = std::fmax(0.5f, len * k * 0.5f), hw = std::fmax(0.5f, wid * k * 0.5f), e = ol > 0.f ? std::fmax(0.75f, ol * k) : 0.f;
-        const float g = glow > 0.f ? glow * k : 0.f;
-        if (g > 0.f && glowA > 0.f) {
-            const float g1[4] = {col[0], col[1], col[2], glowA * 0.45f * src[3]}, g2[4] = {col[0], col[1], col[2], glowA * src[3]};
-            for (const auto& q : dirs) stroke(q[0], q[1], r * k, hl + g, hw + g, round, g1);
-            for (const auto& q : dirs) stroke(q[0], q[1], r * k, hl + g * 0.5f, hw + g * 0.5f, round, g2);
-        }
-        if (e > 0.f && olA > 0.f)
-            for (const auto& q : dirs) stroke(q[0], q[1], r * k, hl + e, hw + e, round, black);
-        for (const auto& q : dirs) stroke(q[0], q[1], r * k, hl, hw, round, col);
-    };
-    if (kill)
-        mark(s.killMarkerRadius, s.killMarkerLength, s.killMarkerWidth, s.killMarkerRound, s.killMarkerOutline, s.killMarkerOutlineAlpha, s.killMarkerGlow,
-             s.killMarkerGlowAlpha, s.killMarkerColor);
-    if (hit)
-        mark(s.hitMarkerRadius, s.hitMarkerLength, s.hitMarkerWidth, s.hitMarkerRound, s.hitMarkerOutline, s.hitMarkerOutlineAlpha, s.hitMarkerGlow,
-             s.hitMarkerGlowAlpha, s.hitMarkerColor);
-    D3D11_MAPPED_SUBRESOURCE m;
-    if (FAILED(ctx->Map(vb_, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return 0;
-    memcpy(m.pData, v, sizeof(CrossVertex) * nv);
-    ctx->Unmap(vb_, 0);
-    StateBackup bk;
-    bk.Save(ctx);
-    D3D11_VIEWPORT vp = {0.f, 0.f, static_cast<float>(w), static_cast<float>(h), 0.f, 1.f};
-    ctx->RSSetViewports(1, &vp);
-    ctx->RSSetState(rs_);
-    ctx->OMSetRenderTargets(1, &rtv, nullptr);
-    const float bf[4] = {0, 0, 0, 0};
-    ctx->OMSetBlendState(bs_, bf, 0xffffffff);
-    ctx->OMSetDepthStencilState(dss_, 0);
-    UINT stride = sizeof(CrossVertex), off = 0;
-    ctx->IASetVertexBuffers(0, 1, &vb_, &stride, &off);
-    ctx->IASetInputLayout(layout_);
-    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx->VSSetShader(vs_, nullptr, 0);
-    ctx->PSSetShader(ps_, nullptr, 0);
-    ctx->GSSetShader(nullptr, nullptr, 0);
-    ctx->HSSetShader(nullptr, nullptr, 0);
-    ctx->DSSetShader(nullptr, nullptr, 0);
-    ctx->Draw(static_cast<UINT>(nv), 0);
-    bk.Restore(ctx);
-    return (hit ? 1 : 0) | (kill ? 2 : 0);
-}
 namespace {
 const char kShellShader[] = R"HLSL(cbuffer CShellFrame : register(b0) {
     row_major float4x4 uProj;
@@ -5025,7 +4635,6 @@ const char kShellShader[] = R"HLSL(cbuffer CShellFrame : register(b0) {
     float4 uFlashPos;
     float4 uFlashCol;
     float4 uBrass;
-    float4 uHull;
 };
 cbuffer CShellObj : register(b1) { float4 uRows[192]; };
 Texture2D tScene : register(t3);
@@ -5053,10 +4662,8 @@ float3 SrgbDecode(float3 c) {
     return float3(c.x <= 0.04045 ? lo.x : hi.x, c.y <= 0.04045 ? lo.y : hi.y, c.z <= 0.04045 ? lo.z : hi.z);
 }
 float4 PS(PSIn i) : SV_Target {
-    bool plastic = i.shade < 0;
-    float3 alb = plastic ? uHull.rgb * -i.shade : uBrass.rgb * i.shade;
-    float metal = plastic ? 0 : 1;
-    float rough = clamp(plastic ? uHull.w : uBrass.w, 0.04, 1);
+    float3 alb = uBrass.rgb * i.shade;
+    float rough = clamp(uBrass.w, 0.04, 1);
     float3 N = normalize(i.n);
     float3 V = normalize(-i.vpos);
     if (dot(N, V) < 0) N = -N;
@@ -5080,9 +4687,9 @@ float4 PS(PSIn i) : SV_Target {
     float D = a2 / (3.14159265 * d * d);
     float k = (rough + 1) * (rough + 1) / 8;
     float G = (NdL / (NdL * (1 - k) + k)) * (NdV / (NdV * (1 - k) + k));
-    float3 F0 = lerp(float3(0.04, 0.04, 0.04), alb, metal);
+    float3 F0 = alb;
     float3 F = F0 + (1 - F0) * pow(1 - VdH, 5);
-    float3 direct = (D * G * F / (4 * NdL * NdV + 1e-4) + (1 - F) * (1 - metal) * alb / 3.14159265) * lightCol * NdL;
+    float3 direct = D * G * F / (4 * NdL * NdV + 1e-4) * lightCol * NdL;
     if (uFlashCol.w > 0) {
         float3 Lp = uFlashPos.xyz - i.vpos;
         float dist = length(Lp);
@@ -5095,11 +4702,10 @@ float4 PS(PSIn i) : SV_Target {
         float Ref = a2 / (3.14159265 * df * df);
         float Gf = (NdLf / (NdLf * (1 - k) + k)) * (NdV / (NdV * (1 - k) + k));
         float3 Ff = F0 + (1 - F0) * pow(1 - saturate(dot(V, Hf)), 5);
-        direct += (Ref * Gf * Ff / (4 * NdLf * NdV + 1e-4) + (1 - Ff) * (1 - metal) * alb / 3.14159265) * uFlashCol.rgb * NdLf * att;
+        direct += Ref * Gf * Ff / (4 * NdLf * NdV + 1e-4) * uFlashCol.rgb * NdLf * att;
     }
     float3 Fa = F0 + (max(float3(1 - rough, 1 - rough, 1 - rough), F0) - F0) * pow(1 - NdV, 5);
-    float3 amb = lerp(ambGround, ambSky, N.y * 0.5 + 0.5);
-    float3 ambient = amb * (alb * (1 - metal) * (1 - Fa)) + lerp(ambGround, ambSky, saturate(reflect(-V, N).y * 0.5 + 0.5)) * Fa * (1 - rough * 0.7);
+    float3 ambient = lerp(ambGround, ambSky, saturate(reflect(-V, N).y * 0.5 + 0.5)) * Fa * (1 - rough * 0.7);
     float3 c = (direct + ambient) * uParams.x;
     if (uParams.y > 0.5) c = SrgbEncode(c);
     return float4(c, 1);
@@ -5108,9 +4714,9 @@ float4 PS(PSIn i) : SV_Target {
 struct ShellCbFrame {
     float proj[16];
     float lightDir[4], lightColor[4], ambSky[4], ambGround[4];
-    float params[4], scene[4], flashPos[4], flashCol[4], brass[4], hull[4];
+    float params[4], scene[4], flashPos[4], flashCol[4], brass[4];
 };
-static_assert(sizeof(ShellCbFrame) == 224, "shell cb");
+static_assert(sizeof(ShellCbFrame) == 208, "shell cb");
 struct ShellVtx {
     float p[3], n[3], shade;
 };
@@ -5140,23 +4746,13 @@ const ShellProfile kProfile762[] = {
     {51.18f, 4.39f, 51.18f, 3.95f, 0.90f},
     {51.18f, 3.95f, 45.00f, 3.95f, 0.22f},
 };
-const ShellProfile kProfile12[] = {
-    {0.00f, 10.90f, 1.50f, 10.90f, 0.95f},
-    {1.50f, 10.90f, 1.50f, 10.10f, 0.85f},
-    {1.50f, 10.10f, 16.50f, 10.05f, 1.00f},
-    {16.50f, 10.05f, 16.70f, 9.95f, 0.85f},
-    {16.70f, 9.95f, 66.00f, 9.90f, -1.00f},
-    {66.00f, 9.90f, 70.00f, 9.55f, -0.90f},
-    {70.00f, 9.55f, 70.00f, 9.00f, -0.80f},
-    {70.00f, 9.00f, 18.00f, 9.20f, -0.22f},
-};
-constexpr int kMeshVertCap = 1600, kMeshIdxCap = 6400;
+constexpr int kMeshVertCap = 1200, kMeshIdxCap = 4800;
 struct MeshOut {
     ShellVtx* v;
     uint32_t* ix;
     int nv, ni;
 };
-void LatheCasing(MeshOut& m, const ShellProfile* prof, int n, float len, float innerX, float innerR, float innerShade = 0.12f) {
+void LatheCasing(MeshOut& m, const ShellProfile* prof, int n, float len, float innerX, float innerR) {
     const float xc = len * 0.45f, mm = 0.001f;
     const int v0 = m.nv;
     for (int i = 0; i < n; ++i) {
@@ -5175,7 +4771,7 @@ void LatheCasing(MeshOut& m, const ShellProfile* prof, int n, float len, float i
             m.ix[m.ni++] = a1, m.ix[m.ni++] = b0, m.ix[m.ni++] = b1;
         }
     }
-    const float disk[2][4] = {{0.f, prof[0].r0, -1.f, 0.9f}, {innerX, innerR, 1.f, innerShade}};
+    const float disk[2][4] = {{0.f, prof[0].r0, -1.f, 0.9f}, {innerX, innerR, 1.f, 0.12f}};
     for (const auto& d : disk) {
         uint32_t c0 = static_cast<uint32_t>(m.nv - v0);
         m.v[m.nv++] = {{(d[0] - xc) * mm, 0.f, 0.f}, {d[2], 0.f, 0.f}, d[3]};
@@ -5292,12 +4888,11 @@ bool ShellEject::Load(ID3D11Device* dev, char* err, size_t errLen) {
     static ShellVtx verts[kMeshVertCap];
     static uint32_t idx[kMeshIdxCap];
     MeshOut mo = {verts, idx, 0, 0};
-    for (int k = 0; k < 4; ++k) {
+    for (int k = 0; k < 3; ++k) {
         kindIdx_[k] = static_cast<UINT>(mo.nv);
         kindFirst_[k] = static_cast<UINT>(mo.ni);
         if (k == 0) LatheCasing(mo, kProfile556, sizeof kProfile556 / sizeof *kProfile556, 44.7f, 40.0f, 2.86f);
         else if (k == 1) LatheCasing(mo, kProfile762, sizeof kProfile762 / sizeof *kProfile762, 51.18f, 45.0f, 3.95f);
-        else if (k == 3) LatheCasing(mo, kProfile12, sizeof kProfile12 / sizeof *kProfile12, 70.0f, 18.0f, 9.20f, -0.12f);
         else BuildLink(mo);
         kindCount_[k] = static_cast<UINT>(mo.ni) - kindFirst_[k];
     }
@@ -5456,7 +5051,7 @@ bool ShellEject::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3
         e.landed = false;
     };
     for (; pending_ > 0; --pending_) {
-        spawnOne(s.shellCaliber == 762 ? 1 : s.shellCaliber == 12 ? 3 : 0);
+        spawnOne(s.shellCaliber == 762 ? 1 : 0);
         if (s.shellLink) spawnOne(2);
     }
     int keep = 0;
@@ -5492,8 +5087,8 @@ bool ShellEject::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3
     n_ = keep;
     lastMinX_ = 1e9f;
     if (!n_ || !f) return false;
-    static float rowsK[4][kMax * 12];
-    int ndK[4] = {}, nd = 0;
+    static float rowsK[3][kMax * 12];
+    int ndK[3] = {}, nd = 0;
     for (int i = 0; i < n_; ++i) {
         const Shell& e = sh_[i];
         float lf = e.age / e.life;
@@ -5516,7 +5111,7 @@ bool ShellEject::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3
         }
         if (pv[2] < f->zn + 0.005f || pv[2] > f->zf) continue;
         if (pv[0] < lastMinX_) lastMinX_ = pv[0];
-        const int k = e.kind < 4 ? e.kind : 0;
+        const int k = e.kind < 3 ? e.kind : 0;
         float* o = rowsK[k] + ndK[k] * 12;
         for (int r = 0; r < 3; ++r)
             o[r * 4] = mv[r * 3] * sc, o[r * 4 + 1] = mv[r * 3 + 1] * sc, o[r * 4 + 2] = mv[r * 3 + 2] * sc, o[r * 4 + 3] = pv[r];
@@ -5559,9 +5154,7 @@ bool ShellEject::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3
         for (int k = 0; k < 3; ++k) cf.flashCol[k] = c[k] * 2.5f * s.flashLight * flashLight;
         cf.flashCol[3] = 1.f;
     }
-    const float mat[4][4] = {{0.95f, 0.70f, 0.32f, 0.30f}, {0.95f, 0.70f, 0.32f, 0.30f}, {0.42f, 0.42f, 0.44f, 0.45f}, {0.95f, 0.70f, 0.32f, 0.30f}};
-    const float hull[4] = {0.21f, 0.004f, 0.004f, 0.45f};
-    memcpy(cf.hull, hull, sizeof cf.hull);
+    const float mat[3][4] = {{0.95f, 0.70f, 0.32f, 0.30f}, {0.95f, 0.70f, 0.32f, 0.30f}, {0.42f, 0.42f, 0.44f, 0.45f}};
     D3D11_MAPPED_SUBRESOURCE mp;
     StateBackup bk;
     bk.Save(ctx);
@@ -5588,7 +5181,7 @@ bool ShellEject::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3
     ctx->GSSetShader(nullptr, nullptr, 0);
     ctx->HSSetShader(nullptr, nullptr, 0);
     ctx->DSSetShader(nullptr, nullptr, 0);
-    for (int k = 0; k < 4; ++k) {
+    for (int k = 0; k < 3; ++k) {
         if (!ndK[k] || !kindCount_[k]) continue;
         memcpy(cf.brass, mat[k], sizeof cf.brass);
         if (FAILED(ctx->Map(cbFrame_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mp))) break;
@@ -6380,222 +5973,6 @@ void Shield::Release() {
     n_ = hitPending_ = 0;
     for (UINT& c : kindCount_) c = 0;
 }
-static const char kDofShader[] = R"HLSL(cbuffer C : register(b0) {
-    float4 gSize;
-    float4 gHalf;
-    float4 gDof;
-    float4 gDir;
-    float4 gMisc;
-};
-Texture2D tColor : register(t0);
-Texture2D<float> tDepth : register(t1);
-Texture2D tBlur : register(t2);
-SamplerState sLin : register(s0);
-struct V { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
-V VS(uint id : SV_VertexID) {
-    V o;
-    float2 t = float2((id << 1) & 2, id & 2);
-    o.uv = t;
-    o.pos = float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
-    return o;
-}
-float Coc(float d) {
-    if (d >= 0.99999) return 0;
-    float z = 0.01 * 50.0 / (50.0 - d * (50.0 - 0.01));
-    float c = saturate((gDof.x - z) * gDof.y);
-    return c * c;
-}
-float3 In(float3 c) { return gDir.z > 0.5 ? c * c : c; }
-float4 PSDown(V i) : SV_Target {
-    int2 p = int2(i.pos.xy) * 2, m = int2(gSize.xy) - 1;
-    float3 c = 0;
-    float k = 0;
-    [unroll] for (int j = 0; j < 4; ++j) {
-        int2 q = min(p + int2(j & 1, j >> 1), m);
-        c += In(tColor.Load(int3(q, 0)).rgb);
-        k = max(k, Coc(tDepth.Load(int3(q, 0))));
-    }
-    return float4(c * 0.25, k);
-}
-float4 PSBlur(V i) : SV_Target {
-    float2 st = gDir.xy * gHalf.zw * (gDof.z / 8.0);
-    float3 acc = 0;
-    float ws = 0, k = 0;
-    [unroll] for (int j = -8; j <= 8; ++j) {
-        float4 s = tColor.SampleLevel(sLin, i.uv + st * j, 0);
-        float x = j / 8.0, w = exp(-4.5 * x * x);
-        acc += s.rgb * w;
-        ws += w;
-        k = max(k, s.a * (1.0 - 0.7 * abs(x)));
-    }
-    return float4(acc / ws, k);
-}
-float4 PSComp(V i) : SV_Target {
-    int2 p = int2(i.pos.xy);
-    float3 sharp = In(tColor.Load(int3(p, 0)).rgb);
-    float4 b = tBlur.SampleLevel(sLin, i.uv, 0);
-    float k = saturate(max(Coc(tDepth.Load(int3(p, 0))), b.a)) * gDof.w;
-    float3 c = lerp(sharp, b.rgb, k);
-    if (gMisc.x > 0.5) c = lerp(c, float3(1, 0, 0), 0.6 * k);
-    return float4(gDir.w > 0.5 ? sqrt(max(c, 0)) : c, 1);
-}
-)HLSL";
-bool NearDof::Init(ID3D11Device* dev) {
-    Release();
-    dev_ = dev;
-    FnD3DCompile compile = GetCompiler();
-    if (!compile) return false;
-    const char* entry[4] = {"VS", "PSDown", "PSBlur", "PSComp"};
-    ID3DBlob* b[4] = {};
-    bool ok = true;
-    for (int i = 0; i < 4 && ok; ++i) {
-        ID3DBlob* msg = nullptr;
-        ok = SUCCEEDED(compile(kDofShader, sizeof kDofShader - 1, "tenzin_fps_dof", nullptr, nullptr, entry[i], i ? "ps_5_0" : "vs_5_0",
-                               D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &b[i], &msg));
-        SafeRelease(msg);
-    }
-    ok = ok && SUCCEEDED(dev->CreateVertexShader(b[0]->GetBufferPointer(), b[0]->GetBufferSize(), nullptr, &vs_)) &&
-         SUCCEEDED(dev->CreatePixelShader(b[1]->GetBufferPointer(), b[1]->GetBufferSize(), nullptr, &psDown_)) &&
-         SUCCEEDED(dev->CreatePixelShader(b[2]->GetBufferPointer(), b[2]->GetBufferSize(), nullptr, &psBlur_)) &&
-         SUCCEEDED(dev->CreatePixelShader(b[3]->GetBufferPointer(), b[3]->GetBufferSize(), nullptr, &psComp_));
-    for (ID3DBlob*& x : b) SafeRelease(x);
-    D3D11_BUFFER_DESC bd = {};
-    bd.ByteWidth = 80;
-    bd.Usage = D3D11_USAGE_DYNAMIC;
-    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    ok = ok && SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &cb_));
-    D3D11_SAMPLER_DESC sd = {};
-    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
-    sd.MaxLOD = D3D11_FLOAT32_MAX;
-    ok = ok && SUCCEEDED(dev->CreateSamplerState(&sd, &samp_));
-    D3D11_BLEND_DESC bld = {};
-    bld.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-    ok = ok && SUCCEEDED(dev->CreateBlendState(&bld, &bsAll_));
-    bld.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
-    ok = ok && SUCCEEDED(dev->CreateBlendState(&bld, &bsRgb_));
-    D3D11_RASTERIZER_DESC rd = {};
-    rd.FillMode = D3D11_FILL_SOLID;
-    rd.CullMode = D3D11_CULL_NONE;
-    rd.DepthClipEnable = TRUE;
-    ok = ok && SUCCEEDED(dev->CreateRasterizerState(&rd, &rs_));
-    D3D11_DEPTH_STENCIL_DESC dd = {};
-    dd.DepthEnable = FALSE;
-    dd.StencilEnable = FALSE;
-    ok = ok && SUCCEEDED(dev->CreateDepthStencilState(&dd, &dss_));
-    if (!ok) Release();
-    return ok;
-}
-bool NearDof::EnsureTargets(UINT w, UINT h) {
-    const UINT hw = (w + 1) / 2, hh = (h + 1) / 2;
-    if (rtv_[0] && rtv_[1] && hw == hw_ && hh == hh_) return true;
-    for (int i = 0; i < 2; ++i) SafeRelease(rtv_[i]), SafeRelease(srv_[i]), SafeRelease(tex_[i]);
-    hw_ = hh_ = 0;
-    D3D11_TEXTURE2D_DESC td = {};
-    td.Width = hw;
-    td.Height = hh;
-    td.MipLevels = td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    td.SampleDesc.Count = 1;
-    td.Usage = D3D11_USAGE_DEFAULT;
-    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    for (int i = 0; i < 2; ++i)
-        if (FAILED(dev_->CreateTexture2D(&td, nullptr, &tex_[i])) || FAILED(dev_->CreateShaderResourceView(tex_[i], nullptr, &srv_[i])) ||
-            FAILED(dev_->CreateRenderTargetView(tex_[i], nullptr, &rtv_[i]))) {
-            for (int k = 0; k < 2; ++k) SafeRelease(rtv_[k]), SafeRelease(srv_[k]), SafeRelease(tex_[k]);
-            return false;
-        }
-    hw_ = hw, hh_ = hh;
-    return true;
-}
-void NearDof::Release() {
-    SafeRelease(vs_);
-    SafeRelease(psDown_);
-    SafeRelease(psBlur_);
-    SafeRelease(psComp_);
-    SafeRelease(cb_);
-    SafeRelease(samp_);
-    SafeRelease(bsAll_);
-    SafeRelease(bsRgb_);
-    SafeRelease(rs_);
-    SafeRelease(dss_);
-    for (int i = 0; i < 2; ++i) SafeRelease(rtv_[i]), SafeRelease(srv_[i]), SafeRelease(tex_[i]);
-    hw_ = hh_ = 0;
-    dev_ = nullptr;
-}
-bool NearDof::Apply(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11ShaderResourceView* color, bool colorGamma,
-                    ID3D11ShaderResourceView* depth, UINT w, UINT h, bool rtvEncodesSrgb, const DofParams& p) {
-    if (!ctx || !rtv || !color || !depth || w < 16 || h < 16 || failed_ || !(p.weight > 0.f)) return false;
-    ID3D11Device* dev = nullptr;
-    ctx->GetDevice(&dev);
-    if (!dev) return false;
-    if (dev != dev_ || !vs_) {
-        if (!Init(dev)) {
-            failed_ = true;
-            dev->Release();
-            return false;
-        }
-    }
-    dev->Release();
-    if (!EnsureTargets(w, h)) return false;
-    float c[20] = {static_cast<float>(w), static_cast<float>(h), 1.f / w, 1.f / h,
-                   static_cast<float>(hw_), static_cast<float>(hh_), 1.f / hw_, 1.f / hh_,
-                   p.focus, 1.f / std::fmax(p.ramp, 0.01f), std::fmax(p.radiusPx, 0.f) * 0.5f, std::fmin(p.weight, 1.f),
-                   0.f, 0.f, 0.f, 0.f,
-                   p.debug ? 1.f : 0.f, 0.f, 0.f, 0.f};
-    StateBackup bk;
-    bk.Save(ctx);
-    ctx->RSSetState(rs_);
-    ctx->OMSetDepthStencilState(dss_, 0);
-    ctx->IASetInputLayout(nullptr);
-    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx->VSSetShader(vs_, nullptr, 0);
-    ctx->GSSetShader(nullptr, nullptr, 0);
-    ctx->HSSetShader(nullptr, nullptr, 0);
-    ctx->DSSetShader(nullptr, nullptr, 0);
-    ctx->PSSetSamplers(0, 1, &samp_);
-    ctx->PSSetConstantBuffers(0, 1, &cb_);
-    const float bf[4] = {0, 0, 0, 0};
-    ID3D11ShaderResourceView* none[3] = {};
-    auto pass = [&](ID3D11RenderTargetView* rt, UINT vw, UINT vh, ID3D11PixelShader* ps, ID3D11ShaderResourceView* t0, ID3D11ShaderResourceView* t1,
-                    ID3D11ShaderResourceView* t2, float dx, float dy, bool gin, bool gout) {
-        c[12] = dx, c[13] = dy, c[14] = gin ? 1.f : 0.f, c[15] = gout ? 1.f : 0.f;
-        D3D11_MAPPED_SUBRESOURCE m;
-        if (SUCCEEDED(ctx->Map(cb_, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
-            memcpy(m.pData, c, sizeof c);
-            ctx->Unmap(cb_, 0);
-        }
-        ctx->PSSetShaderResources(0, 3, none);
-        ctx->OMSetRenderTargets(1, &rt, nullptr);
-        ID3D11ShaderResourceView* t[3] = {t0, t1, t2};
-        ctx->PSSetShaderResources(0, 3, t);
-        D3D11_VIEWPORT vp = {0.f, 0.f, static_cast<float>(vw), static_cast<float>(vh), 0.f, 1.f};
-        ctx->RSSetViewports(1, &vp);
-        ctx->PSSetShader(ps, nullptr, 0);
-        ctx->Draw(3, 0);
-    };
-    ctx->OMSetBlendState(bsAll_, bf, 0xffffffff);
-    pass(rtv_[0], hw_, hh_, psDown_, color, depth, nullptr, 0.f, 0.f, colorGamma, false);
-    pass(rtv_[1], hw_, hh_, psBlur_, srv_[0], nullptr, nullptr, 1.f, 0.f, false, false);
-    pass(rtv_[0], hw_, hh_, psBlur_, srv_[1], nullptr, nullptr, 0.f, 1.f, false, false);
-    ctx->OMSetBlendState(bsRgb_, bf, 0xffffffff);
-    pass(rtv, w, h, psComp_, color, depth, srv_[0], 0.f, 0.f, colorGamma, colorGamma && !rtvEncodesSrgb);
-    ctx->PSSetShaderResources(0, 3, none);
-    bk.Restore(ctx);
-    return true;
-}
-bool NearDof::Prewarm(ID3D11Device* dev, UINT w, UINT h) {
-    if (failed_ || !dev) return false;
-    if (dev != dev_ || !vs_) {
-        if (!Init(dev)) {
-            failed_ = true;
-            return false;
-        }
-    }
-    return w < 16 || h < 16 || EnsureTargets(w, h);
-}
 namespace prefetch {
 ID3D11Device* DeviceRef() {
     AcquireSRWLockShared(&g_preLock);
@@ -6797,11 +6174,7 @@ int WarmShaders() {
                       {kCrossShader, sizeof kCrossShader - 1, "tenzin_fps_cross", "VS", "vs_5_0"},
                       {kCrossShader, sizeof kCrossShader - 1, "tenzin_fps_cross", "PS", "ps_5_0"},
                       {kShieldShader, sizeof kShieldShader - 1, "tenzin_fps_shield", "VS", "vs_5_0"},
-                      {kShieldShader, sizeof kShieldShader - 1, "tenzin_fps_shield", "PS", "ps_5_0"},
-                      {kDofShader, sizeof kDofShader - 1, "tenzin_fps_dof", "VS", "vs_5_0"},
-                      {kDofShader, sizeof kDofShader - 1, "tenzin_fps_dof", "PSDown", "ps_5_0"},
-                      {kDofShader, sizeof kDofShader - 1, "tenzin_fps_dof", "PSBlur", "ps_5_0"},
-                      {kDofShader, sizeof kDofShader - 1, "tenzin_fps_dof", "PSComp", "ps_5_0"}};
+                      {kShieldShader, sizeof kShieldShader - 1, "tenzin_fps_shield", "PS", "ps_5_0"}};
     int ok = 0;
     for (const One& o : list) {
         ID3DBlob *b = nullptr, *m = nullptr;

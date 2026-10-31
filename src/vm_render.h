@@ -72,33 +72,17 @@ struct Settings {
     float fireStanceSync[2] = {0.f, 0.f};
     float fireRpm = 0.f;
     int magSize = 0;
+    int ammoPerShot = 1;
     bool magDisposable = false;
     int ammoTotal = 0;
     int ammoUpgrade = 0;
     float reloadRefill = 0.f;
     float reloadEmptyRefill = 0.f;
-    char reloadShellClips[6][48] = {};
-    char reloadShellClips2[3][48] = {};
     wchar_t weaponId[64] = L"";
     bool weaponDefault = false;
+    wchar_t weaponOwner[160] = L"";
+    wchar_t weaponGuest[160] = L"";
     char projectile[64] = "";
-    int pellets = 1, pelletsAds = 1;
-    float pelletFan = 0.f, pelletFanAds = 0.f, fireRangeAds = 0.f;
-    char projectileAds[64] = "";
-    float pelletSpread = 0.f, pelletSpreadAds = 0.f;
-    int burst = 0;
-    float burstMin = 2.f;
-    float burstScatterAds = 0.f;
-    int burstPierceAds = 0;
-    float burstReachAds = 0.55f;
-    float burstCover = 0.f;
-    int burstCoverMax = 64;
-    int burstCoverClip = 1;
-    float burstCoverLead = 0.f;
-    float burstCoverDirect = 0.f;
-    float burstCoverDirectReact = 0.f, burstCoverDirectFx = 0.f;
-    float burstCoverMargin = 1.f;
-    float burstDirectAds = 0.f;
     float fireRange = 0.f;
     wchar_t animSounds[128] = L"";
     float animSoundVolume = 0.7f;
@@ -120,7 +104,6 @@ struct Settings {
     float spinKeep = 0.8f;
     wchar_t spinUpSound[512] = L"", spinLoopSound[512] = L"", spinDownSound[512] = L"";
     float spinVolume = 0.5f;
-    float spinLoopStart = 0.f;
     float spinBarrels = 6.0f;
     float spinDownTime = 1.6f;
     int spinBone = -2;
@@ -138,39 +121,10 @@ struct Settings {
     float flashLight = 1.0f;
     bool flashSmoke = true;
     bool flashFlame = true;
-    wchar_t flameFx[128] = L"";
-    float flameAim = 30.f, flameGap = 0.09f;
-    float flameFan = 0.f, flameFanAds = 0.f, flameAimAds = 0.f;
-    struct FlameLayer {
-        wchar_t tex[64] = L"";
-        int cx = 1, cy = 1;
-        float fps = 0.f;
-        bool randFrame = false;
-        float rate = 0.f;
-        float speed[2] = {20.f, 20.f};
-        float life[2] = {1.f, 1.f};
-        float size[2] = {0.2f, 1.f};
-        float sizeEase = 2.f;
-        float gravity = 0.f;
-        float drag = 0.f;
-        float spread = 2.f;
-        float jitter = 0.f;
-        float col0[3] = {1.f, 1.f, 1.f};
-        float col1[3] = {1.f, 1.f, 1.f};
-        float alpha = 1.f;
-        float fade[2] = {0.1f, 0.6f};
-        float bright = 1.f;
-        float stretch = 0.f;
-        float spin = 0.f;
-        bool additive = true;
-        float speedAds[2] = {-1.f, -1.f}, lifeAds[2] = {-1.f, -1.f}, sizeAds[2] = {-1.f, -1.f}, fadeAds[2] = {-1.f, -1.f};
-        float rateAds = -1.f, spreadAds = -1.f, dragAds = -1.f, alphaAds = -1.f, brightAds = -1.f, stretchAds = -1.f;
-    } flame[4];
     bool hitFx = true;
     float hitFxScale = 1.0f;
     float hitFxAlpha = 0.85f;
     float hitFxColor[3] = {0.42f, 0.03f, 0.02f};
-    float tracerTint[3] = {1.f, 1.f, 1.f};
     bool flashGas = false;
     wchar_t flashGasFx[128] = L"";
     float flashGasScale = 1.0f;
@@ -187,15 +141,6 @@ struct Settings {
     float shellLife = 1.0f;
     float shellSmoke = 1.0f;
     float shellSparks = 1.0f;
-    bool dof = false;
-    float dofBlur = 1.25f;
-    float dofFocus = 0.8f;
-    float dofRamp = 0.55f;
-    float dofRate = 30.f;
-    float dofHold = 0.3f;
-    float dofPx = 8.f;
-    float dofAds = 0.f;
-    int dofDebug = 0;
     int shellFollow = 1;
     int shellCaliber = 556;
     float shellOut[2] = {3.0f, 4.0f};
@@ -250,11 +195,18 @@ struct Settings {
     float shieldBlockHip = 0.5f;
     float shieldBlockAds = 1.0f;
     wchar_t shieldModel[520] = L"";
-    wchar_t gunShieldModel[520] = L"";
     float shieldModelMetal = 1.f;
     float meleeStrikeLead = 0.25f;
+    static constexpr int kMeleeOwnN = 40;
+    float meleeOwn[kMeleeOwnN] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
     int wh3Emissive = 0;
     bool wh3Iridescent = false;
+    wchar_t counterPart[64] = L"";
+    float counterRect[4] = {0, 0, 0, 0};
+    wchar_t counterGlyphs[260] = L"";
+    float counterColour[3] = {1.f, 1.f, 1.f};
+    int counterDigits = 2;
+    bool counterLeadZero = true;
     wchar_t wh3Part[256] = L"";
     wchar_t wh3Mask[260] = L"";
     wchar_t emissiveTexture[260] = L"";
@@ -275,6 +227,11 @@ struct Settings {
     float iridescenceColourB[3] = {0.26f, 0.82f, 0.96f};
     float emissiveScale = 1.f;
     bool emissiveSoft = false;
+    float emissiveGlow = 0.f;
+    float emissiveGlowRadius = 30.f;
+    float emissiveGlowInner = 0.3f;
+    float emissiveLight = 0.f;
+    float emissiveLightRadius = 0.6f;
     wchar_t meleeSfx[kMeleeSfx][512] = {};
     float meleeSfxVolume[kMeleeSfx] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f,
                                        -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
@@ -345,27 +302,6 @@ struct CrosshairSettings {
     float fadeStart = 0.0f;
     float fadeEnd = 0.0f;
     float color[4] = {0.0f, 1.0f, 0.0f, 0.9f};
-    bool hitMarker = true;
-    float hitMarkerRadius = 19.0f;
-    float hitMarkerLength = 4.8f;
-    float hitMarkerWidth = 1.95f;
-    bool hitMarkerRound = false;
-    float hitMarkerOutline = 1.0f;
-    float hitMarkerOutlineAlpha = 0.6f;
-    float hitMarkerGlow = 0.0f;
-    float hitMarkerGlowAlpha = 0.0f;
-    float hitMarkerTime = 0.1f;
-    float hitMarkerColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-    float killMarkerRadius = 19.0f;
-    float killMarkerLength = 4.8f;
-    float killMarkerWidth = 1.95f;
-    bool killMarkerRound = false;
-    float killMarkerOutline = 1.0f;
-    float killMarkerOutlineAlpha = 0.6f;
-    float killMarkerGlow = 0.0f;
-    float killMarkerGlowAlpha = 0.0f;
-    float killMarkerTime = 0.25f;
-    float killMarkerColor[4] = {230.0f / 255.0f, 27.0f / 255.0f, 27.0f / 255.0f, 1.0f};
 };
 bool LoadCrosshair(const wchar_t* ini, CrosshairSettings& s);
 class MuzzleFlash {
@@ -389,15 +325,12 @@ public:
     bool GasLoaded() const { return tex_[5] && tex_[6]; }
     int LiveTracers() const { return nTr_; }
     int LiveImpacts() const { return nImp_; }
-    unsigned long long SmokeLastMask() const { return smokeMask_; }
-    void LoadFlame(const wchar_t* dir, const Settings& s);
-    int LiveFlame() const { return nFl_; }
     int Live() const { return n_; }
     void Dump(double now) const;
     void Seed(unsigned seed) { rng_ = seed ? seed : 1u; }
     struct Sheet {
         int frames[4] = {};
-        float rect[4][64][4] = {};
+        float rect[4][16][4] = {};
     };
     struct P {
         unsigned char tex, locked, placed, seq;
@@ -426,8 +359,6 @@ public:
         float aK[4][2], sK[4][2];
         float dragRate;
         unsigned char frame;
-        unsigned char nF;
-        float fK[4][2];
     };
 private:
     bool InitPipeline(ID3D11Device* dev);
@@ -438,7 +369,6 @@ private:
     void SpawnGas(const Settings& s);
     void SpawnBarrelSmoke(const Settings& s, double now);
     void SpawnShellFx(const Settings& s);
-    void SpawnSmoke(const Settings& s, int where, bool trail = false, float t0 = 0.f);
     ID3D11Device* dev_ = nullptr;
     ID3D11VertexShader* vs_ = nullptr;
     ID3D11PixelShader* ps_ = nullptr;
@@ -451,14 +381,12 @@ private:
     ID3D11DepthStencilState* dss_ = nullptr;
     ID3D11DepthStencilState* dssDepth_ = nullptr;
     ID3D11SamplerState* samp_ = nullptr;
-    ID3D11ShaderResourceView* tex_[17] = {};
-    Sheet sheet_[17];
+    ID3D11ShaderResourceView* tex_[11] = {};
+    Sheet sheet_[11];
     ID3D11ShaderResourceView* scene_ = nullptr;
     ID3D11ShaderResourceView* sceneDepth_ = nullptr;
     bool sceneGamma_ = false;
     int burst_ = 0;
-    bool smokeTrailArmed_ = false;
-    unsigned long long smokeMask_ = 0;
     double tLastShot_ = -1.0;
     struct Tracer {
         float a[3], b[3];
@@ -479,22 +407,7 @@ private:
     static constexpr int kImpactQuads = 10;
     Impact imps_[kMaxImpacts];
     int nImp_ = 0;
-    struct FlameP {
-        float p[3], v[3];
-        float age, life, rot, spin;
-        float drag, s0, s1;
-        float ad;
-        unsigned short f0;
-        unsigned char layer;
-    };
-    static constexpr int kMaxFlame = 1500;
-    FlameP fl_[kMaxFlame];
-    int nFl_ = 0;
-    float flAcc_[4] = {};
-    float flPh_[4] = {};
-    double tFlSim_ = -1.0;
-    ID3D11ShaderResourceView* flTex_[4] = {};
-    static constexpr int kMax = 256;
+    static constexpr int kMax = 160;
     P parts_[kMax];
     int n_ = 0;
     bool pending_ = false;
@@ -545,7 +458,7 @@ private:
     int nLand_ = 0;
     unsigned rng_ = 0x2545f491u;
     UINT indexCount_ = 0;
-    UINT kindIdx_[4] = {}, kindFirst_[4] = {}, kindCount_[4] = {};
+    UINT kindIdx_[3] = {}, kindFirst_[3] = {}, kindCount_[3] = {};
     ID3D11VertexShader* vs_ = nullptr;
     ID3D11PixelShader* ps_ = nullptr;
     ID3D11InputLayout* layout_ = nullptr;
@@ -613,8 +526,6 @@ class Crosshair {
 public:
     bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool rtvEncodesSrgb,
               const CrosshairSettings& s, float spread = 0.f, float alpha = 1.f);
-    int DrawHitMarker(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool rtvEncodesSrgb, const CrosshairSettings& s,
-                      float hitAge, float killAge);
     void Release();
     bool Prewarm(ID3D11Device* dev);
 private:
@@ -627,35 +538,6 @@ private:
     ID3D11BlendState* bs_ = nullptr;
     ID3D11RasterizerState* rs_ = nullptr;
     ID3D11DepthStencilState* dss_ = nullptr;
-    bool failed_ = false;
-};
-struct DofParams {
-    float focus, ramp;
-    float radiusPx;
-    float weight;
-    bool debug;
-};
-class NearDof {
-public:
-    bool Prewarm(ID3D11Device* dev, UINT w, UINT h);
-    bool Apply(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11ShaderResourceView* color, bool colorGamma,
-               ID3D11ShaderResourceView* depth, UINT w, UINT h, bool rtvEncodesSrgb, const DofParams& p);
-    void Release();
-private:
-    bool Init(ID3D11Device* dev);
-    bool EnsureTargets(UINT w, UINT h);
-    ID3D11Device* dev_ = nullptr;
-    ID3D11VertexShader* vs_ = nullptr;
-    ID3D11PixelShader *psDown_ = nullptr, *psBlur_ = nullptr, *psComp_ = nullptr;
-    ID3D11Buffer* cb_ = nullptr;
-    ID3D11SamplerState* samp_ = nullptr;
-    ID3D11BlendState *bsAll_ = nullptr, *bsRgb_ = nullptr;
-    ID3D11RasterizerState* rs_ = nullptr;
-    ID3D11DepthStencilState* dss_ = nullptr;
-    ID3D11Texture2D* tex_[2] = {};
-    ID3D11ShaderResourceView* srv_[2] = {};
-    ID3D11RenderTargetView* rtv_[2] = {};
-    UINT hw_ = 0, hh_ = 0;
     bool failed_ = false;
 };
 struct CastMarkerStyle {
@@ -720,6 +602,7 @@ public:
     bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11Texture2D* sceneTex, UINT w, UINT h,
               bool rtvEncodesSrgb, const Settings& s, const Look& look);
     void Release();
+    void SetCounterValue(int v) { counterValue_ = v; }
     bool Ready() const { return ready_; }
     ID3D11Device* Device() const { return dev_; }
     bool PrewarmScreen(const D3D11_TEXTURE2D_DESC& backBuffer);
@@ -779,6 +662,9 @@ private:
         int tex[3];
         uint32_t normalMode, materialMode, flags;
         bool wh3 = false;
+        bool counter = false;
+        float ctr[3] = {0, 0, 0};
+        int ctrBone = -1;
     };
     struct Bone {
         int parent;
@@ -837,6 +723,21 @@ private:
     ID3D11ShaderResourceView* wh3Srv_[3] = {};
     uint64_t wh3Key_ = 0;
     bool wh3On_ = false;
+    void SetupCounter(const Settings& s);
+    ID3D11ShaderResourceView* counterSrv_ = nullptr;
+    uint64_t counterKey_ = 0;
+    bool counterOn_ = false;
+    int counterValue_ = -1;
+    ID3D11VertexShader* vsFull_ = nullptr;
+    ID3D11PixelShader *psGlowSrc_ = nullptr, *psBlur_ = nullptr, *psComp_ = nullptr;
+    ID3D11BlendState *bsAdd_ = nullptr, *bsSrc_ = nullptr;
+    ID3D11DepthStencilState *dssRead_ = nullptr, *dssOff_ = nullptr;
+    ID3D11SamplerState* sampClamp_ = nullptr;
+    ID3D11Texture2D* glowTex_[3] = {};
+    ID3D11RenderTargetView* glowRtv_[3] = {};
+    ID3D11ShaderResourceView* glowSrv_[3] = {};
+    UINT glowW_ = 0, glowH_ = 0;
+    bool EnsureGlow(UINT w, UINT h);
     Bone* bones_ = nullptr;
     unsigned boneCount_ = 0;
     Clip* clips_ = nullptr;
@@ -867,11 +768,11 @@ private:
     bool muzzleFrameValid_ = false;
     MuzzleFrame muzzleFrame_ = {};
 };
-void AnimStatePush();
-void AnimStatePop();
 void SetArmsOverride(const wchar_t* list);
 int ArmsOverrideCount();
 const char* ArmsOverrideLog();
+void AnimStatePush();
+void AnimStatePop();
 namespace prefetch {
 bool Model(int tag, const wchar_t* hvmPath, int* files, size_t* bytes, char* err, size_t errLen);
 void Drop(int tag);
