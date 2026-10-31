@@ -280,12 +280,6 @@ struct HitQueue {
     int n = 0;
 } g_hitq;
 int g_hitFxCount = 0, g_hitFxKills = 0;
-struct HitMarkState {
-    SRWLOCK lock = SRWLOCK_INIT;
-    double tHit = -1.0, tKill = -1.0;
-    int hits = 0, kills = 0;
-} g_mark;
-int g_markHitFrames = 0, g_markKillFrames = 0;
 bool ReadCam(vm::WorldCam* c) {
     for (int k = 0; k < 4; ++k) {
         LONG s1 = g_cam.seq;
@@ -2860,11 +2854,32 @@ void CastMarkerDraw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT 
     if (logs < 6 && drawn) ++logs, g_log("cast-marker: drawn %d vertices (%d lines, %d fill tris%s%s) on %ux%u", g_cmR.Verts(), g_cmDraw.nLines,
                                           g_cmDraw.nTris, g_cmDraw.pillar ? ", pillar" : "", g_cmDraw.chevron ? ", chevron" : "", w, h);
 }
+double g_spinSilenceUntil = 0;
+void SpinSilenceStep() {
+    if (g_modelIdx < 0 || g_modelIdx >= g_modelCount) return;
+    const double now = Now();
+    if (g_spin.state != 0 || g_an.spinSeen != 0) {
+        const LONG st = InterlockedExchange(&g_spin.state, 0);
+        g_an.spinSeen = 0;
+        Wp().spinUp.FadeAll();
+        Wp().spinLoop.FadeAll();
+        Wp().spinDown.FadeAll();
+        g_spinSilenceUntil = now + 0.3;
+        g_log("viewmodel: first person off while spinning (state %ld) - spin up / loop / down sounds faded out", static_cast<long>(st));
+    }
+    if (g_spinSilenceUntil > 0) {
+        Wp().spinUp.Update();
+        Wp().spinLoop.Update();
+        Wp().spinDown.Update();
+        if (now >= g_spinSilenceUntil) g_spinSilenceUntil = 0;
+    }
+}
 void DrawLayer(IDXGISwapChain* sc, int part) {
     if (g_failed || !(g_testLayer || g_fp)) {
         LayerTargetDrop();
         if (!g_failed && g_warm && part == kPartAll) WarmStep(sc);
         g_profWasFp = false;
+        if (part == kPartAll) SpinSilenceStep();
         return;
     }
     double t0 = Now();
@@ -3023,16 +3038,6 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                         vm::CrosshairSettings cs;
                         float cspread, calpha;
                         if (CrossFrame(cs, cspread, calpha)) g_cross.Draw(ctx, rtv, td.Width, td.Height, hw, cs, cspread, calpha);
-                    }
-                    if (part != kPartGun && g_fp) {
-                        AcquireSRWLockShared(&g_mark.lock);
-                        const double th = g_mark.tHit, tk = g_mark.tKill;
-                        ReleaseSRWLockShared(&g_mark.lock);
-                        const double nm = Now();
-                        const int drew = g_cross.DrawHitMarker(ctx, rtv, td.Width, td.Height, hw, g_crossSet, th >= 0.0 ? static_cast<float>(nm - th) : -1.f,
-                                                               tk >= 0.0 ? static_cast<float>(nm - tk) : -1.f);
-                        if (drew & 1) ++g_markHitFrames;
-                        if (drew & 2) ++g_markKillFrames;
                     }
                     g_fprof.Mark("cross");
                     g_gpu.End(ctx, gpuSlot);
@@ -3580,27 +3585,6 @@ void HitFxStats(int* shown, int* kills) {
     *kills = g_hitFxKills;
 }
 void GameThreadTime(double ms) { GameThreadAdd(ms); }
-void HitMark(bool kill) {
-    const double now = Now();
-    AcquireSRWLockExclusive(&g_mark.lock);
-    if (kill) {
-        g_mark.tKill = now;
-        ++g_mark.kills;
-    } else {
-        g_mark.tHit = now;
-        ++g_mark.hits;
-    }
-    ReleaseSRWLockExclusive(&g_mark.lock);
-}
-bool HitMarkOn() { return g_crossSet.hitMarker; }
-void HitMarkStats(int* hits, int* kills, int* hitFrames, int* killFrames) {
-    AcquireSRWLockShared(&g_mark.lock);
-    *hits = g_mark.hits;
-    *kills = g_mark.kills;
-    ReleaseSRWLockShared(&g_mark.lock);
-    *hitFrames = g_markHitFrames;
-    *killFrames = g_markKillFrames;
-}
 void HitFx(const float pos[3], const float dir[3], bool kill) {
     AcquireSRWLockExclusive(&g_hitq.lock);
     if (g_hitq.n < 16) {
