@@ -297,6 +297,15 @@ void CastMarker::Release() {
     SafeRelease(dss_);
     dev_ = nullptr;
 }
+bool CastMarker::Prewarm(ID3D11Device* dev) {
+    if (failed_ || !dev) return false;
+    if (dev == dev_ && vs_) return true;
+    if (!Init(dev)) {
+        failed_ = true;
+        return false;
+    }
+    return true;
+}
 bool CastMarker::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool rtvEncodesSrgb, const WorldCam& cam,
                       const cm::Frame& f, const CastMarkerStyle& s) {
     verts_ = 0;

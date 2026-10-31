@@ -5,8 +5,6 @@
 #include <cstdint>
 #include <cwchar>
 #include <initializer_list>
-#include <cstdio>
-#include <cstring>
 namespace kick {
 constexpr float kDeg = 3.14159265f / 180.f;
 struct Set {
@@ -64,9 +62,6 @@ struct Params {
     float shakeRatio[4] = {1.07f, 1.17f, 1.26f, 1.36f};
     float shakeTime = 0.11f;
     float shakeBlend = 0.02f;
-    float refScale = 0.f;
-    float refHip = 0.f;
-    float refReplace = 1.f;
 };
 inline float SCurve(float t) { return t <= 0.f ? 0.f : t >= 1.f ? 1.f : 0.5f + 0.5f * std::sin((t - 0.5f) * 3.14159265f); }
 inline int ReadFloats(const wchar_t* ini, const wchar_t* key, float* out, int n) {
@@ -148,9 +143,6 @@ inline void Load(const wchar_t* ini, Params& p) {
     ReadFloats(ini, L"shake_ratio", p.shakeRatio, 4);
     ReadFloats(ini, L"shake_time", &p.shakeTime, 1);
     ReadFloats(ini, L"shake_blend", &p.shakeBlend, 1);
-    ReadFloats(ini, L"ref_scale", &p.refScale, 1);
-    ReadFloats(ini, L"ref_hip", &p.refHip, 1);
-    ReadFloats(ini, L"ref_replace", &p.refReplace, 1);
     auto clamp = [](float& x, float lo, float hi) { x = x < lo ? lo : x > hi ? hi : x; };
     clamp(p.camScale, 0.f, 5.f);
     clamp(p.gunScale, 0.f, 5.f);
@@ -203,9 +195,6 @@ inline void Load(const wchar_t* ini, Params& p) {
     }
     clamp(p.shakeTime, 0.02f, 2.f);
     clamp(p.shakeBlend, 0.f, 0.5f);
-    clamp(p.refScale, 0.f, 5.f);
-    clamp(p.refHip, 0.f, 1.f);
-    clamp(p.refReplace, 0.f, 1.f);
 }
 inline Set Mix(const Set& a, const Set& b, float w) {
     Set r;
@@ -582,199 +571,6 @@ struct Jitter {
     }
     void Reset() {
         for (int i = 0; i < 3; ++i) p[i] = x[i] = v[i] = 0.f;
-    }
-};
-constexpr int kRefMax = 160;
-struct RefCurve {
-    int n = 0;
-    float step = 0.f;
-    float v[kRefMax][3];
-    void At(float t, float out[3]) const {
-        if (n <= 0 || step <= 0.f) {
-            out[0] = out[1] = out[2] = 0.f;
-            return;
-        }
-        float x = t / step;
-        int a = x <= 0.f ? 0 : (x >= n - 1 ? n - 1 : static_cast<int>(x));
-        int b = a + 1 < n ? a + 1 : a;
-        float f = (x <= 0.f || b == a) ? 0.f : x - a;
-        for (int i = 0; i < 3; ++i) out[i] = v[a][i] + (v[b][i] - v[a][i]) * f;
-    }
-};
-struct RefData {
-    bool ok = false;
-    float paUnit = 0.f;
-    int paTracks = 0;
-    RefCurve paPos[3], paRot[3];
-    float paScale[4][8];
-    int paScaleN[4] = {0, 0, 0, 0};
-    float gkEveryDur = 0.f;
-    RefCurve gkEvery;
-    int gkFirstN = 0;
-    float gkFirst[4][3];
-    RefCurve gkFirstC[4];
-    float rk[6] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
-    RefCurve rkRec;
-    float gkPivotFwd = 0.f, rkDist = 0.f;
-    void Clear() {
-        ok = false, paUnit = 0.f, paTracks = 0, gkEveryDur = 0.f, gkFirstN = 0, gkPivotFwd = rkDist = 0.f;
-        for (int i = 0; i < 4; ++i) paScaleN[i] = 0;
-        for (float& x : rk) x = 0.f;
-        for (RefCurve* c : {&paPos[0], &paPos[1], &paPos[2], &paRot[0], &paRot[1], &paRot[2], &gkEvery, &gkFirstC[0], &gkFirstC[1], &gkFirstC[2],
-                           &gkFirstC[3], &rkRec})
-            c->n = 0, c->step = 0.f;
-    }
-};
-inline bool LoadRef(const wchar_t* path, RefData& d) {
-    d.Clear();
-    FILE* f = _wfopen(path, L"rb");
-    if (!f) return false;
-    char line[512];
-    RefCurve* cur = nullptr;
-    int need = 0;
-    bool bad = false;
-    while (fgets(line, sizeof line, f)) {
-        if (line[0] == '#' || line[0] == '\r' || line[0] == '\n') continue;
-        if (cur && cur->n < need) {
-            float a, b, c;
-            if (sscanf(line, "%f %f %f", &a, &b, &c) != 3) {
-                bad = true;
-                break;
-            }
-            cur->v[cur->n][0] = a, cur->v[cur->n][1] = b, cur->v[cur->n][2] = c;
-            ++cur->n;
-            continue;
-        }
-        char key[32] = {}, name[32] = {};
-        if (sscanf(line, "%31s", key) != 1) continue;
-        if (!strcmp(key, "curve")) {
-            float step = 0.f;
-            int n = 0, idx = -1;
-            if (sscanf(line, "curve %31s %f %d", name, &step, &n) != 3 || n < 2 || n > kRefMax || step <= 0.f) {
-                bad = true;
-                break;
-            }
-            cur = nullptr;
-            if (sscanf(name, "pa_pos%d", &idx) == 1 && idx >= 0 && idx < 3) cur = &d.paPos[idx];
-            else if (sscanf(name, "pa_rot%d", &idx) == 1 && idx >= 0 && idx < 3) cur = &d.paRot[idx];
-            else if (!strcmp(name, "gk_every")) cur = &d.gkEvery;
-            else if (sscanf(name, "gk_first%d", &idx) == 1 && idx >= 0 && idx < 4) cur = &d.gkFirstC[idx];
-            else if (!strcmp(name, "rk_rec")) cur = &d.rkRec;
-            if (!cur) {
-                bad = true;
-                break;
-            }
-            cur->n = 0, cur->step = step, need = n;
-        } else if (!strcmp(key, "pa_unit")) {
-            sscanf(line, "pa_unit %f", &d.paUnit);
-        } else if (!strcmp(key, "pa_tracks")) {
-            sscanf(line, "pa_tracks %d", &d.paTracks);
-        } else if (!strcmp(key, "pa_scale")) {
-            char dim[16] = {};
-            int off = 0;
-            if (sscanf(line, "pa_scale %15s%n", dim, &off) < 1) continue;
-            int k = !strcmp(dim, "pitch") ? 0 : !strcmp(dim, "yaw") ? 1 : !strcmp(dim, "roll") ? 2 : !strcmp(dim, "right") ? 3 : -1;
-            if (k < 0) continue;
-            const char* p = line + off;
-            int got = 0, used = 0;
-            float x;
-            while (got < 8 && sscanf(p, "%f%n", &x, &used) == 1) d.paScale[k][got++] = x, p += used;
-            d.paScaleN[k] = got;
-        } else if (!strcmp(key, "gk_every_dur")) {
-            sscanf(line, "gk_every_dur %f", &d.gkEveryDur);
-        } else if (!strcmp(key, "gk_first_n")) {
-            sscanf(line, "gk_first_n %d", &d.gkFirstN);
-        } else if (!strcmp(key, "gk_first")) {
-            int i = -1;
-            float a, b, c;
-            if (sscanf(line, "gk_first %d %f %f %f", &i, &a, &b, &c) == 4 && i >= 0 && i < 4) d.gkFirst[i][0] = a, d.gkFirst[i][1] = b, d.gkFirst[i][2] = c;
-        } else if (!strcmp(key, "rk")) {
-            sscanf(line, "rk %f %f %f %f %f %f", &d.rk[0], &d.rk[1], &d.rk[2], &d.rk[3], &d.rk[4], &d.rk[5]);
-        } else if (!strcmp(key, "gk_pivot_fwd")) {
-            sscanf(line, "gk_pivot_fwd %f", &d.gkPivotFwd);
-        } else if (!strcmp(key, "rk_dist")) {
-            sscanf(line, "rk_dist %f", &d.rkDist);
-        }
-    }
-    fclose(f);
-    d.gkFirstN = d.gkFirstN < 0 ? 0 : (d.gkFirstN > 4 ? 4 : d.gkFirstN);
-    d.ok = !bad && d.paTracks >= 1 && d.paTracks <= 3 && (!cur || cur->n == need);
-    for (int i = 0; i < d.paTracks && d.ok; ++i) d.ok = d.paPos[i].n >= 2 && d.paRot[i].n >= 2;
-    return d.ok;
-}
-struct RefState {
-    double last = -1, burst0 = -1;
-    int k = 0, shots = 0, track = 0;
-    struct Kick {
-        double t;
-        float yaw, pitch;
-    } rkI[32];
-    int rkN = 0;
-    Rng rng;
-    void Reset() { last = burst0 = -1, k = shots = 0, rkN = 0; }
-    static double Gap(double gap) { return gap * 1.5 > 0.08 ? gap * 1.5 : 0.08; }
-    void OnShot(const RefData& d, double now, double gap) {
-        if (last < 0 || now - last > Gap(gap)) burst0 = now, k = 0, shots = 1;
-        else ++k, ++shots;
-        last = now;
-        track = d.paTracks > 0 ? static_cast<int>(rng.U() * d.paTracks) % d.paTracks : 0;
-        if (rkN == 32) {
-            for (int i = 1; i < 32; ++i) rkI[i - 1] = rkI[i];
-            --rkN;
-        }
-        const float yr[2] = {d.rk[0], d.rk[1]}, pr[2] = {d.rk[2], d.rk[3]};
-        float yaw = rng.Range(yr), pitch = rng.Range(pr);
-        rkI[rkN++] = {now, yaw, pitch};
-    }
-    static float Scale(const RefData& d, int dim, int k) {
-        int n = d.paScaleN[dim];
-        return n <= 0 ? 1.f : d.paScale[dim][k < n ? k : n - 1];
-    }
-    void Out(const RefData& d, double now, double gap, float paPos[3], float paRot[3], float gk[3], float rkOut[3]) {
-        for (int i = 0; i < 3; ++i) paPos[i] = paRot[i] = gk[i] = rkOut[i] = 0.f;
-        if (last < 0) return;
-        float unit = d.paUnit > 0.f ? d.paUnit : static_cast<float>(gap > 0 ? gap : 0.1);
-        float v[3];
-        d.paPos[track].At(static_cast<float>((now - last) / unit), paPos);
-        d.paRot[track].At(static_cast<float>((now - last) / unit), paRot);
-        paPos[0] *= Scale(d, 3, k);
-        for (int i = 0; i < 3; ++i) paRot[i] *= Scale(d, i, k);
-        float a = static_cast<float>(now - last);
-        if (d.gkEveryDur > 0.f && a <= d.gkEveryDur) {
-            d.gkEvery.At(a / d.gkEveryDur, v);
-            for (int i = 0; i < 3; ++i) gk[i] += v[i];
-        }
-        if (shots >= 2 && burst0 >= 0) {
-            double stop = now - last <= Gap(gap) ? 1e30 : last + gap;
-            for (int j = 0; j < d.gkFirstN; ++j) {
-                float dur = d.gkFirst[j][0], bin = d.gkFirst[j][1], bout = d.gkFirst[j][2];
-                if (dur <= 0.f) continue;
-                double t = now - burst0, end = burst0 + dur < stop ? burst0 + dur : stop;
-                float w = bin > 0.f ? static_cast<float>(t / bin) : 1.f;
-                w = w > 1.f ? 1.f : w;
-                if (now > end) w *= bout > 0.f ? 1.f - static_cast<float>((now - end) / bout) : 0.f;
-                if (w <= 0.f) continue;
-                float u = static_cast<float>(t / dur);
-                d.gkFirstC[j].At(u > 1.f ? 1.f : u, v);
-                for (int i = 0; i < 3; ++i) gk[i] += w * v[i];
-            }
-        }
-        float ly = d.rk[4] > 0.f ? d.rk[4] : 0.4f, lp = d.rk[5] > 0.f ? d.rk[5] : 0.4f;
-        int keep = 0;
-        for (int i = 0; i < rkN; ++i) {
-            float age = static_cast<float>(now - rkI[i].t);
-            if (age > (ly > lp ? ly : lp)) continue;
-            if (age <= ly) {
-                d.rkRec.At(age / ly, v);
-                rkOut[1] += rkI[i].yaw * v[0];
-            }
-            if (age <= lp) {
-                d.rkRec.At(age / lp, v);
-                rkOut[0] += rkI[i].pitch * v[1];
-            }
-            rkI[keep++] = rkI[i];
-        }
-        rkN = keep;
     }
 };
 }
