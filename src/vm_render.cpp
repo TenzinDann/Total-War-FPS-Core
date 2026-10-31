@@ -1351,7 +1351,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.flashGasLinger = IniFloat(ini, L"flash_gas_linger", s.flashGasLinger);
     if (!(s.flashGasLinger >= 0.f && s.flashGasLinger <= 5.f)) s.flashGasLinger = 1.f;
     s.flashGasStyle = static_cast<int>(IniFloat(ini, L"flash_gas_style", static_cast<float>(s.flashGasStyle)));
-    if (s.flashGasStyle < 0 || s.flashGasStyle > 7) s.flashGasStyle = 1;
+    if (s.flashGasStyle < 0 || s.flashGasStyle > 5) s.flashGasStyle = 1;
     s.flashGasSidePuff = IniFloat(ini, L"flash_gas_side_puff", s.flashGasSidePuff);
     if (!(s.flashGasSidePuff >= 0.f && s.flashGasSidePuff <= 5.f)) s.flashGasSidePuff = 1.f;
     s.flashGasAds = IniFloat(ini, L"flash_gas_ads", s.flashGasAds);
@@ -3098,6 +3098,9 @@ VO VS(VI i) { VO o; o.p = float4(i.p, 0, 1); o.c = i.c; o.m = i.m; return o; }
 float4 PS(VO i) : SV_Target {
     float4 c = i.c;
     if (i.m.z > 0) c.a *= saturate(i.m.z - length(i.m.xy) + 0.5);
+    float2 fw = max(fwidth(i.m.xy), 1e-4);
+    if (i.m.z < 0 && i.m.z > -1.5) { float2 d = (1 - abs(i.m.xy)) / fw; c.a *= saturate(d.x + 0.5) * saturate(d.y + 0.5); }
+    if (i.m.z <= -1.5) { float2 q = float2(max(abs(i.m.x) - (-i.m.z - 2), 0), i.m.y); c.a *= saturate(0.5 - (length(q) - 1) / max(fw.x, fw.y)); }
     return c;
 }
 )HLSL";
@@ -3150,6 +3153,27 @@ void ReadCrossSection(const wchar_t* ini, const wchar_t* sec, CrosshairSettings&
     float oa = IniCross(ini, sec, L"outline_alpha", s.outlineAlpha < 0.f ? -1.f : s.outlineAlpha * 255.f);
     s.outlineAlpha = oa < 0.f ? -1.f : std::fmin(oa / 255.f, 1.f);
     IniCrossColor(ini, sec, L"color", s.color);
+    s.hitMarker = IniCross(ini, sec, L"hit_marker", s.hitMarker ? 1.f : 0.f) != 0.f;
+    s.hitMarkerRadius = IniCross(ini, sec, L"hit_marker_radius", s.hitMarkerRadius);
+    s.hitMarkerLength = IniCross(ini, sec, L"hit_marker_length", s.hitMarkerLength);
+    s.hitMarkerWidth = IniCross(ini, sec, L"hit_marker_width", s.hitMarkerWidth);
+    s.hitMarkerRound = IniCross(ini, sec, L"hit_marker_round", s.hitMarkerRound ? 1.f : 0.f) != 0.f;
+    s.hitMarkerOutline = IniCross(ini, sec, L"hit_marker_outline", s.hitMarkerOutline);
+    s.hitMarkerOutlineAlpha = IniCross(ini, sec, L"hit_marker_outline_alpha", s.hitMarkerOutlineAlpha * 255.f) / 255.f;
+    s.hitMarkerGlow = IniCross(ini, sec, L"hit_marker_glow", s.hitMarkerGlow);
+    s.hitMarkerGlowAlpha = IniCross(ini, sec, L"hit_marker_glow_alpha", s.hitMarkerGlowAlpha * 255.f) / 255.f;
+    s.hitMarkerTime = IniCross(ini, sec, L"hit_marker_time", s.hitMarkerTime);
+    IniCrossColor(ini, sec, L"hit_marker_color", s.hitMarkerColor);
+    s.killMarkerRadius = IniCross(ini, sec, L"kill_marker_radius", s.killMarkerRadius);
+    s.killMarkerLength = IniCross(ini, sec, L"kill_marker_length", s.killMarkerLength);
+    s.killMarkerWidth = IniCross(ini, sec, L"kill_marker_width", s.killMarkerWidth);
+    s.killMarkerRound = IniCross(ini, sec, L"kill_marker_round", s.killMarkerRound ? 1.f : 0.f) != 0.f;
+    s.killMarkerOutline = IniCross(ini, sec, L"kill_marker_outline", s.killMarkerOutline);
+    s.killMarkerOutlineAlpha = IniCross(ini, sec, L"kill_marker_outline_alpha", s.killMarkerOutlineAlpha * 255.f) / 255.f;
+    s.killMarkerGlow = IniCross(ini, sec, L"kill_marker_glow", s.killMarkerGlow);
+    s.killMarkerGlowAlpha = IniCross(ini, sec, L"kill_marker_glow_alpha", s.killMarkerGlowAlpha * 255.f) / 255.f;
+    s.killMarkerTime = IniCross(ini, sec, L"kill_marker_time", s.killMarkerTime);
+    IniCrossColor(ini, sec, L"kill_marker_color", s.killMarkerColor);
 }
 }
 bool LoadCrosshair(const wchar_t* ini, CrosshairSettings& s) {
@@ -3173,6 +3197,28 @@ bool LoadCrosshair(const wchar_t* ini, CrosshairSettings& s) {
     if (!(s.spreadHold >= 0.f && s.spreadHold <= 2.f)) s.spreadHold = 0.f;
     if (!(s.fadeStart >= 0.f && s.fadeStart <= 200.f)) s.fadeStart = 0.f;
     if (!(s.fadeEnd >= 0.f && s.fadeEnd <= 200.f)) s.fadeEnd = 0.f;
+    {
+        const CrosshairSettings d0;
+        auto lim = [](float& v, float lo, float hi, float def) {
+            if (!(v >= lo && v <= hi)) v = def;
+        };
+        lim(s.hitMarkerRadius, 0.f, 200.f, d0.hitMarkerRadius);
+        lim(s.hitMarkerLength, 0.5f, 100.f, d0.hitMarkerLength);
+        lim(s.hitMarkerWidth, 0.5f, 50.f, d0.hitMarkerWidth);
+        lim(s.hitMarkerOutline, 0.f, 20.f, d0.hitMarkerOutline);
+        lim(s.hitMarkerOutlineAlpha, 0.f, 1.f, d0.hitMarkerOutlineAlpha);
+        lim(s.hitMarkerGlow, 0.f, 20.f, d0.hitMarkerGlow);
+        lim(s.hitMarkerGlowAlpha, 0.f, 1.f, d0.hitMarkerGlowAlpha);
+        lim(s.hitMarkerTime, 0.01f, 3.f, d0.hitMarkerTime);
+        lim(s.killMarkerRadius, 0.f, 200.f, d0.killMarkerRadius);
+        lim(s.killMarkerLength, 0.5f, 100.f, d0.killMarkerLength);
+        lim(s.killMarkerWidth, 0.5f, 50.f, d0.killMarkerWidth);
+        lim(s.killMarkerOutline, 0.f, 20.f, d0.killMarkerOutline);
+        lim(s.killMarkerOutlineAlpha, 0.f, 1.f, d0.killMarkerOutlineAlpha);
+        lim(s.killMarkerGlow, 0.f, 20.f, d0.killMarkerGlow);
+        lim(s.killMarkerGlowAlpha, 0.f, 1.f, d0.killMarkerGlowAlpha);
+        lim(s.killMarkerTime, 0.01f, 3.f, d0.killMarkerTime);
+    }
     return true;
 }
 namespace {
@@ -3528,33 +3574,123 @@ struct SmokeLayer {
     float fK[4][2];
 };
 const SmokeLayer kSmokeLayers[] = {
-    {kFlashTexSmoke37, 5, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 40.f, 60.f, 0.f, 0.f, 0.2f, 0.5f, 1.048f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+    {kFlashTexSmoke34, 0, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.25f, 0.3f, 20.f, 40.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 10.f, -3.f}, {0.f, 10.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f,
+     0.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
+     4, {{0.f, 0.f}, {0.01f, 0.329f}, {0.07f, 0.24f}, {1.f, 0.f}}, 1, {{0.f, 3.f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
+    {kFlashTexSmoke37, 0, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 40.f, 60.f, 0.f, 0.f, 0.2f, 0.5f, 1.048f, {-3.f, 10.f, -4.f}, {3.f, 10.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
      7.f, -1.f, 1.f, 0.f, 0.f, 0, 0.f,
      1, {{0.f, 1.f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmoke38, 5, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 45.f, 55.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+    {kFlashTexSmoke38, 0, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 45.f, 55.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 10.f, -4.f}, {3.f, 10.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
      7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
      1, {{0.f, 0.5f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke39, 5, 0, 0, 0, 0, 1, 2, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.1f, 50.f, 70.f, 25.f, 35.f, 0.2f, 1.3f, 1.033f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+    {kFlashTexSmoke39, 0, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.1f, 50.f, 70.f, 25.f, 35.f, 0.2f, 1.3f, 1.033f, {0.f, 10.f, -3.f}, {0.f, 10.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
      7.f, 0.f, 1.f, 0.f, 0.f, 1, 0.f,
-     4, {{0.f, 0.f}, {0.29f, 0.967f}, {0.3f, 0.968f}, {1.f, 0.f}}, 1, {{0.f, 2.4f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmoke37, 5, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 40.f, 60.f, 0.f, 0.f, 0.2f, 0.5f, 1.048f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
-     7.f, -1.f, 1.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 1.f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmoke38, 5, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 45.f, 55.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     3, {{0.f, 0.7f}, {0.3f, 0.7f}, {1.f, 0.f}}, 1, {{0.f, 2.4f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
+    {kFlashTexSmoke34, 0, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.25f, 0.3f, 20.f, 30.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f,
+     0.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
+     4, {{0.f, 0.f}, {0.01f, 0.659f}, {0.07f, 0.479f}, {1.f, 0.f}}, 2, {{0.f, 3.f}, {1.f, 3.9f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
+    {kFlashTexSmoke38, 0, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 45.f, 55.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
      7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
-     1, {{0.f, 0.5f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
-    {kFlashTexSmoke39, 5, 1, 0, 0, 0, 1, 2, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.1f, 50.f, 70.f, 25.f, 35.f, 0.2f, 1.3f, 1.033f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     1, {{0.f, 0.5f}}, 1, {{0.f, 1.8f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+    {kFlashTexSmoke39, 0, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.1f, 50.f, 60.f, 25.f, 30.f, 0.2f, 1.3f, 1.033f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
      7.f, 0.f, 1.f, 0.f, 0.f, 1, 0.f,
-     4, {{0.f, 0.f}, {0.29f, 0.967f}, {0.3f, 0.968f}, {1.f, 0.f}}, 1, {{0.f, 2.4f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
-    {kFlashTexSmoke34, 5, 1, 0, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.8f, 1.2f, 20.f, 30.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 0.f, -4.f}, {0.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 7.f,
-     7.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
-     4, {{0.f, 0.f}, {0.01f, 0.182f}, {0.42f, 0.035f}, {1.f, 0.f}}, 2, {{0.f, 1.8f}, {1.f, 6.f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
-    {kFlashTexSmokeTrail, 5, 0, 0, 1, 1, 1, 1, 1.f, 0.f, 30.f, 2.f, 1.f, 0.3f, 0.3f, 3.f, 3.f, 0.f, 0.f, 1.f, 1.f, 1.287f, {0.f, 0.f, -1.f}, {0.f, 0.f, -1.f}, {-3.f, -3.f, 121.f}, {3.f, 3.f, 121.f}, 0.f,
+     2, {{0.f, 1.f}, {1.f, 0.f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
+    {kFlashTexSmokeTrail, 0, 0, 0, 1, 1, 1, 1, 1.f, 0.f, 30.f, 2.f, 1.f, 0.3f, 0.3f, 3.f, 3.f, 0.f, 0.f, 1.f, 1.f, 1.287f, {0.f, 0.f, -1.f}, {0.f, 0.f, -1.f}, {-3.f, -3.f, 121.f}, {3.f, 3.f, 121.f}, 0.f,
      0.f, 0.f, 0.f, 0.f, 0.f, 0, 24.f,
      4, {{0.f, 0.f}, {0.47f, 0.28f}, {0.54f, 0.276f}, {1.f, 0.f}}, 1, {{0.f, 1.f}}, 1, {{0.f, 0.f}}},
-    {kFlashTexSmokeDust, 5, 0, 0, 1, 0, 1, 1, 1.f, 0.06f, 5.f, 0.8f, 1.f, 0.5f, 0.75f, 11.f, 13.f, 0.f, 0.f, 1.f, 1.f, 1.115f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 20.f}, {0.f, 0.f, 80.f}, 3.f,
+    {kFlashTexSmokeDust, 0, 0, 0, 1, 0, 1, 1, 1.f, 0.06f, 5.f, 0.8f, 1.f, 0.5f, 0.75f, 11.f, 13.f, 0.f, 0.f, 1.f, 1.f, 1.115f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 20.f}, {0.f, 0.f, 80.f}, 3.f,
      6.f, 0.f, 2.f, -0.05f, 0.05f, 0, 0.f,
      4, {{0.f, 0.f}, {0.34f, 0.067f}, {0.67f, 0.066f}, {1.f, 0.f}}, 2, {{0.f, 1.f}, {1.f, 1.5f}}, 4, {{0.f, 5.f}, {0.47f, 32.3f}, {0.48f, 32.8f}, {1.f, 63.f}}},
+    {kFlashTexSmoke37, 0, 0, 1, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
+     7.f, 0.f, 0.f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 0.6f}}, 1, {{0.f, 0.7f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+    {kFlashTexSmoke37, 0, 1, 1, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
+     7.f, -0.03f, -0.03f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 0.5f}}, 1, {{0.f, 0.4f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+    {kFlashTexSmoke34, 1, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.25f, 0.3f, 20.f, 40.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f,
+     0.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
+     4, {{0.f, 0.f}, {0.01f, 0.659f}, {0.07f, 0.479f}, {1.f, 0.f}}, 1, {{0.f, 2.f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
+    {kFlashTexSmoke37, 1, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 30.f, 50.f, 0.f, 0.f, 0.2f, 0.5f, 1.048f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, -1.f, 1.f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 1.f}}, 1, {{0.f, 2.4f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
+    {kFlashTexSmoke38, 1, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 35.f, 45.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 0.5f}}, 1, {{0.f, 2.4f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+    {kFlashTexSmoke39, 1, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.1f, 40.f, 60.f, 25.f, 35.f, 0.2f, 1.3f, 1.033f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, 0.f, 1.f, 0.f, 0.f, 1, 0.f,
+     3, {{0.f, 1.f}, {0.3f, 1.f}, {1.f, 0.f}}, 1, {{0.f, 1.6f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
+    {kFlashTexSmoke34, 1, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.25f, 0.3f, 20.f, 40.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f,
+     0.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
+     4, {{0.f, 0.f}, {0.01f, 0.659f}, {0.07f, 0.479f}, {1.f, 0.f}}, 1, {{0.f, 3.f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
+    {kFlashTexSmoke37, 1, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 30.f, 50.f, 0.f, 0.f, 0.2f, 0.5f, 1.048f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, -1.f, 1.f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 1.f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
+    {kFlashTexSmoke38, 1, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 35.f, 45.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 0.5f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+    {kFlashTexSmoke39, 1, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.1f, 40.f, 60.f, 25.f, 35.f, 0.2f, 1.3f, 1.033f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, 0.f, 1.f, 0.f, 0.f, 1, 0.f,
+     3, {{0.f, 1.f}, {0.3f, 1.f}, {1.f, 0.f}}, 1, {{0.f, 2.4f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
+    {kFlashTexSmoke37, 1, 0, 1, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
+     7.f, 0.f, 0.f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 0.6f}}, 1, {{0.f, 0.7f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+    {kFlashTexSmoke37, 2, 0, 0, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.2f, 0.2f, 25.f, 30.f, 0.f, 0.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, -1.f, 1.f, 0.f, 0.f, 0, 0.f,
+     4, {{0.f, 1.f}, {0.2f, 0.306f}, {0.29f, 0.266f}, {1.f, 0.f}}, 4, {{0.f, 3.f}, {0.2f, 4.486f}, {0.27f, 4.513f}, {1.f, 4.65f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
+    {kFlashTexSmoke38, 2, 0, 0, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.2f, 20.f, 25.f, 0.f, 0.f, 0.5f, 0.5f, 0.902f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
+     4, {{0.f, 0.7f}, {0.14f, 0.477f}, {0.29f, 0.319f}, {1.f, 0.f}}, 4, {{0.f, 3.f}, {0.13f, 4.102f}, {0.2f, 4.499f}, {1.f, 4.65f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+    {kFlashTexSmoke38, 2, 1, 0, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.14f, 0.15f, 30.f, 39.f, 0.f, 0.f, 0.5f, 0.5f, 0.902f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
+     4, {{0.f, 1.f}, {0.2f, 0.545f}, {0.26f, 0.478f}, {1.f, 0.f}}, 4, {{0.f, 3.f}, {0.13f, 4.102f}, {0.2f, 4.499f}, {1.f, 4.65f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+    {kFlashTexSmoke37, 2, 1, 0, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.2f, 0.2f, 35.f, 40.f, 0.f, 0.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, -1.f, 1.f, 0.f, 0.f, 0, 0.f,
+     4, {{0.f, 1.3f}, {0.2f, 0.408f}, {0.27f, 0.365f}, {1.f, 0.f}}, 4, {{0.f, 1.5f}, {0.11f, 4.25f}, {0.13f, 4.502f}, {1.f, 4.65f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
+    {kFlashTexSmoke37, 2, 0, 1, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
+     7.f, 0.f, 0.f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 0.6f}}, 1, {{0.f, 0.7f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+    {kFlashTexSmoke37, 2, 1, 1, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
+     7.f, -0.03f, -0.03f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 0.5f}}, 1, {{0.f, 0.4f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+    {kFlashTexSmoke34, 3, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.25f, 0.3f, 20.f, 40.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f,
+     0.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
+     4, {{0.f, 0.f}, {0.01f, 0.659f}, {0.07f, 0.479f}, {1.f, 0.f}}, 1, {{0.f, 3.f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
+    {kFlashTexSmoke34, 3, 0, 0, 0, 0, 4, 7, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.3f, 1.f, 85.f, 95.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-900.f, -5.f, -50.f}, {900.f, 5.f, 50.f}, 10.f,
+     10.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
+     4, {{0.f, 0.f}, {0.06f, 0.184f}, {0.59f, 0.035f}, {1.f, 0.f}}, 2, {{0.f, 0.9f}, {1.f, 7.2f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
+    {kFlashTexSmoke38, 3, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 45.f, 55.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 0.5f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+    {kFlashTexSmoke39, 3, 0, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.1f, 70.f, 100.f, 25.f, 35.f, 0.2f, 1.3f, 1.033f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, 0.f, 0.f, 0.f, 0.f, 1, 0.f,
+     3, {{0.f, 1.f}, {0.3f, 1.f}, {1.f, 0.f}}, 1, {{0.f, 2.4f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
+    {kFlashTexSmoke34, 3, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.25f, 0.3f, 20.f, 40.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f,
+     0.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
+     4, {{0.f, 0.f}, {0.01f, 0.659f}, {0.07f, 0.479f}, {1.f, 0.f}}, 1, {{0.f, 3.f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
+    {kFlashTexSmoke34, 3, 1, 0, 0, 0, 4, 7, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.3f, 1.f, 85.f, 95.f, 0.f, 0.f, 1.f, 1.f, 1.6f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-700.f, -5.f, -50.f}, {700.f, 5.f, 50.f}, 10.f,
+     10.f, -1.f, 1.f, -0.15f, 0.15f, 0, 0.f,
+     4, {{0.f, 0.f}, {0.06f, 0.184f}, {0.59f, 0.035f}, {1.f, 0.f}}, 2, {{0.f, 0.9f}, {1.f, 7.2f}}, 4, {{0.f, 9.9f}, {0.39f, 21.3f}, {0.68f, 24.4f}, {1.f, 25.f}}},
+    {kFlashTexSmoke37, 3, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 40.f, 60.f, 0.f, 0.f, 0.2f, 0.5f, 1.048f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, -1.f, 1.f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 1.f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
+    {kFlashTexSmoke38, 3, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 45.f, 55.f, 0.f, 0.f, 0.2f, 1.25f, 0.902f, {-3.f, 0.f, -4.f}, {3.f, 0.f, -4.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, 0.f, 1.f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 0.5f}}, 1, {{0.f, 3.6f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+    {kFlashTexSmoke39, 3, 1, 0, 0, 0, 1, 1, 0.5f, 0.01f, 0.f, 0.f, 0.f, 0.1f, 0.1f, 70.f, 100.f, 25.f, 35.f, 0.2f, 1.3f, 1.033f, {0.f, 0.f, -3.f}, {0.f, 0.f, -3.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 3.f,
+     7.f, 0.f, 0.f, 0.f, 0.f, 1, 0.f,
+     3, {{0.f, 1.f}, {0.3f, 1.f}, {1.f, 0.f}}, 1, {{0.f, 2.4f}}, 4, {{0.f, 0.f}, {0.2f, 0.7f}, {0.72f, 5.7f}, {1.f, 7.f}}},
+    {kFlashTexSmokeTrail, 3, 0, 0, 1, 1, 1, 1, 1.f, 0.f, 30.f, 2.f, 1.f, 0.3f, 0.3f, 3.f, 3.f, 0.f, 0.f, 1.f, 1.f, 1.287f, {0.f, 0.f, -1.f}, {0.f, 0.f, -1.f}, {-3.f, -3.f, 121.f}, {3.f, 3.f, 121.f}, 0.f,
+     0.f, 0.f, 0.f, 0.f, 0.f, 0, 24.f,
+     4, {{0.f, 0.f}, {0.47f, 0.28f}, {0.54f, 0.276f}, {1.f, 0.f}}, 1, {{0.f, 1.f}}, 1, {{0.f, 0.f}}},
+    {kFlashTexSmokeDust, 3, 0, 0, 1, 0, 1, 1, 1.f, 0.06f, 5.f, 0.8f, 1.f, 0.5f, 0.75f, 11.f, 13.f, 0.f, 0.f, 1.f, 1.f, 1.115f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {0.f, 0.f, 20.f}, {0.f, 0.f, 80.f}, 3.f,
+     6.f, 0.f, 2.f, -0.05f, 0.05f, 0, 0.f,
+     4, {{0.f, 0.f}, {0.34f, 0.067f}, {0.67f, 0.066f}, {1.f, 0.f}}, 2, {{0.f, 1.f}, {1.f, 1.5f}}, 4, {{0.f, 5.f}, {0.47f, 32.3f}, {0.48f, 32.8f}, {1.f, 63.f}}},
+    {kFlashTexSmoke37, 3, 0, 1, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
+     7.f, 0.f, 0.f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 0.6f}}, 1, {{0.f, 0.7f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
+    {kFlashTexSmoke37, 3, 1, 1, 0, 0, 1, 1, 1.f, 0.01f, 0.f, 0.f, 0.f, 0.12f, 0.12f, 21.f, 31.f, 11.f, 15.f, 0.2f, 0.5f, 1.048f, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, {-600.f, 50.f, 100.f}, {-300.f, 150.f, 150.f}, 3.f,
+     7.f, -0.03f, -0.03f, 0.f, 0.f, 0, 0.f,
+     1, {{0.f, 0.5f}}, 1, {{0.f, 0.4f}}, 4, {{0.f, 0.f}, {0.32f, 4.f}, {0.58f, 6.4f}, {1.f, 8.f}}},
 };
 void MuzzleFlash::SpawnSmoke(const Settings& s, int where, bool trail, float t0) {
     const float k = (s.flashGasScale > 0.f ? s.flashGasScale : 1.f) / 2.54f;
@@ -4583,7 +4719,7 @@ bool Crosshair::Init(ID3D11Device* dev) {
     SafeRelease(vsb);
     SafeRelease(psb);
     D3D11_BUFFER_DESC bd = {};
-    bd.ByteWidth = sizeof(CrossVertex) * 128;
+    bd.ByteWidth = sizeof(CrossVertex) * 192;
     bd.Usage = D3D11_USAGE_DYNAMIC;
     bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -4729,6 +4865,91 @@ bool Crosshair::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT
     ctx->Draw(static_cast<UINT>(nv), 0);
     bk.Restore(ctx);
     return true;
+}
+int Crosshair::DrawHitMarker(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h, bool rtvEncodesSrgb, const CrosshairSettings& s,
+                             float hitAge, float killAge) {
+    const bool kill = killAge >= 0.f && killAge < s.killMarkerTime;
+    const bool overlap = std::fabs(s.hitMarkerRadius - s.killMarkerRadius) * 2.f < s.hitMarkerLength + s.killMarkerLength;
+    const bool hit = hitAge >= 0.f && hitAge < s.hitMarkerTime && (killAge < 0.f || hitAge < killAge) && !(kill && overlap);
+    if (!s.hitMarker || (!hit && !kill) || !ctx || !rtv || w < 16 || h < 16 || failed_) return 0;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return 0;
+    if (dev != dev_ || !vs_) {
+        if (!Init(dev)) {
+            failed_ = true;
+            dev->Release();
+            return 0;
+        }
+    }
+    dev->Release();
+    const float k = static_cast<float>(h) / 1080.f;
+    const float th = std::fmax(1.f, std::round(s.thickness * k));
+    const float dcx = std::floor(w * 0.5f) - std::floor(th * 0.5f) + th * 0.5f, dcy = std::floor(h * 0.5f) - std::floor(th * 0.5f) + th * 0.5f;
+    CrossVertex v[192];
+    int nv = 0;
+    auto stroke = [&](float ux, float uy, float r, float hl, float hw, bool round, const float* c4) {
+        if (round && hl < hw) hl = hw;
+        const float mx = dcx + ux * r, my = dcy + uy * r, el = hl + 1.f, ew = hw + 1.f;
+        const float ax = ux * el, ay = uy * el, nx = -uy * ew, ny = ux * ew;
+        const float px[4][2] = {{mx - ax - nx, my - ay - ny}, {mx + ax - nx, my + ay - ny}, {mx - ax + nx, my - ay + ny}, {mx + ax + nx, my + ay + ny}};
+        const float lu = el / (round ? hw : hl), lv = ew / hw, mz = round ? -(2.f + (hl - hw) / hw) : -1.f;
+        const float lc[4][2] = {{-lu, -lv}, {lu, -lv}, {-lu, lv}, {lu, lv}};
+        CrossVertex q[4];
+        for (int i = 0; i < 4; ++i)
+            q[i] = {px[i][0] / w * 2.f - 1.f, 1.f - px[i][1] / h * 2.f, c4[0], c4[1], c4[2], c4[3], lc[i][0], lc[i][1], mz};
+        const int idx[6] = {0, 1, 2, 2, 1, 3};
+        for (int i = 0; i < 6; ++i) v[nv++] = q[idx[i]];
+    };
+    const float d = 0.70710678f;
+    const float dirs[4][2] = {{d, d}, {-d, d}, {d, -d}, {-d, -d}};
+    auto mark = [&](float r, float len, float wid, bool round, float ol, float olA, float glow, float glowA, const float* src) {
+        float col[4] = {src[0], src[1], src[2], src[3]};
+        if (rtvEncodesSrgb)
+            for (int c = 0; c < 3; ++c) col[c] = SrgbToLinear(col[c]);
+        const float black[4] = {0.f, 0.f, 0.f, olA * src[3]};
+        const float hl = std::fmax(0.5f, len * k * 0.5f), hw = std::fmax(0.5f, wid * k * 0.5f), e = ol > 0.f ? std::fmax(0.75f, ol * k) : 0.f;
+        const float g = glow > 0.f ? glow * k : 0.f;
+        if (g > 0.f && glowA > 0.f) {
+            const float g1[4] = {col[0], col[1], col[2], glowA * 0.45f * src[3]}, g2[4] = {col[0], col[1], col[2], glowA * src[3]};
+            for (const auto& q : dirs) stroke(q[0], q[1], r * k, hl + g, hw + g, round, g1);
+            for (const auto& q : dirs) stroke(q[0], q[1], r * k, hl + g * 0.5f, hw + g * 0.5f, round, g2);
+        }
+        if (e > 0.f && olA > 0.f)
+            for (const auto& q : dirs) stroke(q[0], q[1], r * k, hl + e, hw + e, round, black);
+        for (const auto& q : dirs) stroke(q[0], q[1], r * k, hl, hw, round, col);
+    };
+    if (kill)
+        mark(s.killMarkerRadius, s.killMarkerLength, s.killMarkerWidth, s.killMarkerRound, s.killMarkerOutline, s.killMarkerOutlineAlpha, s.killMarkerGlow,
+             s.killMarkerGlowAlpha, s.killMarkerColor);
+    if (hit)
+        mark(s.hitMarkerRadius, s.hitMarkerLength, s.hitMarkerWidth, s.hitMarkerRound, s.hitMarkerOutline, s.hitMarkerOutlineAlpha, s.hitMarkerGlow,
+             s.hitMarkerGlowAlpha, s.hitMarkerColor);
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (FAILED(ctx->Map(vb_, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return 0;
+    memcpy(m.pData, v, sizeof(CrossVertex) * nv);
+    ctx->Unmap(vb_, 0);
+    StateBackup bk;
+    bk.Save(ctx);
+    D3D11_VIEWPORT vp = {0.f, 0.f, static_cast<float>(w), static_cast<float>(h), 0.f, 1.f};
+    ctx->RSSetViewports(1, &vp);
+    ctx->RSSetState(rs_);
+    ctx->OMSetRenderTargets(1, &rtv, nullptr);
+    const float bf[4] = {0, 0, 0, 0};
+    ctx->OMSetBlendState(bs_, bf, 0xffffffff);
+    ctx->OMSetDepthStencilState(dss_, 0);
+    UINT stride = sizeof(CrossVertex), off = 0;
+    ctx->IASetVertexBuffers(0, 1, &vb_, &stride, &off);
+    ctx->IASetInputLayout(layout_);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(vs_, nullptr, 0);
+    ctx->PSSetShader(ps_, nullptr, 0);
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->HSSetShader(nullptr, nullptr, 0);
+    ctx->DSSetShader(nullptr, nullptr, 0);
+    ctx->Draw(static_cast<UINT>(nv), 0);
+    bk.Restore(ctx);
+    return (hit ? 1 : 0) | (kill ? 2 : 0);
 }
 namespace {
 const char kShellShader[] = R"HLSL(cbuffer CShellFrame : register(b0) {

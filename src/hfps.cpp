@@ -288,6 +288,13 @@ constexpr uintptr_t kFnUnitRouting904 = 0x30348f0, oUnitMorale = 0x3b30, oMorale
 constexpr uintptr_t oUiCanFly = 0x70f, oUiAlwaysFly = 0x710, oUiCanToggleFly = 0x711, oUiIsFlying = 0x712;
 constexpr uintptr_t kFnFlyCmdCtor904 = 0x2ea9358, kFnFlyCmdIssue904 = 0x1e3f410;
 bool g_flyOk = false;
+const CodePrint kFlyStatePrints904[] = {
+    {0x301e0c0, 0xd2, 0xbbfbba4b2daa7719ull},
+    {0x301c86c, 0xa6, 0x59bb7f64bf36fc5full},
+    {0x3039e89, 0x28, 0x44a5c3a11a7eeec0ull}};
+constexpr uintptr_t oUnitFlyComp = 0x3e30, oFlyCompLanded = 0x8;
+constexpr uintptr_t kFnFlyCanChange904 = 0x301c86c;
+bool g_flyStateOk = false;
 const CodePrint kWallPrints904[] = {
     {0x2dc67a8, 0x1ab, 0xb8fa363f9006326full},
     {0x30b3cf8, 0xa3, 0x73b7107b30625308ull},
@@ -608,6 +615,8 @@ struct Config {
     bool silentHalt = true;
     bool fly = true, flyTakeoff = true;
     float flyAhead = 60.f, flyInterval = 2.0f, flyTurnDeg = 20.f, flyEyeHeight = 1.2f;
+    bool mount = true, mountHide = true, mountFallback = true;
+    float mountEyeAbove = 0.3f, mountEye = 0.f;
     bool shieldGame = true;
     bool shieldStagger = true;
     float shieldAngle = 180.f;
@@ -948,6 +957,13 @@ void LoadConfig() {
     if (cfg.flyInterval < 0.1f || cfg.flyInterval > 10.f) cfg.flyInterval = 2.0f;
     if (cfg.flyTurnDeg < 1.f || cfg.flyTurnDeg > 180.f) cfg.flyTurnDeg = 20.f;
     if (cfg.flyEyeHeight < -5.f || cfg.flyEyeHeight > 20.f) cfg.flyEyeHeight = 1.2f;
+    cfg.mount = GetPrivateProfileIntW(L"move", L"mount", 1, ini) != 0;
+    cfg.mountHide = GetPrivateProfileIntW(L"move", L"mount_hide", 1, ini) != 0;
+    cfg.mountFallback = GetPrivateProfileIntW(L"move", L"mount_fallback", 1, ini) != 0;
+    cfg.mountEyeAbove = IniF(L"move", L"mount_eye_above", cfg.mountEyeAbove, ini);
+    cfg.mountEye = IniF(L"move", L"mount_eye", cfg.mountEye, ini);
+    if (cfg.mountEyeAbove < -3.f || cfg.mountEyeAbove > 5.f) cfg.mountEyeAbove = 0.3f;
+    if (cfg.mountEye < 0.f || cfg.mountEye > 20.f) cfg.mountEye = 0.f;
     cfg.shieldGame = GetPrivateProfileIntW(L"viewmodel", L"shield_block_game", 1, ini) != 0;
     cfg.shieldStagger = GetPrivateProfileIntW(L"viewmodel", L"shield_block_stagger", 1, ini) != 0;
     cfg.shieldAngle = IniF(L"viewmodel", L"shield_block_angle", 180.f, ini);
@@ -1262,6 +1278,13 @@ struct State {
     unsigned tpSent = 0, tpFailed = 0, tpLogs = 0, leashHits = 0;
     int lastMode = -1;
     bool flyer = false;
+    int flyTakeoff = 0;
+    double tFlyEnter = 0, tFlyCheck = 0, tFlyGiveUp = 0;
+    uintptr_t mount = 0, body = 0;
+    bool mountUnit = false, mountMoved = false;
+    float footEye = 1.75f, mountStart[2] = {};
+    double tMountLog = 0;
+    unsigned mountLogs = 0;
     TpRec tpHist[32] = {};
     unsigned tpHead = 0;
     bool mpMode = false;
@@ -1335,6 +1358,23 @@ struct State {
     unsigned frames = 0, writes = 0, yields = 0;
     long sumDx = 0, sumDy = 0;
 } S;
+uintptr_t MoveBody() { return S.body ? S.body : S.entity; }
+uintptr_t RiderMount(uintptr_t unit, uintptr_t rider, bool* listed) {
+    uintptr_t m = Plausible(rider) ? Ptr(rider + 0x2e0) : 0;
+    int32_t id = 0;
+    *listed = false;
+    if (!Plausible(m) || m == rider || !Rd(m + oEntId, id) || !id) return 0;
+    uint32_t n = 0;
+    uintptr_t arr = Ptr(unit + 0xc8);
+    if (Rd(unit + 0xc4, n) && n > 0 && n <= 64 && Plausible(arr))
+        for (uint32_t i = 0; i < n && !*listed; ++i) *listed = Ptr(arr + 8 * static_cast<uintptr_t>(i)) == m;
+    return *listed || IsEntityOf(m, unit) ? m : 0;
+}
+float MountEye(float mountH, float footEye) {
+    if (cfg.mountEye > 0.f) return cfg.mountEye;
+    if (!(mountH > 0.3f && mountH < 30.f)) return footEye + 0.6f;
+    return std::fmax(footEye, mountH + cfg.mountEyeAbove);
+}
 volatile LONG g_reqToggle = 0, g_reqExit = 0;
 volatile LONG g_staleFp = 0;
 volatile LONG g_camBeat = 0;
@@ -1505,6 +1545,7 @@ void ReleaseMouse() {
 }
 bool IssueHalt();
 bool IssueDesiredFlying(bool fly);
+void FlyTakeoffStep(double now);
 bool IssueQuietUnitHalt();
 bool StopMoving();
 int MoveMode();
@@ -1592,7 +1633,7 @@ void Exit(uintptr_t mgr, const char* why, bool release = true) {
         if (S.kinInit) {
             S.exitPos[0] = S.kinPos[0];
             S.exitPos[1] = S.kinPos[1];
-        } else if (ReadVec(S.entity + oEntPos, pos)) {
+        } else if (ReadVec(MoveBody() + oEntPos, pos)) {
             S.exitPos[0] = pos[0];
             S.exitPos[1] = pos[2];
         }
@@ -1719,7 +1760,7 @@ void Enter(uintptr_t mgr) {
             moraleState);
         return;
     }
-    bool flyer = false, flyAlways = false;
+    bool flyer = false, flyAlways = false, flyNow = false;
     if (cfg.fly && g_flyOk && g_moveOk && cfg.moveEnabled) {
         uint8_t canFly = 0, always = 0, canToggle = 0, isFly = 0;
         Rd(uiUnit + oUiCanFly, canFly);
@@ -1728,10 +1769,34 @@ void Enter(uintptr_t mgr) {
         Rd(uiUnit + oUiIsFlying, isFly);
         flyer = canFly != 0 || always != 0;
         flyAlways = always != 0;
+        flyNow = isFly != 0;
         if (flyer)
             Log("fly: flying hero (CanFly %d, CanAlwaysFlying %d, CanToggleFlying %d, IsFlying %d, entity y %.2f) -> unit move orders, "
                 "camera at the hero's own height, no sprint, no walking bob / footsteps",
                 canFly, always, canToggle, isFly, pos[1]);
+    }
+    uintptr_t mount = 0;
+    if (cfg.mount && !flyer) {
+        const uintptr_t carrier = Ptr(entity + 0x2e0);
+        bool listed = false;
+        mount = RiderMount(unit, entity, &listed);
+        if (carrier) {
+            float mp[3] = {};
+            int32_t mid = 0;
+            float mh = 0.f, rh = 0.f;
+            const uintptr_t mrec = Plausible(carrier) ? Ptr(carrier + oEntRecord) : 0, rrec = Ptr(entity + oEntRecord), mvt = Ptr(carrier);
+            if (Plausible(carrier)) {
+                ReadVec(carrier + oEntPos, mp);
+                Rd(carrier + oEntId, mid);
+            }
+            if (mrec) Rd(mrec + oRecHeight, mh);
+            if (rrec) Rd(rrec + oRecHeight, rh);
+            Log("mount: hero rides %p (vt +0x%llx, id %d, in the unit's mount list %d, same unit %d, height %.2f m; rider height %.2f m) at %.2f,%.2f,%.2f, "
+                "rider at %.2f,%.2f,%.2f -> %s",
+                (void*)carrier, (unsigned long long)(mvt > g_base ? mvt - g_base : 0), mid, listed ? 1 : 0, IsEntityOf(carrier, unit) ? 1 : 0, mh, rh,
+                mp[0], mp[1], mp[2], pos[0], pos[1], pos[2],
+                mount ? "teleports / halts go to the mount (the rider rides along), camera on the mount" : "not a mount we can move - the hero is teleported as before");
+        }
     }
     if (S.exitStage && unit != S.exitUnit) {
         Refuse(kRefusePaused);
@@ -1783,12 +1848,31 @@ void Enter(uintptr_t mgr) {
     S.unit = unit;
     S.flyer = flyer;
     S.entity = entity;
+    S.mount = mount;
+    S.body = mount ? mount : entity;
+    S.mountUnit = S.mountMoved = false;
+    S.mountLogs = 0;
+    S.tMountLog = 0;
+    S.mountStart[0] = pos[0], S.mountStart[1] = pos[2];
+    if (mount) {
+        float mp[3];
+        if (ReadVec(mount + oEntPos, mp)) S.mountStart[0] = mp[0], S.mountStart[1] = mp[2];
+    }
     {
         static float s_cfgEye = -1.f, s_lastAuto = -1.f;
         if (s_cfgEye < 0.f || cfg.eyeHeight != s_lastAuto) s_cfgEye = cfg.eyeHeight;
         float h = 0.f, eye = s_cfgEye;
         uintptr_t rec = Ptr(entity + oEntRecord);
         if (cfg.eyeFromHeight && !flyer && rec && Rd(rec + oRecHeight, h)) eye = EyeFromHeight(h, s_cfgEye);
+        S.footEye = mount ? s_cfgEye : eye;
+        if (mount) {
+            float mh = 0.f;
+            const uintptr_t mrec = Ptr(mount + oEntRecord);
+            if (!(mrec && Rd(mrec + oRecHeight, mh))) mh = 0.f;
+            eye = MountEye(mh, s_cfgEye);
+            Log("mount: eye height %.2f m (mount height %.2f m + mount_eye_above %.2f%s)", eye, mh, cfg.mountEyeAbove,
+                cfg.mountEye > 0.f ? "; fixed mount_eye" : "");
+        }
         cfg.eyeHeight = s_lastAuto = eye;
         Log("ghost: entity height %.2f m -> eye height %.2f m (config %.2f%s)", h, eye, s_cfgEye,
             !cfg.eyeFromHeight ? ", eye_from_height off" : flyer ? ", flyer" : "");
@@ -1934,7 +2018,20 @@ void Enter(uintptr_t mgr) {
     }
     HookRenderChild();
     if (g_moveOk && cfg.moveEnabled && (MoveMode() == 2 || MoveMode() == 0)) IssueQuietUnitHalt();
-    if (S.flyer && cfg.flyTakeoff && !flyAlways) IssueDesiredFlying(true);
+    S.flyTakeoff = 0;
+    S.tFlyEnter = Now();
+    if (S.flyer && cfg.flyTakeoff && !flyAlways) {
+        if (flyNow) {
+            Log("fly: already airborne - no take-off / landing command, stays in the air");
+        } else if (!g_flyStateOk) {
+            IssueDesiredFlying(true);
+        } else {
+            S.flyTakeoff = 1;
+            S.tFlyCheck = 0;
+            S.tFlyGiveUp = S.tFlyEnter + 5.0;
+            FlyTakeoffStep(S.tFlyEnter);
+        }
+    }
     Log("FPS enter mgr=%p battle=%p fpCtrl=%p cam=%p prevActive=%p(vt %p) unit=%p entities=%u entity=%p "
         "pos=%.2f,%.2f,%.2f yaw=%.1f fov=%.4f near=%.3f(prev %.3f) far=%.1f camDone=%u selCount=%d",
         (void*)mgr, (void*)battle, (void*)fpCtrl, (void*)cam, (void*)prev, (void*)Ptr(prev), (void*)unit,
@@ -2806,6 +2903,10 @@ void FlameDirectStep(uintptr_t world, uintptr_t hero) {
         dmgSum += r.dmg;
         if (dead) ++killed;
     }
+    if (killed)
+        vmgame::HitMark(true);
+    else if (hit)
+        vmgame::HitMark(false);
     InterlockedExchangeAdd(&g_fq.hit, hit);
     InterlockedExchangeAdd(&g_fq.killed, killed);
     InterlockedExchangeAdd(&g_fq.skipped, skipped);
@@ -3147,6 +3248,58 @@ void MeleeEngineRun(uintptr_t world, uintptr_t hero, const MeleeReq* reqs, int n
 }
 #include "hero_fire_fx.inc"
 #include "hit_probe.inc"
+constexpr double kKillWatchSec = 0.8;
+struct KillWatch {
+    uintptr_t ent[16];
+    double t[16];
+    int n = 0;
+    unsigned kills = 0, expired = 0, logs = 0;
+} g_kw;
+void KillWatchAdd(uintptr_t e) {
+    const double now = Now();
+    for (int i = 0; i < g_kw.n; ++i)
+        if (g_kw.ent[i] == e) {
+            g_kw.t[i] = now;
+            return;
+        }
+    if (g_kw.n == 16) {
+        memmove(g_kw.ent, g_kw.ent + 1, sizeof(uintptr_t) * 15);
+        memmove(g_kw.t, g_kw.t + 1, sizeof(double) * 15);
+        --g_kw.n;
+    }
+    g_kw.ent[g_kw.n] = e;
+    g_kw.t[g_kw.n] = now;
+    ++g_kw.n;
+}
+void KillMarkStep() {
+    if (!g_kw.n) return;
+    if (!S.active) {
+        g_kw.n = 0;
+        return;
+    }
+    const double now = Now();
+    int w = 0;
+    for (int i = 0; i < g_kw.n; ++i) {
+        uint32_t hp = 1;
+        if (!Rd(g_kw.ent[i] + 0xb1c, hp)) continue;
+        if (!hp) {
+            vmgame::HitMark(true);
+            ++g_kw.kills;
+            if (g_kw.logs++ < 30)
+                Log("hit-mark: enemy %p down %.0f ms after our hit -> kill marker (so far %u kills, %u hits not fatal within %.1f s)", (void*)g_kw.ent[i],
+                    (now - g_kw.t[i]) * 1000.0, g_kw.kills, g_kw.expired, kKillWatchSec);
+            continue;
+        }
+        if (now - g_kw.t[i] > kKillWatchSec) {
+            ++g_kw.expired;
+            continue;
+        }
+        g_kw.ent[w] = g_kw.ent[i];
+        g_kw.t[w] = g_kw.t[i];
+        ++w;
+    }
+    g_kw.n = w;
+}
 struct HitFxLog {
     unsigned shots = 0, hits = 0, kills = 0, logs = 0;
 } g_hfx;
@@ -3157,6 +3310,8 @@ void HitFeedback(const AimHit& hit, const float eye[3], const float fwd[3]) {
     uintptr_t side = Ptr(hit.ent + 0x80);
     if (!side || side == Ptr(S.entity + 0x80)) return;
     AggroNoteHit(hit.ent);
+    vmgame::HitMark(false);
+    KillWatchAdd(hit.ent);
     int32_t dmg = 0, ap = 0;
     if (S.fpProj) {
         Rd(S.fpProj + 0x70, dmg);
@@ -3890,13 +4045,53 @@ bool IssueDesiredFlying(bool fly) {
         using FnIssue = unsigned char (*)(uintptr_t, void*);
         HaltCmdBuf cmd;
         memset(&cmd, 0, sizeof cmd);
-        reinterpret_cast<FnCtor>(g_base + kFnFlyCmdCtor904)(&cmd, &sel, fly ? 1 : 0);
+        reinterpret_cast<FnCtor>(g_base + kFnFlyCmdCtor904)(&cmd, &sel, fly ? 0 : 1);
         ok = reinterpret_cast<FnIssue>(g_base + kFnFlyCmdIssue904)(queue, &cmd) != 0;
         FreeSelection(cmd.b + 8);
     }
     FreeSelection(&sel);
-    Log("fly: desired flying state %d issued=%d units=%u", fly ? 1 : 0, ok, n);
+    Log("fly: %s command (byte %d) issued=%d units=%u", fly ? "take-off" : "landing", fly ? 0 : 1, ok, n);
     return ok;
+}
+bool FlyAirborne(uintptr_t unit) {
+    uintptr_t fc = Plausible(unit) ? Ptr(unit + oUnitFlyComp) : 0;
+    uint32_t st = 1;
+    return Plausible(fc) && Rd(fc + oFlyCompLanded, st) && st == 0;
+}
+bool FlyCanTakeOff(uintptr_t unit) {
+    uintptr_t fc = Plausible(unit) ? Ptr(unit + oUnitFlyComp) : 0;
+    if (!Plausible(fc)) return false;
+    using FnCan = unsigned char (*)(uintptr_t, unsigned char);
+    return reinterpret_cast<FnCan>(g_base + kFnFlyCanChange904)(fc, 0) != 0;
+}
+void FlyTakeoffStep(double now) {
+    if (!S.flyTakeoff || now < S.tFlyCheck) return;
+    S.tFlyCheck = now + 0.25;
+    float p[3] = {};
+    ReadVec(S.entity + oEntPos, p);
+    if (FlyAirborne(S.unit)) {
+        Log("fly: airborne %.1f s after entering (entity y %.2f)%s", now - S.tFlyEnter, p[1],
+            S.flyTakeoff == 2 ? " - took off" : "");
+        S.flyTakeoff = 0;
+        return;
+    }
+    if (!CmdQueue(nullptr)) {
+        S.tFlyGiveUp = now + 5.0;
+        return;
+    }
+    if (S.flyTakeoff == 1 && FlyCanTakeOff(S.unit)) {
+        if (IssueDesiredFlying(true)) {
+            S.flyTakeoff = 2;
+            S.tFlyGiveUp = now + 5.0;
+        }
+        return;
+    }
+    if (now >= S.tFlyGiveUp) {
+        Log("fly: still on the ground %.1f s after entering (entity y %.2f; %s) - it moves along the ground", now - S.tFlyEnter, p[1],
+            S.flyTakeoff == 2 ? "take-off issued but it did not lift off"
+                              : "the game never allowed a take-off: landing / taking off / fighting?");
+        S.flyTakeoff = 0;
+    }
 }
 using FnBsWrite = void (*)(void* w, char tag, const void* p, unsigned n);
 using FnDestWrite = void* (*)(void* w, const void* dest);
@@ -3923,7 +4118,7 @@ bool IssueOvrMove(float x, float z) {
     if (!CmdQueue(&battle)) return false;
     int32_t entId = 0;
     uintptr_t pm = Ptr(Ptr(battle + oBattlePath) + oPathMgr);
-    if (!Rd(S.entity + oEntId, entId) || !entId || !pm) {
+    if (!Rd(MoveBody() + oEntId, entId) || !entId || !pm) {
         if (S.moveLogs++ < 6) Log("move(entity): refused entityId=%d pathMgr=%p", entId, (void*)pm);
         return false;
     }
@@ -3950,7 +4145,7 @@ bool IssueOvrMove(float x, float z) {
 }
 bool IssueOvrHalt() {
     int32_t entId = 0;
-    if (!Rd(S.entity + oEntId, entId) || !entId) return false;
+    if (!Rd(MoveBody() + oEntId, entId) || !entId) return false;
     bool ok = IssueOverride(kTypeOvrHalt, [&](void* w) { BsWrite(w, 0x23, &entId, 4); });
     if (S.moveLogs++ < 12) Log("move(entity): halt issued=%d entityId=%d", ok, entId);
     return ok;
@@ -4528,7 +4723,7 @@ bool SurfaceNear(float x, float z, float refY, float* h, uintptr_t* blk) {
 }
 bool IssueTeleport(const float* dest) {
     int32_t entId = 0;
-    if (!Rd(S.entity + oEntId, entId) || !entId) return false;
+    if (!Rd(MoveBody() + oEntId, entId) || !entId) return false;
     const unsigned char place = 1;
     bool ok = IssueOverride(kTypeOvrTeleport, [&](void* w) {
         BsWrite(w, 0x23, &entId, 4);
@@ -4546,6 +4741,7 @@ bool IssueTeleport(const float* dest) {
 }
 int MoveMode() {
     if (S.flyer && g_moveOk) return 1;
+    if (S.mountUnit && g_moveOk) return 1;
     if (cfg.moveMode == 0 && g_tpOk) return 0;
     if (cfg.moveMode == 2 && g_ovrOk) return 2;
     return 1;
@@ -6978,11 +7174,46 @@ void CastHoldStep(double now) {
         S.castRepin = true;
     }
 }
+void MountStep(double now) {
+    if (Ptr(S.entity + 0x2e0) != S.mount) {
+        const bool h = S.lastMode != 1 && g_haltOk && IssueOvrHalt();
+        Log("mount: hero is off its mount %p (rider +0x2e0 now %p) - mount released (halt %d), moving the hero itself, eye %.2f -> %.2f m",
+            (void*)S.mount, (void*)Ptr(S.entity + 0x2e0), h ? 1 : 0, cfg.eyeHeight, S.footEye);
+        S.mount = 0;
+        S.body = S.entity;
+        S.mountUnit = false;
+        S.kinInit = false;
+        S.havePos = false;
+        S.stuck = false;
+        S.tNoFollow = -1;
+        cfg.eyeHeight = S.footEye;
+        return;
+    }
+    float m[3], r[3];
+    if (!ReadVec(S.mount + oEntPos, m)) return;
+    if (!S.mountMoved) {
+        const float dx = m[0] - S.mountStart[0], dz = m[2] - S.mountStart[1];
+        if (dx * dx + dz * dz > 1.f) {
+            S.mountMoved = true;
+            Log("mount: the mount moved %.1f m since entering (mode %s)", std::sqrt(dx * dx + dz * dz), ModeName(MoveMode()));
+        }
+    }
+    if (S.mountLogs < 20 && now - S.tMountLog >= 1.0 && ReadVec(S.entity + oEntPos, r)) {
+        S.tMountLog = now;
+        ++S.mountLogs;
+        int32_t ra = 0, ma = 0;
+        Rd(S.entity + oEntActivity, ra);
+        Rd(S.mount + oEntActivity, ma);
+        Log("mount: rider %.2f,%.2f,%.2f mount %.2f,%.2f,%.2f (%.2f m apart), activity rider %d / mount %d, mode %s", r[0], r[1], r[2], m[0], m[1],
+            m[2], std::sqrt((r[0] - m[0]) * (r[0] - m[0]) + (r[2] - m[2]) * (r[2] - m[2])), ra, ma, ModeName(MoveMode()));
+    }
+}
 void Apply(uintptr_t mgr) {
     double now = Now();
     uintptr_t ent = EntityByPath(S.unit, S.entPath);
     float raw[3];
-    if (ent != S.entity || !ReadVec(S.entity + oEntPos, raw) || Ptr(mgr + oMgrBattle) != S.battle) {
+    if (ent == S.entity && S.mount) MountStep(now);
+    if (ent != S.entity || !ReadVec(MoveBody() + oEntPos, raw) || Ptr(mgr + oMgrBattle) != S.battle) {
         Exit(mgr, "unit-invalid", false);
         return;
     }
@@ -6994,6 +7225,7 @@ void Apply(uintptr_t mgr) {
         Exit(mgr, "camera-invalid");
         return;
     }
+    if (S.flyTakeoff) FlyTakeoffStep(now);
     if (S.ghostWanted && !S.ghost && IssueUnitEnabled(false)) S.ghost = true;
     if (g_moveOk && !S.ghostWanted && !S.ghost && now - S.tAliveCheck >= 1.0) {
         S.tAliveCheck = now;
@@ -7159,14 +7391,14 @@ void Apply(uintptr_t mgr) {
         }
         TacStaminaStep(now, dt);
         {
-            const bool ck = fg && cfg.crouch && !S.flyer && KeyDown(static_cast<int>(cfg.crouchKey));
+            const bool ck = fg && cfg.crouch && !S.flyer && !S.mount && KeyDown(static_cast<int>(cfg.crouchKey));
             if (ck && !S.ctrlPrev && S.sprint) {
                 S.fireBlock = now + (S.tac ? cfg.tacSprintToFire : cfg.sprintToFire);
                 S.exitTac = S.tac;
                 S.sprint = S.tac = false;
             }
             const bool was = S.crouch;
-            S.crouch = cfg.crouch && !S.flyer && CrouchWant(S.crouch, ck, S.ctrlPrev, cfg.crouchToggle, S.sprint && !wasSprint, &S.crouchLatch);
+            S.crouch = cfg.crouch && !S.flyer && !S.mount && CrouchWant(S.crouch, ck, S.ctrlPrev, cfg.crouchToggle, S.sprint && !wasSprint, &S.crouchLatch);
             S.ctrlPrev = ck;
             if (S.crouch != was) {
                 vmgame::CrouchImpulse(S.crouch ? 1.f : -1.f);
@@ -7294,6 +7526,12 @@ void Apply(uintptr_t mgr) {
                 S.stuck = false;
                 S.tNoFollow = -1;
                 Log("move(teleport): hero follows again after %.1f s (activity %d)", now - S.tStuck, act);
+            } else if (S.mount && !S.mountMoved && !S.mountUnit && cfg.mountFallback && g_moveOk && now - S.tStuck >= 1.0) {
+                S.mountUnit = true;
+                S.stuck = false;
+                S.tNoFollow = -1;
+                Log("mount: the mount never followed a teleport (stuck %.1f s) - switching to unit move orders like flying heroes "
+                    "([move] mount_fallback=0 keeps teleports)", now - S.tStuck);
             }
         } else if (follow) {
             S.tNoFollow = -1;
@@ -8660,6 +8898,12 @@ bool VerifyGame() {
         Log("fly: flying heroes %s (fly=%d takeoff=%d ahead=%.0f interval=%.2f turn=%.0f eye=%.2f)",
             g_flyOk ? "ok" : "OFF - flying heroes use the normal movement", cfg.fly, cfg.flyTakeoff, cfg.flyAhead, cfg.flyInterval,
             cfg.flyTurnDeg, cfg.flyEyeHeight);
+        g_flyStateOk = g_flyOk && PrintsMatch(Prints(kFlyStatePrints904), "flying heroes (airborne / can take off)");
+        Log("fly: take-off byte 0 (10-31 fix: 1 = land); airborne / can-take-off checks %s",
+            g_flyStateOk ? "ok - grounded flyers take off once the game allows it" : "OFF - one take-off command on entering, result not checked");
+        Log("mount: ground mounts %s (mount=%d mount_hide=%d mount_fallback=%d mount_eye_above=%.2f mount_eye=%.2f)",
+            cfg.mount ? "ok - the mount is teleported, the rider rides along" : "OFF - the rider is teleported (it cannot move)", cfg.mount, cfg.mountHide,
+            cfg.mountFallback, cfg.mountEyeAbove, cfg.mountEye);
         g_wallOk = PrintsMatch(Prints(kWallPrints904), "wall nav blocks (teleport hint)");
         g_buildOk = PrintsMatch(Prints(kBuildPrints904), "building collision (segment query)");
         g_netOk = PrintsMatch(Prints(kNetPrints904), "ground region net (arches / passages)") &&
@@ -9086,6 +9330,86 @@ void HideSelfStep() {
         }
     }
 }
+HideSelf g_hideMount;
+uintptr_t g_hideMountEnt = 0;
+void MountHideRestore(const char* why) {
+    HideSelf& h = g_hideMount;
+    if (h.inst) {
+        int n = 0;
+        const bool still = HeroSoldierVisual(S.battle, S.unit, g_hideMountEnt) == h.sv && Ptr(h.sv + oSoldierVisInstance) == h.inst &&
+                           HideParts(h.inst, &n) == h.parts && n == h.n;
+        if (still)
+            for (int k = 0; k < h.n; ++k) Wr(h.parts + kInstPartStride * k, h.want[k]);
+        Log("mount: mount model %s (%s; %d parts, game re-showed parts %u times)", still ? "shown again" : "gone - nothing restored", why, h.n,
+            h.rewrites);
+    }
+    h = HideSelf();
+    g_hideMountEnt = 0;
+}
+void MountHideStep() {
+    const uintptr_t m = S.active && cfg.hideSelf && cfg.mountHide ? S.mount : 0;
+    HideSelf& h = g_hideMount;
+    if (m != g_hideMountEnt) {
+        MountHideRestore(!S.active ? "first person ended" : m ? "another mount" : "off the mount");
+        g_hideMountEnt = m;
+    }
+    if (!m) return;
+    const double now = Now();
+    if (h.inst) {
+        int n = 0;
+        bool same = Ptr(h.sv + oSoldierVisInstance) == h.inst && HideParts(h.inst, &n) == h.parts && n == h.n;
+        if (same && now - h.tCheck > 1.0) {
+            h.tCheck = now;
+            same = HeroSoldierVisual(S.battle, S.unit, m) == h.sv;
+        }
+        if (!same) {
+            Log("mount: mount render instance changed (died / model swapped?); looking again");
+            h = HideSelf();
+        }
+    }
+    if (!h.inst) {
+        if (h.tSearch >= 0 && now - h.tSearch < 0.5) return;
+        h.tSearch = now;
+        const uintptr_t sv = HeroSoldierVisual(S.battle, S.unit, m);
+        const uintptr_t inst = sv ? Ptr(sv + oSoldierVisInstance) : 0;
+        int n = 0;
+        const uintptr_t parts = HideParts(inst, &n);
+        if (!parts) {
+            if (!h.warned) {
+                h.warned = true;
+                Log("mount: mount %p has no soldier visual of its own (visual %p instance %p) - drawn with the rider's model (hide_self) or left visible", (void*)m,
+                    (void*)sv, (void*)inst);
+            }
+            return;
+        }
+        char flags[kHideMaxParts * 2 + 1] = "";
+        for (int k = 0; k < n; ++k) {
+            uint32_t v = 0;
+            Rd(parts + kInstPartStride * k, v);
+            h.want[k] = v;
+            flags[2 * k] = v > 9 ? '+' : (char)('0' + v);
+            flags[2 * k + 1] = k + 1 < n ? ' ' : 0;
+            if (v) Wr(parts + kInstPartStride * k, uint32_t(0));
+        }
+        h.sv = sv;
+        h.inst = inst;
+        h.parts = parts;
+        h.n = n;
+        h.tCheck = now;
+        h.rewrites = 0;
+        h.warned = false;
+        Log("mount: mount model hidden in our view (visual %p instance %p, %d parts, flags were %s)", (void*)sv, (void*)inst, n, flags);
+        return;
+    }
+    for (int k = 0; k < h.n; ++k) {
+        uint32_t v = 0;
+        if (Rd(h.parts + kInstPartStride * k, v) && v) {
+            h.want[k] = v;
+            Wr(h.parts + kInstPartStride * k, uint32_t(0));
+            if (h.rewrites++ < 8) Log("mount: game showed mount part %d again (flag %u); hidden again", k, v);
+        }
+    }
+}
 constexpr uint32_t kArrowBoneTag = 0xF0000000u, kArrowMaxList = 1u << 16;
 constexpr uint8_t kArrowAttached = 0x80;
 constexpr int kArrowMaxHide = 64;
@@ -9311,7 +9635,9 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     SelMarkStep();
     EdgeStep();
     ShotStep();
+    KillMarkStep();
     HideSelfStep();
+    MountHideStep();
     ArrowHideStep();
     vmgame::GameThreadTime((Now() - tGameFrame) * 1000.0);
 }
