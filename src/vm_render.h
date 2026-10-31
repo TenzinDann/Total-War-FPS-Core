@@ -636,6 +636,7 @@ struct DofParams {
 };
 class NearDof {
 public:
+    bool Prewarm(ID3D11Device* dev, UINT w, UINT h);
     bool Apply(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11ShaderResourceView* color, bool colorGamma,
                ID3D11ShaderResourceView* depth, UINT w, UINT h, bool rtvEncodesSrgb, const DofParams& p);
     void Release();

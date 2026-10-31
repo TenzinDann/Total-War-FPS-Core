@@ -6379,218 +6379,6 @@ void Shield::Release() {
     n_ = hitPending_ = 0;
     for (UINT& c : kindCount_) c = 0;
 }
-namespace prefetch {
-ID3D11Device* DeviceRef() {
-    AcquireSRWLockShared(&g_preLock);
-    ID3D11Device* d = g_preDev;
-    if (d) d->AddRef();
-    ReleaseSRWLockShared(&g_preLock);
-    return d;
-}
-void PutTexture(int tag, const wchar_t* path, unsigned char* data, size_t len, ULONGLONG size, FILETIME stamp, bool srgb) {
-    ID3D11Device* d = DeviceRef();
-    ID3D11ShaderResourceView* srv = nullptr;
-    char err[8];
-    if (d && DdsCreate(d, data, len, srgb, path, &srv, err, sizeof err)) {
-        delete[] data;
-        InterlockedIncrement(&g_preBuilt);
-        PutPrefetched(tag, false, path, nullptr, 0, size, stamp, srgb, srv, d, true);
-    } else {
-        PutPrefetched(tag, false, path, data, len, size, stamp, srgb, nullptr, nullptr, d != nullptr);
-    }
-    if (d) d->Release();
-}
-bool SetDevice(ID3D11Device* dev) {
-    const bool mt = dev && !(dev->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED);
-    ID3D11ShaderResourceView* old[kMaxPre];
-    int n = 0;
-    AcquireSRWLockExclusive(&g_preLock);
-    ID3D11Device* prev = g_preDev;
-    g_preDev = mt ? dev : nullptr;
-    if (g_preDev) g_preDev->AddRef();
-    for (int i = 0; i < g_preN;) {
-        if (g_pre[i].srv && g_pre[i].dev != g_preDev) {
-            old[n++] = g_pre[i].srv;
-            g_pre[i] = g_pre[--g_preN];
-        } else {
-            ++i;
-        }
-    }
-    ReleaseSRWLockExclusive(&g_preLock);
-    for (int k = 0; k < n; ++k) old[k]->Release();
-    if (prev) prev->Release();
-    return mt;
-}
-int Upgrade(int tag) {
-    ID3D11Device* d = DeviceRef();
-    if (!d) return 0;
-    int n = 0;
-    for (;;) {
-        PreEntry e = {};
-        bool got = false;
-        AcquireSRWLockExclusive(&g_preLock);
-        for (int i = 0; i < g_preN; ++i) {
-            if (g_pre[i].tag != tag || g_pre[i].hvm || !g_pre[i].data || g_pre[i].bgTried) continue;
-            e = g_pre[i];
-            g_pre[i] = g_pre[--g_preN];
-            got = true;
-            break;
-        }
-        ReleaseSRWLockExclusive(&g_preLock);
-        if (!got) break;
-        ID3D11ShaderResourceView* srv = nullptr;
-        char err[8];
-        if (DdsCreate(d, e.data, e.len, e.srgb, e.path, &srv, err, sizeof err)) {
-            delete[] e.data;
-            InterlockedIncrement(&g_preBuilt);
-            PutPrefetched(e.tag, false, e.path, nullptr, 0, e.size, e.stamp, e.srgb, srv, d, true);
-            ++n;
-        } else {
-            PutPrefetched(e.tag, false, e.path, e.data, e.len, e.size, e.stamp, e.srgb, nullptr, nullptr, true);
-        }
-    }
-    d->Release();
-    return n;
-}
-bool ShieldModel(int tag, const wchar_t* hsmPath, int* files, size_t* bytes) {
-    *files = 0;
-    *bytes = 0;
-    unsigned char* data = nullptr;
-    size_t len = 0;
-    if (!ReadFileAll(hsmPath, &data, &len)) return false;
-    uint32_t h[7];
-    bool ok = len >= sizeof h && !memcmp(data, "HSM1", 4);
-    if (ok) memcpy(h, data, sizeof h);
-    ok = ok && h[1] == 1 && h[6] >= 1 && h[6] <= 12;
-    wchar_t dir[520];
-    wcsncpy(dir, hsmPath, 519);
-    dir[519] = 0;
-    if (wchar_t* sl = wcsrchr(dir, L'\\')) *sl = 0;
-    size_t p = sizeof h;
-    for (uint32_t t = 0; ok && t < h[6]; ++t) {
-        if (p + 2 > len) break;
-        uint16_t n = static_cast<uint16_t>(data[p] | (data[p + 1] << 8));
-        p += 2;
-        if (!n || n > 400 || p + n + 1 > len) break;
-        wchar_t rel[512], full[1040];
-        int wn = MultiByteToWideChar(CP_UTF8, 0, reinterpret_cast<const char*>(data + p), n, rel, 511);
-        rel[wn > 0 ? wn : 0] = 0;
-        for (wchar_t* c = rel; *c; ++c)
-            if (*c == L'/') *c = L'\\';
-        bool srgb = data[p + n] != 0;
-        p += n + 1;
-        swprintf(full, 1040, L"%ls\\%ls", dir, rel);
-        ULONGLONG size = 0;
-        FILETIME stamp = {};
-        unsigned char* d = nullptr;
-        size_t l = 0;
-        if (!FileStamp(full, &size, &stamp) || !ReadFileAll(full, &d, &l)) continue;
-        ++*files;
-        *bytes += l;
-        PutTexture(tag, full, d, l, size, stamp, srgb);
-    }
-    delete[] data;
-    return ok;
-}
-void Counters(long* built, long* taken) {
-    *built = g_preBuilt;
-    *taken = g_preTaken;
-}
-bool Model(int tag, const wchar_t* hvmPath, int* files, size_t* bytes, char* err, size_t errLen) {
-    *files = 0;
-    *bytes = 0;
-    ULONGLONG size = 0;
-    FILETIME stamp = {};
-    if (!FileStamp(hvmPath, &size, &stamp)) {
-        SetErr(err, errLen, "model file missing: %ls", hvmPath);
-        return false;
-    }
-    unsigned char* data = nullptr;
-    size_t len = 0;
-    if (!ReadHvmV1(hvmPath, &data, &len, err, errLen)) return false;
-    HvmHeader h = {};
-    constexpr uint32_t kTexCap = 64;
-    HvmTexture tex[kTexCap];
-    uint32_t texN = 0;
-    if (len >= sizeof h) {
-        memcpy(&h, data, sizeof h);
-        if (!memcmp(h.magic, "HVM1", 4) && h.version == 1 && h.textureCount <= kTexCap &&
-            sizeof h + h.textureCount * sizeof(HvmTexture) <= len)
-            texN = h.textureCount;
-    }
-    memcpy(tex, data + sizeof h, texN * sizeof(HvmTexture));
-    *files = 1;
-    *bytes = len;
-    PutPrefetched(tag, true, hvmPath, data, len, size, stamp);
-    wchar_t dir[MAX_PATH];
-    wcsncpy(dir, hvmPath, MAX_PATH - 1);
-    dir[MAX_PATH - 1] = 0;
-    wchar_t* slash = wcsrchr(dir, L'\\');
-    if (!slash) slash = wcsrchr(dir, L'/');
-    if (slash) slash[1] = 0;
-    for (uint32_t t = 0; t < texN; ++t) {
-        tex[t].file[75] = 0;
-        wchar_t rel[128];
-        MultiByteToWideChar(CP_UTF8, 0, tex[t].file, -1, rel, 128);
-        wchar_t full[MAX_PATH * 2];
-        swprintf(full, MAX_PATH * 2, L"%ls%ls", dir, rel);
-        unsigned char* d = nullptr;
-        size_t l = 0;
-        if (!FileStamp(full, &size, &stamp) || !ReadFileAll(full, &d, &l)) continue;
-        ++*files;
-        *bytes += l;
-        PutTexture(tag, full, d, l, size, stamp, tex[t].srgb != 0);
-    }
-    return true;
-}
-void Drop(int tag) {
-    unsigned char* del[kMaxPre];
-    ID3D11ShaderResourceView* srv[kMaxPre];
-    int n = 0;
-    AcquireSRWLockExclusive(&g_preLock);
-    for (int i = 0; i < g_preN;) {
-        if (g_pre[i].tag != tag) {
-            ++i;
-            continue;
-        }
-        del[n] = g_pre[i].data;
-        srv[n++] = g_pre[i].srv;
-        g_pre[i] = g_pre[--g_preN];
-    }
-    ReleaseSRWLockExclusive(&g_preLock);
-    for (int k = 0; k < n; ++k) {
-        delete[] del[k];
-        if (srv[k]) srv[k]->Release();
-    }
-}
-int WarmShaders() {
-    FnD3DCompile compile = GetCompiler();
-    if (!compile) return 0;
-    struct One {
-        const char* src;
-        size_t len;
-        const char *name, *entry, *target;
-    } const list[] = {{kShader, sizeof kShader - 1, "tenzin_fps_vm", "VS", "vs_5_0"},
-                      {kShader, sizeof kShader - 1, "tenzin_fps_vm", "PS", "ps_5_0"},
-                      {kFlashShader, sizeof kFlashShader - 1, "tenzin_fps_flash", "VS", "vs_5_0"},
-                      {kFlashShader, sizeof kFlashShader - 1, "tenzin_fps_flash", "PS", "ps_5_0"},
-                      {kFlashShader, sizeof kFlashShader - 1, "tenzin_fps_flash", "PSD", "ps_5_0"},
-                      {kShellShader, sizeof kShellShader - 1, "tenzin_fps_shell", "VS", "vs_5_0"},
-                      {kShellShader, sizeof kShellShader - 1, "tenzin_fps_shell", "PS", "ps_5_0"},
-                      {kCrossShader, sizeof kCrossShader - 1, "tenzin_fps_cross", "VS", "vs_5_0"},
-                      {kCrossShader, sizeof kCrossShader - 1, "tenzin_fps_cross", "PS", "ps_5_0"},
-                      {kShieldShader, sizeof kShieldShader - 1, "tenzin_fps_shield", "VS", "vs_5_0"},
-                      {kShieldShader, sizeof kShieldShader - 1, "tenzin_fps_shield", "PS", "ps_5_0"}};
-    int ok = 0;
-    for (const One& o : list) {
-        ID3DBlob *b = nullptr, *m = nullptr;
-        if (SUCCEEDED(compile(o.src, o.len, o.name, nullptr, nullptr, o.entry, o.target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &b, &m))) ++ok;
-        SafeRelease(b);
-        SafeRelease(m);
-    }
-    return ok;
-}
-}
 static const char kDofShader[] = R"HLSL(cbuffer C : register(b0) {
     float4 gSize;
     float4 gHalf;
@@ -6796,6 +6584,232 @@ bool NearDof::Apply(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
     ctx->PSSetShaderResources(0, 3, none);
     bk.Restore(ctx);
     return true;
+}
+bool NearDof::Prewarm(ID3D11Device* dev, UINT w, UINT h) {
+    if (failed_ || !dev) return false;
+    if (dev != dev_ || !vs_) {
+        if (!Init(dev)) {
+            failed_ = true;
+            return false;
+        }
+    }
+    return w < 16 || h < 16 || EnsureTargets(w, h);
+}
+namespace prefetch {
+ID3D11Device* DeviceRef() {
+    AcquireSRWLockShared(&g_preLock);
+    ID3D11Device* d = g_preDev;
+    if (d) d->AddRef();
+    ReleaseSRWLockShared(&g_preLock);
+    return d;
+}
+void PutTexture(int tag, const wchar_t* path, unsigned char* data, size_t len, ULONGLONG size, FILETIME stamp, bool srgb) {
+    ID3D11Device* d = DeviceRef();
+    ID3D11ShaderResourceView* srv = nullptr;
+    char err[8];
+    if (d && DdsCreate(d, data, len, srgb, path, &srv, err, sizeof err)) {
+        delete[] data;
+        InterlockedIncrement(&g_preBuilt);
+        PutPrefetched(tag, false, path, nullptr, 0, size, stamp, srgb, srv, d, true);
+    } else {
+        PutPrefetched(tag, false, path, data, len, size, stamp, srgb, nullptr, nullptr, d != nullptr);
+    }
+    if (d) d->Release();
+}
+bool SetDevice(ID3D11Device* dev) {
+    const bool mt = dev && !(dev->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED);
+    ID3D11ShaderResourceView* old[kMaxPre];
+    int n = 0;
+    AcquireSRWLockExclusive(&g_preLock);
+    ID3D11Device* prev = g_preDev;
+    g_preDev = mt ? dev : nullptr;
+    if (g_preDev) g_preDev->AddRef();
+    for (int i = 0; i < g_preN;) {
+        if (g_pre[i].srv && g_pre[i].dev != g_preDev) {
+            old[n++] = g_pre[i].srv;
+            g_pre[i] = g_pre[--g_preN];
+        } else {
+            ++i;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_preLock);
+    for (int k = 0; k < n; ++k) old[k]->Release();
+    if (prev) prev->Release();
+    return mt;
+}
+int Upgrade(int tag) {
+    ID3D11Device* d = DeviceRef();
+    if (!d) return 0;
+    int n = 0;
+    for (;;) {
+        PreEntry e = {};
+        bool got = false;
+        AcquireSRWLockExclusive(&g_preLock);
+        for (int i = 0; i < g_preN; ++i) {
+            if (g_pre[i].tag != tag || g_pre[i].hvm || !g_pre[i].data || g_pre[i].bgTried) continue;
+            e = g_pre[i];
+            g_pre[i] = g_pre[--g_preN];
+            got = true;
+            break;
+        }
+        ReleaseSRWLockExclusive(&g_preLock);
+        if (!got) break;
+        ID3D11ShaderResourceView* srv = nullptr;
+        char err[8];
+        if (DdsCreate(d, e.data, e.len, e.srgb, e.path, &srv, err, sizeof err)) {
+            delete[] e.data;
+            InterlockedIncrement(&g_preBuilt);
+            PutPrefetched(e.tag, false, e.path, nullptr, 0, e.size, e.stamp, e.srgb, srv, d, true);
+            ++n;
+        } else {
+            PutPrefetched(e.tag, false, e.path, e.data, e.len, e.size, e.stamp, e.srgb, nullptr, nullptr, true);
+        }
+    }
+    d->Release();
+    return n;
+}
+bool ShieldModel(int tag, const wchar_t* hsmPath, int* files, size_t* bytes) {
+    *files = 0;
+    *bytes = 0;
+    unsigned char* data = nullptr;
+    size_t len = 0;
+    if (!ReadFileAll(hsmPath, &data, &len)) return false;
+    uint32_t h[7];
+    bool ok = len >= sizeof h && !memcmp(data, "HSM1", 4);
+    if (ok) memcpy(h, data, sizeof h);
+    ok = ok && h[1] == 1 && h[6] >= 1 && h[6] <= 12;
+    wchar_t dir[520];
+    wcsncpy(dir, hsmPath, 519);
+    dir[519] = 0;
+    if (wchar_t* sl = wcsrchr(dir, L'\\')) *sl = 0;
+    size_t p = sizeof h;
+    for (uint32_t t = 0; ok && t < h[6]; ++t) {
+        if (p + 2 > len) break;
+        uint16_t n = static_cast<uint16_t>(data[p] | (data[p + 1] << 8));
+        p += 2;
+        if (!n || n > 400 || p + n + 1 > len) break;
+        wchar_t rel[512], full[1040];
+        int wn = MultiByteToWideChar(CP_UTF8, 0, reinterpret_cast<const char*>(data + p), n, rel, 511);
+        rel[wn > 0 ? wn : 0] = 0;
+        for (wchar_t* c = rel; *c; ++c)
+            if (*c == L'/') *c = L'\\';
+        bool srgb = data[p + n] != 0;
+        p += n + 1;
+        swprintf(full, 1040, L"%ls\\%ls", dir, rel);
+        ULONGLONG size = 0;
+        FILETIME stamp = {};
+        unsigned char* d = nullptr;
+        size_t l = 0;
+        if (!FileStamp(full, &size, &stamp) || !ReadFileAll(full, &d, &l)) continue;
+        ++*files;
+        *bytes += l;
+        PutTexture(tag, full, d, l, size, stamp, srgb);
+    }
+    delete[] data;
+    return ok;
+}
+void Counters(long* built, long* taken) {
+    *built = g_preBuilt;
+    *taken = g_preTaken;
+}
+bool Model(int tag, const wchar_t* hvmPath, int* files, size_t* bytes, char* err, size_t errLen) {
+    *files = 0;
+    *bytes = 0;
+    ULONGLONG size = 0;
+    FILETIME stamp = {};
+    if (!FileStamp(hvmPath, &size, &stamp)) {
+        SetErr(err, errLen, "model file missing: %ls", hvmPath);
+        return false;
+    }
+    unsigned char* data = nullptr;
+    size_t len = 0;
+    if (!ReadHvmV1(hvmPath, &data, &len, err, errLen)) return false;
+    HvmHeader h = {};
+    constexpr uint32_t kTexCap = 64;
+    HvmTexture tex[kTexCap];
+    uint32_t texN = 0;
+    if (len >= sizeof h) {
+        memcpy(&h, data, sizeof h);
+        if (!memcmp(h.magic, "HVM1", 4) && h.version == 1 && h.textureCount <= kTexCap &&
+            sizeof h + h.textureCount * sizeof(HvmTexture) <= len)
+            texN = h.textureCount;
+    }
+    memcpy(tex, data + sizeof h, texN * sizeof(HvmTexture));
+    *files = 1;
+    *bytes = len;
+    PutPrefetched(tag, true, hvmPath, data, len, size, stamp);
+    wchar_t dir[MAX_PATH];
+    wcsncpy(dir, hvmPath, MAX_PATH - 1);
+    dir[MAX_PATH - 1] = 0;
+    wchar_t* slash = wcsrchr(dir, L'\\');
+    if (!slash) slash = wcsrchr(dir, L'/');
+    if (slash) slash[1] = 0;
+    for (uint32_t t = 0; t < texN; ++t) {
+        tex[t].file[75] = 0;
+        wchar_t rel[128];
+        MultiByteToWideChar(CP_UTF8, 0, tex[t].file, -1, rel, 128);
+        wchar_t full[MAX_PATH * 2];
+        swprintf(full, MAX_PATH * 2, L"%ls%ls", dir, rel);
+        unsigned char* d = nullptr;
+        size_t l = 0;
+        if (!FileStamp(full, &size, &stamp) || !ReadFileAll(full, &d, &l)) continue;
+        ++*files;
+        *bytes += l;
+        PutTexture(tag, full, d, l, size, stamp, tex[t].srgb != 0);
+    }
+    return true;
+}
+void Drop(int tag) {
+    unsigned char* del[kMaxPre];
+    ID3D11ShaderResourceView* srv[kMaxPre];
+    int n = 0;
+    AcquireSRWLockExclusive(&g_preLock);
+    for (int i = 0; i < g_preN;) {
+        if (g_pre[i].tag != tag) {
+            ++i;
+            continue;
+        }
+        del[n] = g_pre[i].data;
+        srv[n++] = g_pre[i].srv;
+        g_pre[i] = g_pre[--g_preN];
+    }
+    ReleaseSRWLockExclusive(&g_preLock);
+    for (int k = 0; k < n; ++k) {
+        delete[] del[k];
+        if (srv[k]) srv[k]->Release();
+    }
+}
+int WarmShaders() {
+    FnD3DCompile compile = GetCompiler();
+    if (!compile) return 0;
+    struct One {
+        const char* src;
+        size_t len;
+        const char *name, *entry, *target;
+    } const list[] = {{kShader, sizeof kShader - 1, "tenzin_fps_vm", "VS", "vs_5_0"},
+                      {kShader, sizeof kShader - 1, "tenzin_fps_vm", "PS", "ps_5_0"},
+                      {kFlashShader, sizeof kFlashShader - 1, "tenzin_fps_flash", "VS", "vs_5_0"},
+                      {kFlashShader, sizeof kFlashShader - 1, "tenzin_fps_flash", "PS", "ps_5_0"},
+                      {kFlashShader, sizeof kFlashShader - 1, "tenzin_fps_flash", "PSD", "ps_5_0"},
+                      {kShellShader, sizeof kShellShader - 1, "tenzin_fps_shell", "VS", "vs_5_0"},
+                      {kShellShader, sizeof kShellShader - 1, "tenzin_fps_shell", "PS", "ps_5_0"},
+                      {kCrossShader, sizeof kCrossShader - 1, "tenzin_fps_cross", "VS", "vs_5_0"},
+                      {kCrossShader, sizeof kCrossShader - 1, "tenzin_fps_cross", "PS", "ps_5_0"},
+                      {kShieldShader, sizeof kShieldShader - 1, "tenzin_fps_shield", "VS", "vs_5_0"},
+                      {kShieldShader, sizeof kShieldShader - 1, "tenzin_fps_shield", "PS", "ps_5_0"},
+                      {kDofShader, sizeof kDofShader - 1, "tenzin_fps_dof", "VS", "vs_5_0"},
+                      {kDofShader, sizeof kDofShader - 1, "tenzin_fps_dof", "PSDown", "ps_5_0"},
+                      {kDofShader, sizeof kDofShader - 1, "tenzin_fps_dof", "PSBlur", "ps_5_0"},
+                      {kDofShader, sizeof kDofShader - 1, "tenzin_fps_dof", "PSComp", "ps_5_0"}};
+    int ok = 0;
+    for (const One& o : list) {
+        ID3DBlob *b = nullptr, *m = nullptr;
+        if (SUCCEEDED(compile(o.src, o.len, o.name, nullptr, nullptr, o.entry, o.target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &b, &m))) ++ok;
+        SafeRelease(b);
+        SafeRelease(m);
+    }
+    return ok;
+}
 }
 }
 #include "cast_marker_draw.inc"
