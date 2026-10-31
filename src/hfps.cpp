@@ -3365,6 +3365,8 @@ struct BurstStats {
     unsigned hipAir = 0;
     unsigned cover = 0, coverIn = 0, coverIssued = 0, coverOver = 0, coverBlocked = 0, coverHeight = 0;
     unsigned coverDue = 0;
+    unsigned hpChecked = 0, hpNone = 0, hpKilled = 0;
+    double hpLost = 0;
     float coverMs = 0, coverMsMax = 0;
     int logs = 0;
 } g_bst;
@@ -3375,11 +3377,13 @@ void BurstStatsLog(double now) {
     const float nc = g_bst.cover ? static_cast<float>(g_bst.cover) : 1.f;
     Log("fire: bursts in %.1f s: cover %u (in flame avg %.1f, due avg %.1f, issued %u, due left for the next shot %u, blocked by ground / wall avg %.1f, "
         "height miss avg %.1f, "
-        "scan avg %.2f / max %.2f ms), hip %u (cut by ground / wall %u, in the air %u, distance avg %.1f m), "
+        "scan avg %.2f / max %.2f ms; hp lost avg %.1f per burn over %u checked, %u lost nothing, %u burned soldiers seen dead), "
+        "hip %u (cut by ground / wall %u, in the air %u, distance avg %.1f m), "
         "focus %u (on soldier %u, off line avg %.2f m, scatter avg %.2f m), pierce %u on %u lines (soldiers on line avg %.1f), refused %u",
         now - g_bst.t0, g_bst.cover, static_cast<float>(g_bst.coverIn) / nc, static_cast<float>(g_bst.coverDue) / nc, g_bst.coverIssued,
         g_bst.coverOver,
-        static_cast<float>(g_bst.coverBlocked) / nc, static_cast<float>(g_bst.coverHeight) / nc, g_bst.coverMs / nc, g_bst.coverMsMax, g_bst.hip,
+        static_cast<float>(g_bst.coverBlocked) / nc, static_cast<float>(g_bst.coverHeight) / nc, g_bst.coverMs / nc, g_bst.coverMsMax,
+        g_bst.hpChecked ? static_cast<float>(g_bst.hpLost / g_bst.hpChecked) : 0.f, g_bst.hpChecked, g_bst.hpNone, g_bst.hpKilled, g_bst.hip,
         g_bst.hipCut, g_bst.hipAir,
         g_bst.hip ? g_bst.hipSum / static_cast<float>(g_bst.hip) : 0.f, g_bst.focus, g_bst.focusEnt,
         g_bst.focusEnt ? g_bst.offSum / static_cast<float>(g_bst.focusEnt) : 0.f, g_bst.focus ? g_bst.scatSum / static_cast<float>(g_bst.focus) : 0.f,
@@ -4753,6 +4757,7 @@ bool FireBurstCover(const float eye[3], const float fwd[3], const float right[3]
     struct Cand {
         float p[3], v[2];
         uintptr_t e;
+        uint32_t hp;
     };
     static Cand cand[kCoverMaxCand];
     static uintptr_t ents[1024];
@@ -4799,7 +4804,11 @@ bool FireBurstCover(const float eye[3], const float fwd[3], const float right[3]
             if (r == cover::kHeight) ++height;
             if (r != cover::kIn) continue;
             uint32_t hp = 0;
-            if (!Rd(e + 0xb1c, hp) || !hp) continue;
+            if (!Rd(e + 0xb1c, hp)) continue;
+            if (!hp) {
+                if (g_cov.burn.TakeKill(e, now)) ++g_bst.hpKilled;
+                continue;
+            }
             Cand& c = cand[nc++];
             c.p[0] = qx;
             c.p[1] = q[1];
@@ -4807,6 +4816,7 @@ bool FireBurstCover(const float eye[3], const float fwd[3], const float right[3]
             c.v[0] = vel[0];
             c.v[1] = vel[1];
             c.e = e;
+            c.hp = hp;
         }
     }
     QueryPerformanceCounter(&q1);
@@ -4820,7 +4830,13 @@ bool FireBurstCover(const float eye[3], const float fwd[3], const float right[3]
     for (int j = 0; j < k; ++j) {
         const Cand& c = cand[pick[j]];
         float burst[3] = {c.p[0] + c.v[0] * leadT, c.p[1], c.p[2] + c.v[1] * leadT};
-        if (IssueBurstAt(eye, burst, fast, queue)) ++issued, g_cov.burn.Mark(c.e, now);
+        double tp = 0.0;
+        uint32_t hp0 = 0, lost = 0;
+        if (g_cov.burn.Prev(c.e, now, &tp, &hp0) && cover::HpLost(tp, hp0, now, c.hp, &lost)) {
+            ++g_bst.hpChecked, g_bst.hpLost += lost;
+            if (!lost) ++g_bst.hpNone;
+        }
+        if (IssueBurstAt(eye, burst, fast, queue)) ++issued, g_cov.burn.Mark(c.e, now, c.hp);
     }
     const double ms = (q1.QuadPart - q0.QuadPart) * 1000.0 / static_cast<double>(g_qpf.QuadPart);
     g_bst.coverMs += static_cast<float>(ms);
