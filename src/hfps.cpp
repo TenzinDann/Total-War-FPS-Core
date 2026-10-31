@@ -2806,6 +2806,10 @@ void FlameDirectStep(uintptr_t world, uintptr_t hero) {
         dmgSum += r.dmg;
         if (dead) ++killed;
     }
+    if (killed)
+        vmgame::HitMark(true);
+    else if (hit)
+        vmgame::HitMark(false);
     InterlockedExchangeAdd(&g_fq.hit, hit);
     InterlockedExchangeAdd(&g_fq.killed, killed);
     InterlockedExchangeAdd(&g_fq.skipped, skipped);
@@ -3147,6 +3151,58 @@ void MeleeEngineRun(uintptr_t world, uintptr_t hero, const MeleeReq* reqs, int n
 }
 #include "hero_fire_fx.inc"
 #include "hit_probe.inc"
+constexpr double kKillWatchSec = 0.8;
+struct KillWatch {
+    uintptr_t ent[16];
+    double t[16];
+    int n = 0;
+    unsigned kills = 0, expired = 0, logs = 0;
+} g_kw;
+void KillWatchAdd(uintptr_t e) {
+    const double now = Now();
+    for (int i = 0; i < g_kw.n; ++i)
+        if (g_kw.ent[i] == e) {
+            g_kw.t[i] = now;
+            return;
+        }
+    if (g_kw.n == 16) {
+        memmove(g_kw.ent, g_kw.ent + 1, sizeof(uintptr_t) * 15);
+        memmove(g_kw.t, g_kw.t + 1, sizeof(double) * 15);
+        --g_kw.n;
+    }
+    g_kw.ent[g_kw.n] = e;
+    g_kw.t[g_kw.n] = now;
+    ++g_kw.n;
+}
+void KillMarkStep() {
+    if (!g_kw.n) return;
+    if (!S.active) {
+        g_kw.n = 0;
+        return;
+    }
+    const double now = Now();
+    int w = 0;
+    for (int i = 0; i < g_kw.n; ++i) {
+        uint32_t hp = 1;
+        if (!Rd(g_kw.ent[i] + 0xb1c, hp)) continue;
+        if (!hp) {
+            vmgame::HitMark(true);
+            ++g_kw.kills;
+            if (g_kw.logs++ < 30)
+                Log("hit-mark: enemy %p down %.0f ms after our hit -> kill marker (so far %u kills, %u hits not fatal within %.1f s)", (void*)g_kw.ent[i],
+                    (now - g_kw.t[i]) * 1000.0, g_kw.kills, g_kw.expired, kKillWatchSec);
+            continue;
+        }
+        if (now - g_kw.t[i] > kKillWatchSec) {
+            ++g_kw.expired;
+            continue;
+        }
+        g_kw.ent[w] = g_kw.ent[i];
+        g_kw.t[w] = g_kw.t[i];
+        ++w;
+    }
+    g_kw.n = w;
+}
 struct HitFxLog {
     unsigned shots = 0, hits = 0, kills = 0, logs = 0;
 } g_hfx;
@@ -3157,6 +3213,8 @@ void HitFeedback(const AimHit& hit, const float eye[3], const float fwd[3]) {
     uintptr_t side = Ptr(hit.ent + 0x80);
     if (!side || side == Ptr(S.entity + 0x80)) return;
     AggroNoteHit(hit.ent);
+    vmgame::HitMark(false);
+    KillWatchAdd(hit.ent);
     int32_t dmg = 0, ap = 0;
     if (S.fpProj) {
         Rd(S.fpProj + 0x70, dmg);
@@ -9311,6 +9369,7 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     SelMarkStep();
     EdgeStep();
     ShotStep();
+    KillMarkStep();
     HideSelfStep();
     ArrowHideStep();
     vmgame::GameThreadTime((Now() - tGameFrame) * 1000.0);

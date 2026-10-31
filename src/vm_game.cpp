@@ -280,6 +280,12 @@ struct HitQueue {
     int n = 0;
 } g_hitq;
 int g_hitFxCount = 0, g_hitFxKills = 0;
+struct HitMarkState {
+    SRWLOCK lock = SRWLOCK_INIT;
+    double tHit = -1.0, tKill = -1.0;
+    int hits = 0, kills = 0;
+} g_mark;
+int g_markHitFrames = 0, g_markKillFrames = 0;
 bool ReadCam(vm::WorldCam* c) {
     for (int k = 0; k < 4; ++k) {
         LONG s1 = g_cam.seq;
@@ -3018,6 +3024,16 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                         float cspread, calpha;
                         if (CrossFrame(cs, cspread, calpha)) g_cross.Draw(ctx, rtv, td.Width, td.Height, hw, cs, cspread, calpha);
                     }
+                    if (part != kPartGun && g_fp) {
+                        AcquireSRWLockShared(&g_mark.lock);
+                        const double th = g_mark.tHit, tk = g_mark.tKill;
+                        ReleaseSRWLockShared(&g_mark.lock);
+                        const double nm = Now();
+                        const int drew = g_cross.DrawHitMarker(ctx, rtv, td.Width, td.Height, hw, g_crossSet, th >= 0.0 ? static_cast<float>(nm - th) : -1.f,
+                                                               tk >= 0.0 ? static_cast<float>(nm - tk) : -1.f);
+                        if (drew & 1) ++g_markHitFrames;
+                        if (drew & 2) ++g_markKillFrames;
+                    }
                     g_fprof.Mark("cross");
                     g_gpu.End(ctx, gpuSlot);
                     ctx->Release();
@@ -3564,6 +3580,27 @@ void HitFxStats(int* shown, int* kills) {
     *kills = g_hitFxKills;
 }
 void GameThreadTime(double ms) { GameThreadAdd(ms); }
+void HitMark(bool kill) {
+    const double now = Now();
+    AcquireSRWLockExclusive(&g_mark.lock);
+    if (kill) {
+        g_mark.tKill = now;
+        ++g_mark.kills;
+    } else {
+        g_mark.tHit = now;
+        ++g_mark.hits;
+    }
+    ReleaseSRWLockExclusive(&g_mark.lock);
+}
+bool HitMarkOn() { return g_crossSet.hitMarker; }
+void HitMarkStats(int* hits, int* kills, int* hitFrames, int* killFrames) {
+    AcquireSRWLockShared(&g_mark.lock);
+    *hits = g_mark.hits;
+    *kills = g_mark.kills;
+    ReleaseSRWLockShared(&g_mark.lock);
+    *hitFrames = g_markHitFrames;
+    *killFrames = g_markKillFrames;
+}
 void HitFx(const float pos[3], const float dir[3], bool kill) {
     AcquireSRWLockExclusive(&g_hitq.lock);
     if (g_hitq.n < 16) {
