@@ -2850,6 +2850,7 @@ vm::NearDof g_dof;
 float g_dofW = 0.f;
 double g_dofT = -1.0;
 int g_dofDebugForce = -1;
+bool g_dofOff = false;
 void DofStep(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11Texture2D* bb, UINT w, UINT h, bool hw, bool gunDrawn) {
     const vm::Settings& s = Wp().set;
     const double now = Now();
@@ -2860,7 +2861,7 @@ void DofStep(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11Textur
         return;
     }
     float target = 0.f;
-    if (g_fp && Wp().lastShotAt > 0.0 && now - Wp().lastShotAt < s.dofHold) target = 1.f - g_mo.adsW * (1.f - s.dofAds);
+    if (!g_dofOff && g_fp && Wp().lastShotAt > 0.0 && now - Wp().lastShotAt < s.dofHold) target = 1.f - g_mo.adsW * (1.f - s.dofAds);
     g_dofW += (target - g_dofW) * (1.f - std::exp(-s.dofRate * dt));
     const bool debug = (g_dofDebugForce >= 0 ? g_dofDebugForce : s.dofDebug) != 0;
     if (!gunDrawn || g_dofW < 0.004f) return;
