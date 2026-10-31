@@ -632,9 +632,10 @@ struct Config {
     float mountEyeBack = 0.5f;
     float flyMountEyeAbove = 2.5f;
     float flyBasketLift = 0.3f;
+    float flyMountEyeMin = 2.5f, flyMountEyeFrom = 3.f, flyMountEyeSlope = 2.f;
+    float mountCrouchAbove = 0.3f;
     float mountStandRadius = 4.5f;
-    float flyDragonEye = 3.5f;
-    float flyMountEyeMax = 2.5f;
+    float mountStandRise = 3.f;
     bool quietOrders = true;
     bool shieldGame = true;
     bool shieldStagger = true;
@@ -996,12 +997,18 @@ void LoadConfig() {
     if (!(cfg.flyMountEyeAbove >= -3.f && cfg.flyMountEyeAbove <= 10.f)) cfg.flyMountEyeAbove = 2.5f;
     cfg.flyBasketLift = IniF(L"move", L"fly_basket_lift", cfg.flyBasketLift, ini);
     if (!(cfg.flyBasketLift >= -3.f && cfg.flyBasketLift <= 10.f)) cfg.flyBasketLift = 0.3f;
-    cfg.flyDragonEye = IniF(L"move", L"fly_dragon_eye", cfg.flyDragonEye, ini);
-    if (!(cfg.flyDragonEye >= 0.f && cfg.flyDragonEye <= 20.f)) cfg.flyDragonEye = 3.5f;
-    cfg.flyMountEyeMax = IniF(L"move", L"fly_mount_eye_max", cfg.flyMountEyeMax, ini);
+    cfg.flyMountEyeMin = IniF(L"move", L"fly_mount_eye_min", cfg.flyMountEyeMin, ini);
+    if (!(cfg.flyMountEyeMin >= 0.f && cfg.flyMountEyeMin <= 20.f)) cfg.flyMountEyeMin = 2.5f;
+    cfg.flyMountEyeFrom = IniF(L"move", L"fly_mount_eye_from", cfg.flyMountEyeFrom, ini);
+    if (!(cfg.flyMountEyeFrom >= 0.f && cfg.flyMountEyeFrom <= 30.f)) cfg.flyMountEyeFrom = 3.f;
+    cfg.flyMountEyeSlope = IniF(L"move", L"fly_mount_eye_slope", cfg.flyMountEyeSlope, ini);
+    if (!(cfg.flyMountEyeSlope >= 0.f && cfg.flyMountEyeSlope <= 10.f)) cfg.flyMountEyeSlope = 2.f;
+    cfg.mountCrouchAbove = IniF(L"move", L"mount_crouch_above", cfg.mountCrouchAbove, ini);
+    if (!(cfg.mountCrouchAbove >= -3.f && cfg.mountCrouchAbove <= 5.f)) cfg.mountCrouchAbove = 0.3f;
     cfg.mountStandRadius = IniF(L"move", L"mount_stand_radius", cfg.mountStandRadius, ini);
     if (!(cfg.mountStandRadius > 0.f && cfg.mountStandRadius <= 50.f)) cfg.mountStandRadius = 4.5f;
-    if (!(cfg.flyMountEyeMax >= 0.f && cfg.flyMountEyeMax <= 20.f)) cfg.flyMountEyeMax = 2.5f;
+    cfg.mountStandRise = IniF(L"move", L"mount_stand_rise", cfg.mountStandRise, ini);
+    if (!(cfg.mountStandRise > 0.f && cfg.mountStandRise <= 50.f)) cfg.mountStandRise = 3.f;
     if (cfg.mountEyeAbove < -3.f || cfg.mountEyeAbove > 5.f) cfg.mountEyeAbove = 0.7f;
     if (cfg.mountEye < 0.f || cfg.mountEye > 20.f) cfg.mountEye = 0.f;
     cfg.shieldGame = GetPrivateProfileIntW(L"viewmodel", L"shield_block_game", 1, ini) != 0;
@@ -1326,6 +1333,7 @@ struct State {
     uintptr_t flyMount = 0;
     float flyEye = 1.2f;
     float saddle = 1.f;
+    float mountTop = 0.f;
     bool rideCrouch = false;
     bool mountVehicle = false;
     float rideDir[2] = {0.f, 1.f};
@@ -1424,6 +1432,15 @@ float MountEye(float mountH, float footEye) {
     if (cfg.mountEye > 0.f) return cfg.mountEye;
     if (!(mountH > 0.3f && mountH < 30.f)) return footEye + 0.6f;
     return std::fmax(footEye, mountH + cfg.mountEyeAbove);
+}
+float MountStandEye(float mountH, float saddle, bool listed, float riderH, float footEye) {
+    if (cfg.mountEye > 0.f) return cfg.mountEye;
+    const float s = std::fmax(saddle, 0.f);
+    if (!listed) return s + std::fmin(std::fmax(riderH * 0.9f, 0.8f), footEye);
+    return std::fmax(MountEye(mountH, footEye), s + footEye);
+}
+float RideCrouchFloor(float standEye) {
+    return S.mountTop > 0.f && cfg.mountEye <= 0.f ? std::fmin(standEye, S.mountTop + cfg.mountCrouchAbove) : 0.f;
 }
 volatile LONG g_reqToggle = 0, g_reqExit = 0;
 volatile LONG g_staleFp = 0;
@@ -1923,20 +1940,17 @@ void Enter(uintptr_t mgr) {
         const uintptr_t mrec = fm ? Ptr(fm + oEntRecord) : 0;
         float mp[3] = {}, mh = 0.f;
         bool basket = false;
-        bool dragon = false;
         if (fm && ReadVec(fm + oEntPos, mp) && mrec && Rd(mrec + oRecHeight, mh) && mh > 0.3f && mh < 30.f) {
             S.flyMount = fm;
             basket = mh - (pos[1] - mp[1]) > 4.f && cfg.mountEye <= 0.f;
             S.flyEye = basket ? cfg.flyEyeHeight + cfg.flyBasketLift
-                              : std::fmax(cfg.flyEyeHeight, mp[1] + (cfg.mountEye > 0.f ? cfg.mountEye : mh + cfg.flyMountEyeAbove) - pos[1]);
-            if (!basket && cfg.mountEye <= 0.f) S.flyEye = std::fmin(S.flyEye, std::fmax(cfg.flyEyeHeight, cfg.flyMountEyeMax));
-            dragon = !basket && cfg.mountEye <= 0.f && pos[1] - mp[1] > mh;
-            if (dragon) S.flyEye = std::fmax(S.flyEye, cfg.flyDragonEye);
+                       : cfg.mountEye > 0.f ? std::fmax(cfg.flyEyeHeight, mp[1] + cfg.mountEye - pos[1])
+                                            : std::fmax(cfg.flyMountEyeMin, cfg.flyMountEyeMin + (mh - cfg.flyMountEyeFrom) * cfg.flyMountEyeSlope);
         }
-        Log("fly: mount %p (height %.2f m, its root %.2f m below the rider) -> camera %.2f m above the rider, standing (%s; fly_eye_height %.2f, fly_mount_eye_above %.2f, "
-            "fly_basket_lift %.2f)",
-            (void*)S.flyMount, mh, pos[1] - mp[1], S.flyEye, basket ? "rider below the mount (basket) - not from the mount's top" : dragon ? "rider above the mount's listed height (dragon) - at least fly_dragon_eye" : "above the mount's top",
-            cfg.flyEyeHeight, cfg.flyMountEyeAbove, cfg.flyBasketLift);
+        Log("fly: mount %p (height %.2f m, its root %.2f m below the rider) -> camera %.2f m above the rider, standing (%s; fly_mount_eye_min %.2f, from %.2f m, "
+            "slope %.2f; fly_basket_lift %.2f)",
+            (void*)S.flyMount, mh, pos[1] - mp[1], S.flyEye, basket ? "rider below the mount (basket) - not by the mount's size" : "by the mount's size",
+            cfg.flyMountEyeMin, cfg.flyMountEyeFrom, cfg.flyMountEyeSlope, cfg.flyBasketLift);
     }
     S.body = mount ? mount : entity;
     S.mountMoved = false;
@@ -1956,6 +1970,7 @@ void Enter(uintptr_t mgr) {
         if (cfg.eyeFromHeight && !flyer && rec && Rd(rec + oRecHeight, h)) eye = EyeFromHeight(h, s_cfgEye);
         S.footEye = mount ? s_cfgEye : eye;
         S.saddle = 1.f;
+        S.mountTop = 0.f;
         if (mount) {
             float mpos[3];
             if (ReadVec(mount + oEntPos, mpos)) S.saddle = pos[1] - mpos[1];
@@ -1965,18 +1980,25 @@ void Enter(uintptr_t mgr) {
             const uintptr_t mrec = Ptr(mount + oEntRecord);
             if (!(mrec && Rd(mrec + oRecHeight, mh))) mh = 0.f;
             eye = MountEye(mh, s_cfgEye);
-            if (cfg.mountEye <= 0.f) eye = std::fmax(eye, std::fmax(S.saddle, 0.f) + s_cfgEye);
+            {
+                float rh = 0.f;
+                const uintptr_t rrec = Ptr(entity + oEntRecord);
+                if (!(rrec && Rd(rrec + oRecHeight, rh))) rh = s_cfgEye;
+                eye = MountStandEye(mh, S.saddle, mountListed, rh, s_cfgEye);
+            }
+            if (mountListed && !mountPlatform && cfg.mountEye <= 0.f && mh - S.saddle >= cfg.mountStandRise) mountPlatform = true, S.mountVehicle = true;
+            if (mountListed && !mountPlatform && mh > 0.3f && mh < 30.f) S.mountTop = mh;
             Log("mount: eye height %.2f m (mount height %.2f m + mount_eye_above %.2f%s)", eye, mh, cfg.mountEyeAbove,
                 cfg.mountEye > 0.f ? "; fixed mount_eye" : "");
         }
         cfg.eyeHeight = s_lastAuto = eye;
         if (mount && cfg.mountCrouch && mountListed && !mountPlatform) {
             const float s = std::fmin(std::fmax(S.saddle, 0.f), eye);
-            Log("mount: crouched in the saddle (%.2f m above the mount) -> eye %.2f m (standing %.2f, crouch_eye %.2f)", S.saddle, s + (eye - s) * cfg.crouchEye,
-                eye, cfg.crouchEye);
+            Log("mount: crouched in the saddle (%.2f m above the mount) -> eye %.2f m (standing %.2f, crouch_eye %.2f, at least mount top %.2f + mount_crouch_above %.2f)",
+                S.saddle, std::fmax(s + (eye - s) * cfg.crouchEye, RideCrouchFloor(eye)), eye, cfg.crouchEye, S.mountTop, cfg.mountCrouchAbove);
         } else if (mount && (!mountListed || mountPlatform)) {
             Log("mount: standing on a %s (%.2f m above it) -> eye %.2f m, no crouch",
-                mountPlatform ? "big beast's platform (stegadon etc. - radius >= mount_stand_radius)" : "vehicle (chariot etc. - not in the unit's mount list)", S.saddle, eye);
+                mountPlatform ? "big beast's platform / shrine (radius >= mount_stand_radius, or rider >= mount_stand_rise below its top)" : "vehicle (chariot etc. - not in the unit's mount list)", S.saddle, eye);
         }
         Log("ghost: entity height %.2f m -> eye height %.2f m (config %.2f%s)", h, eye, s_cfgEye,
             !cfg.eyeFromHeight ? ", eye_from_height off" : flyer ? ", flyer" : "");
@@ -4926,7 +4948,7 @@ float EyeAbove() {
     if (S.flyer) return S.flyMount ? S.flyEye * k : cfg.flyEyeHeight;
     if (S.mount) {
         const float s = std::fmin(std::fmax(S.saddle, 0.f), cfg.eyeHeight);
-        return s + (cfg.eyeHeight - s) * k;
+        return std::fmax(s + (cfg.eyeHeight - s) * k, RideCrouchFloor(cfg.eyeHeight));
     }
     return cfg.eyeHeight * k;
 }
