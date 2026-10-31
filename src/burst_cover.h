@@ -34,6 +34,7 @@ struct BurnLog {
     uintptr_t key[kSlots] = {};
     double t[kSlots] = {};
     uint32_t hp[kSlots] = {};
+    float spd[kSlots] = {};
     static unsigned Hash(uintptr_t e) { return static_cast<unsigned>(((e >> 4) * 0x9E3779B97F4A7C15ull) >> 40) & (kSlots - 1); }
     int Find(uintptr_t e, double now) const {
         for (unsigned i = Hash(e), n = 0; n < kProbe; ++n, i = (i + 1) & (kSlots - 1)) {
@@ -46,10 +47,11 @@ struct BurnLog {
         const int i = Find(e, now);
         return i >= 0 ? t[i] : kNever;
     }
-    bool Prev(uintptr_t e, double now, double* tOut, uint32_t* hpOut) const {
+    bool Prev(uintptr_t e, double now, double* tOut, uint32_t* hpOut, float* spdOut = nullptr) const {
         const int i = Find(e, now);
         if (i < 0) return false;
         *tOut = t[i], *hpOut = hp[i];
+        if (spdOut) *spdOut = spd[i];
         return true;
     }
     bool TakeKill(uintptr_t e, double now) {
@@ -58,20 +60,20 @@ struct BurnLog {
         hp[i] = 0;
         return true;
     }
-    void Mark(uintptr_t e, double now, uint32_t hpNow = 0) {
+    void Mark(uintptr_t e, double now, uint32_t hpNow = 0, float spdNow = 0.f) {
         int spare = -1;
         for (unsigned i = Hash(e), n = 0; n < kProbe; ++n, i = (i + 1) & (kSlots - 1)) {
             if (key[i] == e) {
-                t[i] = now, hp[i] = hpNow;
+                t[i] = now, hp[i] = hpNow, spd[i] = spdNow;
                 return;
             }
             if (spare < 0 && (!key[i] || now - t[i] >= kStale)) spare = static_cast<int>(i);
             if (!key[i]) break;
         }
-        if (spare >= 0) key[spare] = e, t[spare] = now, hp[spare] = hpNow;
+        if (spare >= 0) key[spare] = e, t[spare] = now, hp[spare] = hpNow, spd[spare] = spdNow;
     }
     void Clear() {
-        for (int i = 0; i < kSlots; ++i) key[i] = 0, t[i] = 0.0, hp[i] = 0;
+        for (int i = 0; i < kSlots; ++i) key[i] = 0, t[i] = 0.0, hp[i] = 0, spd[i] = 0.f;
     }
 };
 constexpr double kHpGapMax = 0.35;
@@ -79,6 +81,13 @@ inline bool HpLost(double tPrev, uint32_t hpPrev, double now, uint32_t hpNow, ui
     if (!hpPrev || !(now > tPrev) || now - tPrev > kHpGapMax || hpNow > hpPrev) return false;
     *lost = hpPrev - hpNow;
     return true;
+}
+constexpr float kMovingSpeed = 1.5f;
+inline void LeadPoint(const float p[3], const float v[2], float lead, float extra, float out[3]) {
+    const float t = lead + extra;
+    out[0] = p[0] + v[0] * t;
+    out[1] = p[1];
+    out[2] = p[2] + v[1] * t;
 }
 inline int PickDue(const double* last, int n, double now, double due, int cap, int* out, int* nDue) {
     int k = 0;

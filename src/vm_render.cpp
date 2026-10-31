@@ -1226,6 +1226,8 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.burstCoverMax = static_cast<int>(IniFloat(ini, L"burst_cover_max", static_cast<float>(s.burstCoverMax)) + 0.5f);
     if (s.burstCoverMax < 1 || s.burstCoverMax > 128) s.burstCoverMax = 64;
     s.burstCoverClip = IniFloat(ini, L"burst_cover_clip", static_cast<float>(s.burstCoverClip)) != 0.f ? 1 : 0;
+    s.burstCoverLead = IniFloat(ini, L"burst_cover_lead", s.burstCoverLead);
+    if (!(s.burstCoverLead >= -0.5f && s.burstCoverLead <= 1.f)) s.burstCoverLead = 0.f;
     if (!(s.fireLfeVolume >= 0.f && s.fireLfeVolume <= 2.f)) s.fireLfeVolume = 0.7f;
     if (!(s.fireAtmoVolume >= 0.f && s.fireAtmoVolume <= 2.f)) s.fireAtmoVolume = 0.7f;
     if (!(s.fireTailVolume >= 0.f && s.fireTailVolume <= 2.f)) s.fireTailVolume = 0.7f;
