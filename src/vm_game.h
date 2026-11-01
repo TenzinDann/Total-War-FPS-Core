@@ -43,6 +43,8 @@ struct RenderAddrs {
 bool VerifyStatic(uintptr_t exeBase, LogFn log, const RenderAddrs& addrs);
 void Setup(uintptr_t exeBase, const wchar_t* dllDir, LogFn log);
 void SetHeroKey(const char* unitKey);
+void HintHeroKey(const char* unitKey);
+void NewBattleArms();
 const char* UnitKeys();
 bool Enabled();
 bool LayerActive();

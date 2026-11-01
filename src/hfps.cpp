@@ -10225,6 +10225,7 @@ int SetUnit(void* L) {
         if (p && key && n > 0 && n < 48) {
             RememberUnitKey(p, key);
             ok = true;
+            if (!S.active) vmgame::HintHeroKey(key);
         }
     }
     f.pushboolean(L, ok ? 1 : 0);
@@ -10232,6 +10233,7 @@ int SetUnit(void* L) {
 }
 int BattleStarted(void*) {
     ForgetUnitKeys();
+    vmgame::NewBattleArms();
     return 0;
 }
 int HudEnabled(void* L) {

@@ -1967,6 +1967,7 @@ volatile LONG g_warm = 0;
 double g_warmT0 = 0;
 wchar_t g_armoryPath[MAX_PATH];
 FILETIME g_armorySeen = {};
+volatile LONG g_warmedThisBattle = 0;
 void ArmoryWatch() {
     WIN32_FILE_ATTRIBUTE_DATA fa;
     if (!g_preloadOnBattle || !GetFileAttributesExW(g_armoryPath, GetFileExInfoStandard, &fa) ||
@@ -1982,6 +1983,7 @@ void ArmoryWatch() {
           mv > 0.f ? 20.f * std::log10(mv) : -999.f);
     InterlockedExchange(&g_reqRoster, 1);
     InterlockedExchange(&g_warm, 1);
+    InterlockedExchange(&g_warmedThisBattle, 1);
     bool hooked = InstallPresentHook();
     g_log("warm: new battle (tenzin_fps_armory.txt rewritten) - %s",
           hooked ? "loading weapons before first person" : "Present not hooked; weapons load at F6 as before");
@@ -2919,6 +2921,12 @@ void WarmStep(IDXGISwapChain* sc) {
     }
     if (InterlockedCompareExchange(&g_warm, 2, 1) == 1) g_warmT0 = Now(), g_warmProfLogs = 0;
     PrefetchDevice(dev);
+    {
+        const double ta = Now();
+        ArmsSync();
+        const double ams = (Now() - ta) * 1000.0;
+        if (g_slowFrameMs > 0 && ams >= g_slowFrameMs) g_log("warm-prof: arms swap %.1f ms (before first person)", ams);
+    }
     if (g_reqRoster) {
         g_rosterNoLoad = true;
         RosterStep(dev);
@@ -2931,7 +2939,6 @@ void WarmStep(IDXGISwapChain* sc) {
     FrameProf wp;
     wp.Start(Now());
     CheckDevice(dev);
-    ArmsSync();
     wp.Mark("device");
     bool ok = EnsureWeapon(g_modelIdx, dev);
     wp.Mark("current");
@@ -3296,7 +3303,27 @@ bool VerifyStatic(uintptr_t exeBase, LogFn log, const RenderAddrs& addrs) {
         g_viewRouteOk ? "ok" : "does not match this exe - with anti-aliasing off the gun stays at Present (drawn over the UI)");
     return ok;
 }
+volatile LONG g_armsHinted = 0;
+volatile LONG g_heroEntered = 0;
+void HintHeroKey(const char* unitKey) {
+    if (g_fp || g_heroEntered || g_armsHinted) return;
+    const int ci = CharFor(unitKey);
+    if (ci < 0) return;
+    InterlockedExchange(&g_armsHinted, 1);
+    const LONG was = InterlockedExchange(&g_armsWant, ci);
+    const bool again = was != ci && g_preloadOnBattle && g_warmedThisBattle && InterlockedCompareExchange(&g_warm, 1, 0) == 0;
+    if (again) InterlockedExchange(&g_reqRoster, 1);
+    g_log("arms: hero '%s' reported before first person -> preload with %s%s", unitKey, g_chars[ci].units,
+          was == ci ? " (already these arms)" : again ? " (preload runs again)" : "");
+}
+void NewBattleArms() {
+    InterlockedExchange(&g_armsHinted, 0);
+    InterlockedExchange(&g_heroEntered, 0);
+    InterlockedExchange(&g_warmedThisBattle, 0);
+    if (!g_fp) InterlockedExchange(&g_armsWant, -1);
+}
 void SetHeroKey(const char* unitKey) {
+    InterlockedExchange(&g_heroEntered, 1);
     const int ci = CharFor(unitKey);
     const LONG was = InterlockedExchange(&g_armsWant, ci);
     if (was != ci) g_log("arms: hero unit key '%s' -> %s", unitKey ? unitKey : "", ci >= 0 ? g_chars[ci].units : "weapon's own arms");
