@@ -5,8 +5,10 @@
 #include <string>
 #include <vector>
 #include "mszip_decode.h"
+#include "lzma_decode.h"
 namespace packcodec {
 constexpr unsigned kAlgMsZip = 2;
+constexpr unsigned kAlgLzma = 16;
 enum class Kind { Plain, Compressed, Alias };
 inline Kind Sniff(const char* head, size_t n) {
     if (n >= 16 && memcmp(head, "TZC1", 4) == 0) return Kind::Compressed;
@@ -38,7 +40,8 @@ inline std::string& BuiltinReason() {
     return r;
 }
 inline bool Builtin(const char* in, size_t n, char* out, size_t outN, const char* why, std::string& err) {
-    if (BuiltinReason().empty()) BuiltinReason() = why;
+    static volatile LONG once = 0;
+    if (InterlockedCompareExchange(&once, 1, 0) == 0) BuiltinReason() = why;
     return mszip::Decode(reinterpret_cast<const unsigned char*>(in), n, reinterpret_cast<unsigned char*>(out), outN, err);
 }
 inline bool MsZip(const char* in, size_t n, char* out, size_t outN, std::string& err) {
@@ -76,12 +79,20 @@ inline bool Decode(const std::string& stored, std::string& raw, std::string& err
         return false;
     }
     unsigned alg = U32(stored, 4), size = U32(stored, 8), crc = U32(stored, 12);
-    if (alg != kAlgMsZip) {
+    if (alg != kAlgMsZip && alg != kAlgLzma) {
         err = "unknown algorithm " + std::to_string(alg);
         return false;
     }
+    if (alg == kAlgLzma && stored.size() < 21) {
+        err = "tzc1-lzma: container too short";
+        return false;
+    }
     raw.assign(size, '\0');
-    if (size && !MsZip(stored.data() + 16, stored.size() - 16, &raw[0], size, err)) return false;
+    if (size && alg == kAlgMsZip && !MsZip(stored.data() + 16, stored.size() - 16, &raw[0], size, err)) return false;
+    if (size && alg == kAlgLzma) {
+        const unsigned char* s = reinterpret_cast<const unsigned char*>(stored.data());
+        if (!lzmadec::Decode(s + 16, s + 21, stored.size() - 21, reinterpret_cast<unsigned char*>(&raw[0]), size, err)) return false;
+    }
     if (Crc32(raw.data(), raw.size()) != crc) {
         err = "CRC32 differs after decompress";
         return false;

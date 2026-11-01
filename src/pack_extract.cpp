@@ -1,5 +1,6 @@
 #include "pack_extract.h"
 #include <algorithm>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
@@ -273,6 +274,72 @@ bool CopyEntryTo(HANDLE src, const Pack& pack, const Entry& e, HANDLE out, std::
     raw = data.size();
     return data.empty() || (WriteFile(out, data.data(), static_cast<DWORD>(data.size()), &w, nullptr) && w == data.size());
 }
+struct WriteJob {
+    const Entry* e;
+    std::string rel;
+    std::wstring dst;
+    unsigned long long raw = 0;
+    bool opened = false, ok = false, removed = false;
+    DWORD err = 0;
+};
+SRWLOCK g_jobLogLock = SRWLOCK_INIT;
+LogFn g_jobLog = nullptr;
+void JobLog(const char* fmt, ...) {
+    char b[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(b, sizeof b, fmt, ap);
+    va_end(ap);
+    AcquireSRWLockExclusive(&g_jobLogLock);
+    g_jobLog("%s", b);
+    ReleaseSRWLockExclusive(&g_jobLogLock);
+}
+struct JobRun {
+    const Pack* pack;
+    std::vector<WriteJob>* jobs;
+    volatile LONG next;
+};
+DWORD WINAPI JobWorker(LPVOID p) {
+    JobRun& r = *static_cast<JobRun*>(p);
+    HANDLE src = CreateFileW(r.pack->path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    std::vector<char> buf(1 << 20);
+    for (;;) {
+        LONG i = InterlockedIncrement(&r.next) - 1;
+        if (i >= static_cast<LONG>(r.jobs->size())) break;
+        WriteJob& j = (*r.jobs)[i];
+        HANDLE out = CreateFileW(j.dst.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (out == INVALID_HANDLE_VALUE) {
+            j.err = GetLastError();
+            continue;
+        }
+        j.opened = true;
+        j.raw = j.e->size;
+        j.ok = src != INVALID_HANDLE_VALUE && CopyEntryTo(src, *r.pack, *j.e, out, buf, j.raw, JobLog);
+        CloseHandle(out);
+        if (!j.ok) j.removed = DeleteFileW(j.dst.c_str()) != 0;
+    }
+    if (src != INVALID_HANDLE_VALUE) CloseHandle(src);
+    return 0;
+}
+void RunJobs(const Pack& pack, std::vector<WriteJob>& jobs, LogFn log) {
+    if (jobs.empty()) return;
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    size_t want = si.dwNumberOfProcessors > 1 ? si.dwNumberOfProcessors - 1 : 1;
+    if (want > 8) want = 8;
+    if (want > jobs.size()) want = jobs.size();
+    ULONGLONG t0 = GetTickCount64();
+    g_jobLog = log;
+    JobRun run{&pack, &jobs, 0};
+    HANDLE th[8];
+    DWORD n = 0;
+    for (size_t k = 1; k < want; ++k)
+        if ((th[n] = CreateThread(nullptr, 0, JobWorker, &run, 0, nullptr)) != nullptr) ++n;
+    JobWorker(&run);
+    if (n) WaitForMultipleObjects(n, th, TRUE, INFINITE);
+    for (DWORD k = 0; k < n; ++k) CloseHandle(th[k]);
+    log("onepack: %zu files written by %lu threads in %llu ms", jobs.size(), n + 1, GetTickCount64() - t0);
+}
 std::string Stamp() {
     SYSTEMTIME t;
     GetLocalTime(&t);
@@ -317,6 +384,7 @@ bool ExtractPayload(const std::wstring& root, const Pack& pack, const std::strin
     std::map<std::string, std::string> iniHash;
     std::map<std::string, unsigned long long> rawSize;
     std::string stamp = Stamp();
+    std::vector<WriteJob> jobs;
     for (const Entry* e : ours) {
         std::string rel = e->name.substr(prefix.size());
         now.insert(rel);
@@ -351,24 +419,27 @@ bool ExtractPayload(const std::wstring& root, const Pack& pack, const std::strin
                 }
             }
         }
-        HANDLE out = CreateFileW(dst.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (out == INVALID_HANDLE_VALUE) {
+        jobs.push_back(WriteJob{e, rel, dst});
+    }
+    CloseHandle(src);
+    RunJobs(pack, jobs, log);
+    for (const WriteJob& j : jobs) {
+        const std::string& rel = j.rel;
+        if (!j.opened) {
+            SetLastError(j.err);
             log("onepack: %scannot write %s (err %lu)", label, rel.c_str(), GetLastError());
             ++failed;
             continue;
         }
-        unsigned long long raw = e->size;
-        bool ok = CopyEntryTo(src, pack, *e, out, buf, raw, log);
-        if (ok && raw != e->size) rawSize[rel] = raw;
-        CloseHandle(out);
-        if (ok) ++written;
-        else {
+        if (j.ok) {
+            ++written;
+            if (j.raw != j.e->size) rawSize[rel] = j.raw;
+        } else {
             ++failed;
-            bool removed = DeleteFileW(dst.c_str()) != 0;
+            bool removed = j.removed;
             log("onepack: %swrite failed for %s%s", label, rel.c_str(), removed ? " - partial file removed" : "");
         }
     }
-    CloseHandle(src);
     if (!packcodec::BuiltinReason().empty())
         log("onepack: tzc1: built-in MSZIP decoder used (%s)", packcodec::BuiltinReason().c_str());
     if (failed) {
