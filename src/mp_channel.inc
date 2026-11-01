@@ -42,6 +42,7 @@ volatile LONG g_lagMs = 0, g_lagMaxMs = 0, g_lagN = 0;
 uintptr_t g_battle = 0;
 double g_tHello = -1;
 volatile LONG g_helloBack = 0, g_mismatch = 0, g_peers = 0;
+volatile LONG g_helloAgain = 0;
 SRWLOCK g_peerLock = SRWLOCK_INIT;
 struct Peer {
     uint32_t nonce, proto, digest, exe, features;
@@ -494,13 +495,15 @@ void Handler(uintptr_t rd, uintptr_t world) {
         AcquireSRWLockExclusive(&g_peerLock);
         LONG n = g_peers, i = 0;
         while (i < n && g_peer[i].nonce != from) ++i;
-        if (i == n && n < 16) {
+        const bool fresh = i == n && n < 16;
+        if (fresh) {
             g_peer[n] = {from, proto, dg, exe, feat};
             InterlockedExchange(&g_peers, n + 1);
         }
         ReleaseSRWLockExclusive(&g_peerLock);
         if (!same) InterlockedExchange(&g_mismatch, 1);
         if (from == g_nonce) InterlockedExchange(&g_helloBack, 1);
+        else if (fresh) InterlockedExchange(&g_helloAgain, 1);
         Log("mp: HELLO from %08x%s: core %08x exe %08x features %x - %s (players heard %ld, round trip %ld ms)", from,
             from == g_nonce ? " (us)" : "", dg, exe, feat, same ? "same as ours" : "DIFFERENT from ours - first person off in this battle",
             g_peers, g_lagMs);
@@ -705,6 +708,7 @@ void Frame() {
         g_tHello = -1;
         g_nPend = 0;
         InterlockedExchange(&g_helloBack, 0);
+        InterlockedExchange(&g_helloAgain, 0);
         InterlockedExchange(&g_mismatch, 0);
         AcquireSRWLockExclusive(&g_peerLock);
         InterlockedExchange(&g_peers, 0);
@@ -724,7 +728,14 @@ void Frame() {
     if (Rd(battle + oBattleIsReplay, replay) && replay) return;
     const double now = Now();
     if (!g_helloBack && (g_tHello < 0 || now - g_tHello > 5.0)) {
+        InterlockedExchange(&g_helloAgain, 0);
         if (Send(kHello, 0)) g_tHello = now;
+    } else if (g_helloAgain) {
+        InterlockedExchange(&g_helloAgain, 0);
+        if (Send(kHello, 0))
+            Log("mp: heard a new player's HELLO (players heard %ld) - sent ours again so they hear us too", g_peers);
+        else
+            InterlockedExchange(&g_helloAgain, 1);
     }
     while (g_nPend && (g_pend[0].kind == kFpsOn ? SendHero(kFpsOn, g_pend[0].unit) : Send(g_pend[0].kind, g_pend[0].unit))) {
         memmove(g_pend, g_pend + 1, sizeof g_pend[0] * (g_nPend - 1));
