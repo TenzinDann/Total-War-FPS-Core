@@ -1336,6 +1336,9 @@ struct State {
     bool flyAlways = false, flyKeyed = false, flyCmdAir = false;
     int flyLand = 0;
     double tFlyKey = 0, tFlyLandCheck = 0, tFlyLandGiveUp = 0;
+    double tFlyHold = 0, tFlyLandIssue = 0, tFlyUp = -100, tFlyUi = 0;
+    float flyAlt0 = 0.f;
+    bool flyHalted = false;
     uintptr_t mount = 0, body = 0;
     bool mountUnit = false, mountMoved = false;
     float footEye = 1.75f, mountStart[2] = {};
@@ -1453,6 +1456,11 @@ float RideCrouchFloor(float standEye) {
 }
 volatile LONG g_reqToggle = 0, g_reqExit = 0;
 volatile LONG g_uiHide = 0, g_reqFly = 0;
+struct FlyUi {
+    volatile LONG shown, land, ready, pending, prog, always, refuse;
+} g_flyUi = {0, 0, 0, 0, -1, 0, 0};
+constexpr double kFlyWaitSecs = 20.0, kFlyLandMaxSecs = 12.0, kFlyUpSecs = 2.5;
+constexpr float kFlyTouchDown = 0.6f;
 volatile LONG g_staleFp = 0;
 volatile LONG g_camBeat = 0;
 bool g_fpDetached = false;
@@ -2159,6 +2167,7 @@ void Enter(uintptr_t mgr) {
     S.flyTakeoff = 0;
     S.tFlyEnter = Now();
     S.flyLand = 0, S.flyKeyed = false;
+    S.tFlyHold = 0, S.tFlyLandIssue = 0, S.tFlyUp = -100, S.tFlyUi = 0, S.flyAlt0 = 0.f, S.flyHalted = false;
     S.flyCmdAir = flyNow || flyAlways || cfg.flyTakeoff;
     InterlockedExchange(&g_reqFly, 0);
     if (S.flyer && cfg.flyTakeoff && !flyAlways) {
@@ -4320,7 +4329,7 @@ void FlyTakeoffStep(double now) {
         return;
     }
     if (!CmdQueue(nullptr)) {
-        S.tFlyGiveUp = now + 5.0;
+        S.tFlyGiveUp = now + (S.flyKeyed ? kFlyWaitSecs : 5.0);
         return;
     }
     if (S.flyTakeoff == 1 && FlyCanTakeOff(S.unit)) {
@@ -4329,7 +4338,18 @@ void FlyTakeoffStep(double now) {
             S.tFlyGiveUp = now + 5.0;
             S.flyCmdAir = true;
             S.moving = false;
+            S.tFlyUp = now;
+            S.tFlyHold = 0;
         }
+        return;
+    }
+    if (S.flyTakeoff == 1 && S.flyKeyed && !S.flyHalted && S.moving && S.flyLand != 2) {
+        S.flyHalted = true;
+        const bool ok = StopMoving();
+        S.moving = false;
+        S.tFlyHold = now + 1.0;
+        S.tFlyCheck = now + 0.15;
+        Log("fly: the hero is walking and the game will not take off while it moves - stopping it first (halt issued=%d)", ok ? 1 : 0);
         return;
     }
     if (now >= S.tFlyGiveUp) {
@@ -4346,32 +4366,57 @@ bool FlyCanLand(uintptr_t unit) {
     using FnCan = unsigned char (*)(uintptr_t, unsigned char);
     return reinterpret_cast<FnCan>(g_base + kFnFlyCanChange904)(fc, 1) != 0;
 }
+float FlyAltitude() {
+    float p[3] = {}, h = 0.f;
+    if (!ReadVec(S.entity + oEntPos, p) || !SurfaceNear(p[0], p[2], p[1], &h)) return -1.f;
+    return std::fmax(0.f, p[1] - h);
+}
+bool FlyMovesHeld(double now) { return S.flyLand == 2 || (S.flyTakeoff == 1 && now < S.tFlyHold); }
 void FlyLandStep(double now) {
     if (!S.flyLand || now < S.tFlyLandCheck) return;
-    S.tFlyLandCheck = now + 0.25;
+    S.tFlyLandCheck = now + (S.flyLand == 2 ? 0.1 : 0.25);
     float p[3] = {};
     ReadVec(S.entity + oEntPos, p);
-    if (!FlyAirborne(S.unit)) {
-        Log("fly: on the ground %.1f s after pressing F (entity y %.2f)%s", now - S.tFlyKey, p[1], S.flyLand == 2 ? " - landed" : "");
+    const bool air = FlyAirborne(S.unit);
+    if (S.flyLand == 2) {
+        const float alt = FlyAltitude();
+        if (air && now - S.tFlyLandIssue > 1.0) {
+            Log("fly: landing called off %.1f s after pressing F - the game has the hero flying again (entity y %.2f)", now - S.tFlyKey, p[1]);
+            S.flyLand = 0;
+        } else if (!air && (alt >= 0.f ? alt < kFlyTouchDown : now - S.tFlyLandIssue > 3.0)) {
+            Log("fly: touched down %.1f s after pressing F (entity y %.2f, %.2f m above the ground) - moves resume", now - S.tFlyKey, p[1], alt);
+            S.flyLand = 0;
+        } else if (now >= S.tFlyLandGiveUp) {
+            Log("fly: still %.2f m above the ground %.1f s after pressing F (entity y %.2f) - moves resume", alt, now - S.tFlyKey, p[1]);
+            S.flyLand = 0;
+        }
+        return;
+    }
+    if (!air) {
+        Log("fly: on the ground %.1f s after pressing F (entity y %.2f)", now - S.tFlyKey, p[1]);
         S.flyLand = 0;
         return;
     }
     if (!CmdQueue(nullptr)) {
-        S.tFlyLandGiveUp = now + 5.0;
+        S.tFlyLandGiveUp = now + kFlyWaitSecs;
         return;
     }
-    if (S.flyLand == 1 && FlyCanLand(S.unit)) {
+    if (FlyCanLand(S.unit)) {
         if (IssueDesiredFlying(false)) {
             S.flyLand = 2;
             S.flyCmdAir = false;
-            S.tFlyLandGiveUp = now + 8.0;
+            S.tFlyLandIssue = now;
+            S.flyAlt0 = std::fmax(kFlyTouchDown, FlyAltitude());
+            S.tFlyLandGiveUp = now + kFlyLandMaxSecs;
+            S.tFlyLandCheck = now + 0.1;
             S.moving = false;
+            Log("fly: landing from %.1f m above the ground - no move / halt orders until it touches down (%.0f s at most)", S.flyAlt0, kFlyLandMaxSecs);
         }
         return;
     }
     if (now >= S.tFlyLandGiveUp) {
-        Log("fly: still in the air %.1f s after pressing F (entity y %.2f; %s) - it keeps flying", now - S.tFlyKey, p[1],
-            S.flyLand == 2 ? "landing issued but it has not touched down" : "the game never allowed a landing: fighting / taking off?");
+        Log("fly: still in the air %.1f s after pressing F (entity y %.2f; the game never allowed a landing: fighting / taking off?) - it keeps flying",
+            now - S.tFlyKey, p[1]);
         S.flyLand = 0;
     }
 }
@@ -4379,13 +4424,17 @@ void FlyToggle(double now) {
     if (!S.flyer) return;
     float p[3] = {};
     ReadVec(S.entity + oEntPos, p);
+    S.tFlyUi = 0;
     if (S.flyAlways) {
+        InterlockedIncrement(&g_flyUi.refuse);
         Log("fly: F ignored - this hero always flies (CanAlwaysFlying), it cannot land");
         return;
     }
     if (S.flyTakeoff == 1) {
         S.flyTakeoff = 0;
-        Log("fly: F - take-off cancelled (the game had not allowed it yet), stays on the ground (entity y %.2f)", p[1]);
+        S.tFlyHold = 0;
+        Log("fly: F - take-off cancelled (the game had not allowed it yet), %s (entity y %.2f)", S.flyLand == 2 ? "it keeps landing" : "stays on the ground",
+            p[1]);
         return;
     }
     if (S.flyLand == 1) {
@@ -4401,33 +4450,62 @@ void FlyToggle(double now) {
         Log("fly: F - %s (airborne check unavailable: toggled from our last command)", up ? "take off" : "land");
         return;
     }
-    if (S.flyLand == 2) {
-        if (FlyAirborne(S.unit)) {
-            S.flyLand = 0;
-            const bool ok = IssueDesiredFlying(true);
-            S.flyCmdAir = true;
-            S.moving = false;
-            Log("fly: F - landing cancelled on the way down (take-off command issued=%d), keeps flying (entity y %.2f)", ok ? 1 : 0, p[1]);
-            return;
-        }
-        S.flyLand = 0;
-    }
-    const bool air = S.flyTakeoff == 2 || FlyAirborne(S.unit);
+    const bool down = S.flyLand == 2;
+    const bool air = !down && (S.flyTakeoff == 2 || FlyAirborne(S.unit));
     if (air) {
         S.flyTakeoff = 0;
         S.flyLand = 1;
         S.tFlyLandCheck = 0;
-        S.tFlyLandGiveUp = now + 5.0;
+        S.tFlyLandGiveUp = now + kFlyWaitSecs;
         Log("fly: F - land (entity y %.2f)", p[1]);
         FlyLandStep(now);
     } else {
-        S.flyLand = 0;
         S.flyTakeoff = 1;
         S.tFlyCheck = 0;
-        S.tFlyGiveUp = now + 5.0;
-        Log("fly: F - take off (entity y %.2f)", p[1]);
+        S.tFlyGiveUp = now + kFlyWaitSecs;
+        S.tFlyHold = 0;
+        S.flyHalted = false;
+        if (down)
+            Log("fly: F - take off again while coming down (%.2f m above the ground)", FlyAltitude());
+        else
+            Log("fly: F - take off (entity y %.2f)", p[1]);
         FlyTakeoffStep(now);
+        if (down && S.flyTakeoff == 2) S.flyLand = 0;
     }
+}
+void FlyUiStep(double now) {
+    const LONG shown = S.flyer && cfg.flyToggleKey ? 1 : 0;
+    InterlockedExchange(&g_flyUi.shown, shown);
+    if (!shown || now < S.tFlyUi) return;
+    S.tFlyUi = now + 0.1;
+    LONG land = 0, ready = 0, pending = 0, prog = -1;
+    if (S.flyAlways) {
+        land = 1;
+    } else if (!g_flyStateOk) {
+        land = S.flyCmdAir ? 1 : 0;
+        ready = 1;
+    } else {
+        const bool down = S.flyLand == 2;
+        const bool air = !down && (S.flyTakeoff == 2 || FlyAirborne(S.unit));
+        land = air ? 1 : 0;
+        pending = S.flyTakeoff == 1 ? 1 : S.flyLand == 1 ? 2 : 0;
+        if (down) {
+            ready = 1;
+            const float alt = FlyAltitude();
+            const double fr = alt >= 0.f ? 1.0 - alt / std::fmax(S.flyAlt0, kFlyTouchDown) : (now - S.tFlyLandIssue) / 6.0;
+            prog = static_cast<LONG>(std::fmin(1.0, std::fmax(0.0, fr)) * 1000.0);
+        } else if (air) {
+            ready = FlyCanLand(S.unit) ? 1 : 0;
+            if (!ready && now - S.tFlyUp < 6.0) prog = static_cast<LONG>(std::fmin(0.95, std::fmax(0.0, (now - S.tFlyUp) / kFlyUpSecs)) * 1000.0);
+        } else {
+            ready = FlyCanTakeOff(S.unit) || S.moving ? 1 : 0;
+        }
+    }
+    InterlockedExchange(&g_flyUi.land, land);
+    InterlockedExchange(&g_flyUi.ready, ready);
+    InterlockedExchange(&g_flyUi.pending, pending);
+    InterlockedExchange(&g_flyUi.prog, prog);
+    InterlockedExchange(&g_flyUi.always, S.flyAlways ? 1 : 0);
 }
 using FnBsWrite = void (*)(void* w, char tag, const void* p, unsigned n);
 using FnDestWrite = void* (*)(void* w, const void* dest);
@@ -7735,6 +7813,7 @@ void Apply(uintptr_t mgr) {
     if (InterlockedExchange(&g_reqFly, 0)) FlyToggle(now);
     if (S.flyTakeoff) FlyTakeoffStep(now);
     if (S.flyLand) FlyLandStep(now);
+    FlyUiStep(now);
     if (S.ghostWanted && !S.ghost && IssueUnitEnabled(false)) S.ghost = true;
     if (g_moveOk && !S.ghostWanted && !S.ghost && now - S.tAliveCheck >= 1.0) {
         S.tAliveCheck = now;
@@ -8694,7 +8773,7 @@ void Apply(uintptr_t mgr) {
         }
     }
     ++S.frames;
-    if (canMove && mode != 0 && S.flyLand != 2) {
+    if (canMove && mode != 0 && !FlyMovesHeld(now)) {
         const bool ride = UnitRide();
         const float ahead = ride ? cfg.flyAhead : cfg.moveAhead, turnDeg = ride ? cfg.flyTurnDeg : cfg.moveTurnDeg;
         const double interval = ride ? cfg.flyInterval : cfg.moveInterval;
@@ -10548,6 +10627,18 @@ int FlyerApi(void* L) {
     f.pushboolean(L, S.active && S.unit && S.flyer && cfg.flyToggleKey ? 1 : 0);
     return 1;
 }
+int FlyStateApi(void* L) {
+    const bool on = S.active && S.unit && g_flyUi.shown;
+    const LONG prog = g_flyUi.prog;
+    f.pushboolean(L, on ? 1 : 0);
+    f.pushboolean(L, on && g_flyUi.land ? 1 : 0);
+    f.pushboolean(L, on && g_flyUi.ready ? 1 : 0);
+    f.pushnumber(L, on ? static_cast<float>(g_flyUi.pending) : 0.f);
+    f.pushnumber(L, on && prog >= 0 ? static_cast<float>(prog) / 1000.f : -1.f);
+    f.pushboolean(L, on && g_flyUi.always ? 1 : 0);
+    f.pushnumber(L, static_cast<float>(g_flyUi.refuse));
+    return 7;
+}
 int PushTable(void* L) {
     LONG n = InterlockedIncrement(&g_opens);
     if (!Resolve()) {
@@ -10568,7 +10659,7 @@ int PushTable(void* L) {
     {
         const struct { const char* name; CFn fn; } more[] = {{"unit_keys", UnitKeysFn}, {"set_unit", SetUnit}, {"battle_started", BattleStarted},
                                                              {"set_mp_players", SetMpPlayers}, {"ui_hide", UiHideApi},
-                                                             {"flyer", FlyerApi}};
+                                                             {"flyer", FlyerApi}, {"fly_state", FlyStateApi}};
         for (const auto& e : more) {
             f.pushcclosure(L, e.fn, 0);
             f.setfield(L, -2, e.name);
