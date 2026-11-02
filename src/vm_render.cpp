@@ -1338,19 +1338,6 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     IniVec3(ini, L"tracer_tint", s.tracerTint);
     for (float& c : s.tracerTint)
         if (!(c >= 0.f && c <= 8.f)) c = 1.f;
-    {
-        const Settings d0;
-        s.tracerSpeed = IniFloat(ini, L"tracer_speed", s.tracerSpeed);
-        if (!(s.tracerSpeed >= 20.f && s.tracerSpeed <= 5000.f)) s.tracerSpeed = d0.tracerSpeed;
-        s.tracerMinTime = IniFloat(ini, L"tracer_min_time", s.tracerMinTime);
-        if (!(s.tracerMinTime >= 0.f && s.tracerMinTime <= 1.f)) s.tracerMinTime = d0.tracerMinTime;
-        s.tracerHide = IniFloat(ini, L"tracer_hide", s.tracerHide);
-        if (!(s.tracerHide >= 0.f && s.tracerHide <= 0.8f)) s.tracerHide = d0.tracerHide;
-        s.tracerMaxLen = IniFloat(ini, L"tracer_len", s.tracerMaxLen);
-        if (!(s.tracerMaxLen >= 0.1f && s.tracerMaxLen <= 100.f)) s.tracerMaxLen = d0.tracerMaxLen;
-        s.tracerWidth = IniFloat(ini, L"tracer_width", s.tracerWidth);
-        if (!(s.tracerWidth >= 0.1f && s.tracerWidth <= 10.f)) s.tracerWidth = d0.tracerWidth;
-    }
     s.flashGas =IniFloat(ini, L"flash_gas", s.flashGas ? 1.f : 0.f) != 0.f;
     GetPrivateProfileStringW(L"viewmodel", L"flash_gas_fx", s.flashGasFx, s.flashGasFx, 128, ini);
     s.flashGasScale = IniFloat(ini, L"flash_gas_scale", s.flashGasScale);
@@ -4327,9 +4314,7 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
             Tracer& t = trs_[i];
             float dir[3] = {t.b[0] - t.a[0], t.b[1] - t.a[1], t.b[2] - t.a[2]};
             float total = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-            float life = total / s.tracerSpeed;
-            if (life < s.tracerMinTime) life = s.tracerMinTime;
-            const float spd = total / life;
+            float life = total / kTracerSpeed;
             float age = t.pending || t.t0 < 0 ? 0.f : static_cast<float>(now - t.t0);
             if (total < 0.01f || age > life) continue;
             trs_[keep++] = t;
@@ -4337,12 +4322,12 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
             for (float& c : dir) c /= total;
             float lf = age / life;
             float a = t.alpha * s.flashIntensity;
-            if (lf < s.tracerHide) a = 0.f;
-            else if (lf < s.tracerHide + 0.1f) a *= (lf - s.tracerHide) / 0.1f;
+            if (lf < 0.2f) a = 0.f;
+            else if (lf < 0.3f) a *= (lf - 0.2f) / 0.1f;
             else if (lf > 0.95f) a *= Clamp01((1.f - lf) / 0.05f);
             if (a <= 0.001f) continue;
-            float head = std::min(age * spd, total);
-            float len = std::min(spd * t.lenSec, s.tracerMaxLen) * Clamp01(age / 0.101f);
+            float head = std::min(age * kTracerSpeed, total);
+            float len = std::min(kTracerSpeed * t.lenSec, kTracerMaxLen) * Clamp01(age / 0.101f);
             len = std::min(len, head);
             float hw[3], tw[3], hv[3], tv[3];
             for (int k = 0; k < 3; ++k) {
@@ -4364,7 +4349,7 @@ bool MuzzleFlash::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID
             float sx = (hx - tx) * w * 0.5f, sy = (hy - tyy) * h * 0.5f;
             float sl = std::sqrt(sx * sx + sy * sy);
             float px = sl > 1e-4f ? -sy / sl : 0.f, py = sl > 1e-4f ? sx / sl : 1.f;
-            float wh = kTracerHalfWidth * s.tracerWidth * h * 0.5f / (hv[2] * ty), wt = kTracerHalfWidth * s.tracerWidth * h * 0.5f / (tv[2] * ty);
+            float wh = kTracerHalfWidth * h * 0.5f / (hv[2] * ty), wt = kTracerHalfWidth * h * 0.5f / (tv[2] * ty);
             wh = std::max(wh, 0.75f), wt = std::max(wt, 0.75f);
             auto vtx = [&](float x, float y, float off, float u, float v) {
                 return FlashVertex{x + px * off * 2.f / w, y + py * off * 2.f / h, u, v, t.col[0] * s.tracerTint[0], t.col[1] * s.tracerTint[1], t.col[2] * s.tracerTint[2], a, 1.f, 1.f, 0.f};

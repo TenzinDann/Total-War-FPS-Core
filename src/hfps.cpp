@@ -622,6 +622,7 @@ struct Config {
     bool heroesOnly = true;
     bool silentHalt = true;
     bool fly = true, flyTakeoff = true;
+    unsigned flyToggleKey = 'F';
     float flyAhead = 60.f, flyInterval = 2.0f, flyTurnDeg = 20.f, flyEyeHeight = 1.2f;
     bool mount = true, mountUnitMove = true, mountHide = false, mountFallback = true;
     float mountEyeAbove = 0.7f, mountEye = 0.f;
@@ -648,6 +649,7 @@ struct Config {
     bool hideEdgeArrows = true;
     bool hudEnabled = true;
     bool castKeys = true;
+    unsigned hideUiKey = 'H';
     bool castMarker = true;
     bool castHold = false;
     float castHoldMax = 1.5f, castHoldWindupMax = 6.f;
@@ -971,6 +973,8 @@ void LoadConfig() {
     cfg.silentHalt = GetPrivateProfileIntW(L"move", L"silent_halt", 1, ini) != 0;
     cfg.fly = GetPrivateProfileIntW(L"move", L"fly", 1, ini) != 0;
     cfg.flyTakeoff = GetPrivateProfileIntW(L"move", L"fly_takeoff", 1, ini) != 0;
+    cfg.flyToggleKey = GetPrivateProfileIntW(L"move", L"fly_toggle_key", 'F', ini);
+    if (cfg.flyToggleKey >= 0xFF) cfg.flyToggleKey = 'F';
     cfg.flyAhead = IniF(L"move", L"fly_ahead", cfg.flyAhead, ini);
     cfg.flyInterval = IniF(L"move", L"fly_interval", cfg.flyInterval, ini);
     cfg.flyTurnDeg = IniF(L"move", L"fly_turn_deg", cfg.flyTurnDeg, ini);
@@ -1052,6 +1056,8 @@ void LoadConfig() {
     cfg.hudEnabled = GetPrivateProfileIntW(L"hud", L"enabled", 1, ini) != 0;
     cfg.hudCover = GetPrivateProfileIntW(L"hud", L"cover_viewmodel", 1, ini) != 0;
     cfg.castKeys = GetPrivateProfileIntW(L"hud", L"cast_keys", 1, ini) != 0;
+    cfg.hideUiKey = GetPrivateProfileIntW(L"hud", L"hide_ui_key", 'H', ini);
+    if (cfg.hideUiKey >= 0xFF) cfg.hideUiKey = 'H';
     cfg.castMarker = GetPrivateProfileIntW(L"hud", L"cast_marker", 1, ini) != 0;
     cfg.castHold = GetPrivateProfileIntW(L"cast", L"hold", 0, ini) != 0;
     cfg.castHoldMax = IniF(L"cast", L"hold_max", 1.5f, ini);
@@ -1327,6 +1333,9 @@ struct State {
     bool flyer = false;
     int flyTakeoff = 0;
     double tFlyEnter = 0, tFlyCheck = 0, tFlyGiveUp = 0;
+    bool flyAlways = false, flyKeyed = false, flyCmdAir = false;
+    int flyLand = 0;
+    double tFlyKey = 0, tFlyLandCheck = 0, tFlyLandGiveUp = 0;
     uintptr_t mount = 0, body = 0;
     bool mountUnit = false, mountMoved = false;
     float footEye = 1.75f, mountStart[2] = {};
@@ -1443,6 +1452,7 @@ float RideCrouchFloor(float standEye) {
     return S.mountTop > 0.f && cfg.mountEye <= 0.f ? std::fmin(standEye, S.mountTop + cfg.mountCrouchAbove) : 0.f;
 }
 volatile LONG g_reqToggle = 0, g_reqExit = 0;
+volatile LONG g_uiHide = 0, g_reqFly = 0;
 volatile LONG g_staleFp = 0;
 volatile LONG g_camBeat = 0;
 bool g_fpDetached = false;
@@ -1929,6 +1939,7 @@ void Enter(uintptr_t mgr) {
     S.prevActive = prev;
     S.unit = unit;
     S.flyer = flyer;
+    S.flyAlways = flyAlways;
     S.entity = entity;
     S.mount = mount;
     S.mountVehicle = mount && (!mountListed || mountPlatform);
@@ -2147,6 +2158,9 @@ void Enter(uintptr_t mgr) {
     if (g_moveOk && cfg.moveEnabled && (MoveMode() == 2 || MoveMode() == 0)) IssueQuietUnitHalt();
     S.flyTakeoff = 0;
     S.tFlyEnter = Now();
+    S.flyLand = 0, S.flyKeyed = false;
+    S.flyCmdAir = flyNow || flyAlways || cfg.flyTakeoff;
+    InterlockedExchange(&g_reqFly, 0);
     if (S.flyer && cfg.flyTakeoff && !flyAlways) {
         if (flyNow) {
             Log("fly: already airborne - no take-off / landing command, stays in the air");
@@ -4300,7 +4314,7 @@ void FlyTakeoffStep(double now) {
     float p[3] = {};
     ReadVec(S.entity + oEntPos, p);
     if (FlyAirborne(S.unit)) {
-        Log("fly: airborne %.1f s after entering (entity y %.2f)%s", now - S.tFlyEnter, p[1],
+        Log("fly: airborne %.1f s after %s (entity y %.2f)%s", now - (S.flyKeyed ? S.tFlyKey : S.tFlyEnter), S.flyKeyed ? "pressing F" : "entering", p[1],
             S.flyTakeoff == 2 ? " - took off" : "");
         S.flyTakeoff = 0;
         return;
@@ -4313,14 +4327,106 @@ void FlyTakeoffStep(double now) {
         if (IssueDesiredFlying(true)) {
             S.flyTakeoff = 2;
             S.tFlyGiveUp = now + 5.0;
+            S.flyCmdAir = true;
+            S.moving = false;
         }
         return;
     }
     if (now >= S.tFlyGiveUp) {
-        Log("fly: still on the ground %.1f s after entering (entity y %.2f; %s) - it moves along the ground", now - S.tFlyEnter, p[1],
+        Log("fly: still on the ground %.1f s after %s (entity y %.2f; %s) - it moves along the ground", now - (S.flyKeyed ? S.tFlyKey : S.tFlyEnter),
+            S.flyKeyed ? "pressing F" : "entering", p[1],
             S.flyTakeoff == 2 ? "take-off issued but it did not lift off"
                               : "the game never allowed a take-off: landing / taking off / fighting?");
         S.flyTakeoff = 0;
+    }
+}
+bool FlyCanLand(uintptr_t unit) {
+    uintptr_t fc = Plausible(unit) ? Ptr(unit + oUnitFlyComp) : 0;
+    if (!Plausible(fc)) return false;
+    using FnCan = unsigned char (*)(uintptr_t, unsigned char);
+    return reinterpret_cast<FnCan>(g_base + kFnFlyCanChange904)(fc, 1) != 0;
+}
+void FlyLandStep(double now) {
+    if (!S.flyLand || now < S.tFlyLandCheck) return;
+    S.tFlyLandCheck = now + 0.25;
+    float p[3] = {};
+    ReadVec(S.entity + oEntPos, p);
+    if (!FlyAirborne(S.unit)) {
+        Log("fly: on the ground %.1f s after pressing F (entity y %.2f)%s", now - S.tFlyKey, p[1], S.flyLand == 2 ? " - landed" : "");
+        S.flyLand = 0;
+        return;
+    }
+    if (!CmdQueue(nullptr)) {
+        S.tFlyLandGiveUp = now + 5.0;
+        return;
+    }
+    if (S.flyLand == 1 && FlyCanLand(S.unit)) {
+        if (IssueDesiredFlying(false)) {
+            S.flyLand = 2;
+            S.flyCmdAir = false;
+            S.tFlyLandGiveUp = now + 8.0;
+            S.moving = false;
+        }
+        return;
+    }
+    if (now >= S.tFlyLandGiveUp) {
+        Log("fly: still in the air %.1f s after pressing F (entity y %.2f; %s) - it keeps flying", now - S.tFlyKey, p[1],
+            S.flyLand == 2 ? "landing issued but it has not touched down" : "the game never allowed a landing: fighting / taking off?");
+        S.flyLand = 0;
+    }
+}
+void FlyToggle(double now) {
+    if (!S.flyer) return;
+    float p[3] = {};
+    ReadVec(S.entity + oEntPos, p);
+    if (S.flyAlways) {
+        Log("fly: F ignored - this hero always flies (CanAlwaysFlying), it cannot land");
+        return;
+    }
+    if (S.flyTakeoff == 1) {
+        S.flyTakeoff = 0;
+        Log("fly: F - take-off cancelled (the game had not allowed it yet), stays on the ground (entity y %.2f)", p[1]);
+        return;
+    }
+    if (S.flyLand == 1) {
+        S.flyLand = 0;
+        Log("fly: F - landing cancelled (the game had not allowed it yet), stays in the air (entity y %.2f)", p[1]);
+        return;
+    }
+    S.flyKeyed = true;
+    S.tFlyKey = now;
+    if (!g_flyStateOk) {
+        const bool up = !S.flyCmdAir;
+        if (IssueDesiredFlying(up)) S.flyCmdAir = up;
+        Log("fly: F - %s (airborne check unavailable: toggled from our last command)", up ? "take off" : "land");
+        return;
+    }
+    if (S.flyLand == 2) {
+        if (FlyAirborne(S.unit)) {
+            S.flyLand = 0;
+            const bool ok = IssueDesiredFlying(true);
+            S.flyCmdAir = true;
+            S.moving = false;
+            Log("fly: F - landing cancelled on the way down (take-off command issued=%d), keeps flying (entity y %.2f)", ok ? 1 : 0, p[1]);
+            return;
+        }
+        S.flyLand = 0;
+    }
+    const bool air = S.flyTakeoff == 2 || FlyAirborne(S.unit);
+    if (air) {
+        S.flyTakeoff = 0;
+        S.flyLand = 1;
+        S.tFlyLandCheck = 0;
+        S.tFlyLandGiveUp = now + 5.0;
+        Log("fly: F - land (entity y %.2f)", p[1]);
+        FlyLandStep(now);
+    } else {
+        S.flyLand = 0;
+        S.flyTakeoff = 1;
+        S.tFlyCheck = 0;
+        S.tFlyGiveUp = now + 5.0;
+        Log("fly: F - take off (entity y %.2f)", p[1]);
+        FlyTakeoffStep(now);
     }
 }
 using FnBsWrite = void (*)(void* w, char tag, const void* p, unsigned n);
@@ -7626,7 +7732,9 @@ void Apply(uintptr_t mgr) {
         Exit(mgr, "camera-invalid");
         return;
     }
+    if (InterlockedExchange(&g_reqFly, 0)) FlyToggle(now);
     if (S.flyTakeoff) FlyTakeoffStep(now);
+    if (S.flyLand) FlyLandStep(now);
     if (S.ghostWanted && !S.ghost && IssueUnitEnabled(false)) S.ghost = true;
     if (g_moveOk && !S.ghostWanted && !S.ghost && now - S.tAliveCheck >= 1.0) {
         S.tAliveCheck = now;
@@ -8586,7 +8694,7 @@ void Apply(uintptr_t mgr) {
         }
     }
     ++S.frames;
-    if (canMove && mode != 0) {
+    if (canMove && mode != 0 && S.flyLand != 2) {
         const bool ride = UnitRide();
         const float ahead = ride ? cfg.flyAhead : cfg.moveAhead, turnDeg = ride ? cfg.flyTurnDeg : cfg.moveTurnDeg;
         const double interval = ride ? cfg.flyInterval : cfg.moveInterval;
@@ -8974,6 +9082,14 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (S.active && cfg.wallUp && w == cfg.wallUpKey) return 0;
         if (S.active && w == VK_SPACE && cfg.jumpHeight > 0.f) return 0;
         if (S.active && cfg.crouch && CrouchKeyMsg(w)) return 0;
+        if (S.active && cfg.hideUiKey && w == cfg.hideUiKey) {
+            if (!(l & (1L << 30))) Log("ui: H - vanilla interface %s", InterlockedXor(&g_uiHide, 1) ? "back" : "hidden (our HUD stays)");
+            return 0;
+        }
+        if (S.active && S.flyer && cfg.flyToggleKey && w == cfg.flyToggleKey) {
+            if (!(l & (1L << 30))) InterlockedExchange(&g_reqFly, 1);
+            return 0;
+        }
         break;
     case WM_KEYUP:
     case WM_SYSKEYUP:
@@ -8990,6 +9106,7 @@ LRESULT CALLBACK HfpsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (S.active && (w == KeyAt('W') || w == KeyAt('A') || w == 'S' || w == 'D' || w == 'R' || (w >= '1' && w <= '9'))) return 0;
         if (S.active && w == VK_SPACE && cfg.jumpHeight > 0.f) return 0;
         if (S.active && cfg.crouch && CrouchKeyMsg(w)) return 0;
+        if (S.active && ((cfg.hideUiKey && w == cfg.hideUiKey) || (S.flyer && cfg.flyToggleKey && w == cfg.flyToggleKey))) return 0;
         if (S.active && ((vmgame::ShieldKey() && w == KeyAt(vmgame::ShieldKey())) || (vmgame::ShieldHitKey() && w == vmgame::ShieldHitKey()))) return 0;
         if (S.active && g_heroLauncher && vmgame::LauncherConfigured() &&
             (w == vmgame::LauncherFireKey() || w == vmgame::LauncherSwitchKey() || w == vmgame::LauncherFlameKey()))
@@ -9317,6 +9434,8 @@ bool VerifyGame() {
         g_flyStateOk = g_flyOk && PrintsMatch(Prints(kFlyStatePrints904), "flying heroes (airborne / can take off)");
         Log("fly: take-off byte 0 (10-31 fix: 1 = land); airborne / can-take-off checks %s",
             g_flyStateOk ? "ok - grounded flyers take off once the game allows it" : "OFF - one take-off command on entering, result not checked");
+        Log("keys: hide_ui_key 0x%02X (H in first person: vanilla interface off / on, our HUD stays; 0 = not ours), fly_toggle_key 0x%02X (F: a flying hero takes off / lands; 0 = not ours)%s",
+            cfg.hideUiKey, cfg.flyToggleKey, g_flyOk ? "" : " - flying heroes OFF, F unused");
         Log("mount: ground mounts %s (mount=%d mount_unit=%d mount_hide=%d mount_fallback=%d mount_eye_above=%.2f mount_eye=%.2f)",
             !cfg.mount ? "OFF - the rider is teleported (it cannot move)"
             : cfg.mountUnitMove ? "ok - unit move orders like flying heroes (10-31 round 2), the mount is drawn unless mount_hide=1"
@@ -10421,6 +10540,14 @@ int SetMpPlayers(void* L) {
     mp::SetPlayers(v[0], v[1], v[2]);
     return 0;
 }
+int UiHideApi(void* L) {
+    f.pushboolean(L, S.active && S.unit && g_uiHide ? 1 : 0);
+    return 1;
+}
+int FlyerApi(void* L) {
+    f.pushboolean(L, S.active && S.unit && S.flyer && cfg.flyToggleKey ? 1 : 0);
+    return 1;
+}
 int PushTable(void* L) {
     LONG n = InterlockedIncrement(&g_opens);
     if (!Resolve()) {
@@ -10440,7 +10567,8 @@ int PushTable(void* L) {
     }
     {
         const struct { const char* name; CFn fn; } more[] = {{"unit_keys", UnitKeysFn}, {"set_unit", SetUnit}, {"battle_started", BattleStarted},
-                                                             {"set_mp_players", SetMpPlayers}};
+                                                             {"set_mp_players", SetMpPlayers}, {"ui_hide", UiHideApi},
+                                                             {"flyer", FlyerApi}};
         for (const auto& e : more) {
             f.pushcclosure(L, e.fn, 0);
             f.setfield(L, -2, e.name);

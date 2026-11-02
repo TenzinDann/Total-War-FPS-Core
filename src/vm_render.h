@@ -170,11 +170,7 @@ struct Settings {
     float hitFxScale = 1.0f;
     float hitFxAlpha = 0.85f;
     float hitFxColor[3] = {0.42f, 0.03f, 0.02f};
-    float tracerTint[3] = {1.f, 1.f, 1.f}; float tracerSpeed = 330.2f;
-    float tracerMinTime = 0.f;
-    float tracerHide = 0.2f;
-    float tracerMaxLen = 12.7f;
-    float tracerWidth = 1.f;
+    float tracerTint[3] = {1.f, 1.f, 1.f};
     bool flashGas = false;
     wchar_t flashGasFx[128] = L"";
     float flashGasScale = 1.0f;
