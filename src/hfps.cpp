@@ -301,6 +301,11 @@ const CodePrint kFlyStatePrints904[] = {
 constexpr uintptr_t oUnitFlyComp = 0x3e30, oFlyCompLanded = 0x8;
 constexpr uintptr_t kFnFlyCanChange904 = 0x301c86c;
 bool g_flyStateOk = false;
+const CodePrint kFlyCoolPrints904[] = {
+    {0x3039eb7, 0x9, 0xe90c4e9ae5a3399cull},
+    {0x8e2f80, 0xd, 0xea9fd59ef1597da2ull}};
+constexpr uintptr_t oFlyCompCooldown = 0xc;
+bool g_flyCoolOk = false;
 const CodePrint kWallPrints904[] = {
     {0x2dc67a8, 0x1ab, 0xb8fa363f9006326full},
     {0x30b3cf8, 0xa3, 0x73b7107b30625308ull},
@@ -1340,6 +1345,9 @@ struct State {
     float flyAlt0 = 0.f;
     float flyAltLow = 0.f;
     double tFlyAltLow = 0;
+    bool flyCoolOn = false;
+    double tFlyCoolOn = 0;
+    float flyCoolMax = 0.f;
     bool flyHalted = false;
     uintptr_t mount = 0, body = 0;
     bool mountUnit = false, mountMoved = false;
@@ -1459,8 +1467,8 @@ float RideCrouchFloor(float standEye) {
 volatile LONG g_reqToggle = 0, g_reqExit = 0;
 volatile LONG g_uiHide = 0, g_reqFly = 0;
 struct FlyUi {
-    volatile LONG shown, land, ready, pending, prog, always, refuse;
-} g_flyUi = {0, 0, 0, 0, -1, 0, 0};
+    volatile LONG shown, land, ready, pending, prog, always, refuse, cool;
+} g_flyUi = {0, 0, 0, 0, -1, 0, 0, 0};
 constexpr double kFlyWaitSecs = 20.0, kFlyLandMaxSecs = 12.0, kFlyUpSecs = 2.5;
 constexpr float kFlyTouchDown = 0.6f;
 constexpr float kFlySettleMax = 3.0f;
@@ -2173,6 +2181,7 @@ void Enter(uintptr_t mgr) {
     S.flyLand = 0, S.flyKeyed = false;
     S.tFlyHold = 0, S.tFlyLandIssue = 0, S.tFlyUp = -100, S.tFlyUi = 0, S.flyAlt0 = 0.f, S.flyHalted = false;
     S.flyAltLow = 0.f, S.tFlyAltLow = 0;
+    S.flyCoolOn = false, S.tFlyCoolOn = 0, S.flyCoolMax = 0.f;
     S.flyCmdAir = flyNow || flyAlways || cfg.flyTakeoff;
     InterlockedExchange(&g_reqFly, 0);
     if (S.flyer && cfg.flyTakeoff && !flyAlways) {
@@ -4365,6 +4374,13 @@ void FlyTakeoffStep(double now) {
         S.flyTakeoff = 0;
     }
 }
+float FlyCooldown(uintptr_t unit) {
+    if (!g_flyCoolOk) return 0.f;
+    uintptr_t fc = Plausible(unit) ? Ptr(unit + oUnitFlyComp) : 0;
+    float v = 0.f;
+    if (!Plausible(fc) || !Rd(fc + oFlyCompCooldown, v) || !(v > 0.f && v < 600.f)) return 0.f;
+    return v;
+}
 bool FlyCanLand(uintptr_t unit) {
     uintptr_t fc = Plausible(unit) ? Ptr(unit + oUnitFlyComp) : 0;
     if (!Plausible(fc)) return false;
@@ -4452,6 +4468,11 @@ void FlyToggle(double now) {
         Log("fly: F - landing cancelled (the game had not allowed it yet), stays in the air (entity y %.2f)", p[1]);
         return;
     }
+    if (const float cd = FlyCooldown(S.unit); cd > 0.05f) {
+        InterlockedIncrement(&g_flyUi.refuse);
+        Log("fly: F refused - toggle flying is cooling down (%.1f s left)", cd);
+        return;
+    }
     S.flyKeyed = true;
     S.tFlyKey = now;
     if (!g_flyStateOk) {
@@ -4511,6 +4532,20 @@ void FlyUiStep(double now) {
             ready = FlyCanTakeOff(S.unit) || S.moving ? 1 : 0;
         }
     }
+    const float cd = S.flyAlways ? 0.f : FlyCooldown(S.unit);
+    const LONG cool = cd > 0.05f ? static_cast<LONG>(cd * 1000.f) : 0;
+    if (cool) {
+        ready = 0, prog = -1;
+        if (!S.flyCoolOn) {
+            S.flyCoolOn = true, S.tFlyCoolOn = now, S.flyCoolMax = cd;
+            Log("fly: toggle-flying cooldown %.2f s (flying component +0xc)", cd);
+        }
+        S.flyCoolMax = std::fmax(S.flyCoolMax, cd);
+    } else if (S.flyCoolOn) {
+        S.flyCoolOn = false;
+        Log("fly: toggle-flying cooldown over after %.1f s (it started at %.2f s)", now - S.tFlyCoolOn, S.flyCoolMax);
+    }
+    InterlockedExchange(&g_flyUi.cool, cool);
     InterlockedExchange(&g_flyUi.land, land);
     InterlockedExchange(&g_flyUi.ready, ready);
     InterlockedExchange(&g_flyUi.pending, pending);
@@ -9525,6 +9560,9 @@ bool VerifyGame() {
             g_flyStateOk ? "ok - grounded flyers take off once the game allows it" : "OFF - one take-off command on entering, result not checked");
         Log("keys: hide_ui_key 0x%02X (H in first person: vanilla interface off / on, our HUD stays; 0 = not ours), fly_toggle_key 0x%02X (F: a flying hero takes off / lands; 0 = not ours)%s",
             cfg.hideUiKey, cfg.flyToggleKey, g_flyOk ? "" : " - flying heroes OFF, F unused");
+        g_flyCoolOk = g_flyStateOk && PrintsMatch(Prints(kFlyCoolPrints904), "flying heroes (toggle-flying cooldown)");
+        Log("fly: toggle-flying cooldown (flying component +0xc) %s",
+            g_flyCoolOk ? "ok - shown on the fly slot, F during it is refused" : "OFF - not shown, F during it queues as before");
         Log("mount: ground mounts %s (mount=%d mount_unit=%d mount_hide=%d mount_fallback=%d mount_eye_above=%.2f mount_eye=%.2f)",
             !cfg.mount ? "OFF - the rider is teleported (it cannot move)"
             : cfg.mountUnitMove ? "ok - unit move orders like flying heroes (10-31 round 2), the mount is drawn unless mount_hide=1"
@@ -10647,7 +10685,8 @@ int FlyStateApi(void* L) {
     f.pushnumber(L, on && prog >= 0 ? static_cast<float>(prog) / 1000.f : -1.f);
     f.pushboolean(L, on && g_flyUi.always ? 1 : 0);
     f.pushnumber(L, static_cast<float>(g_flyUi.refuse));
-    return 7;
+    f.pushnumber(L, on ? static_cast<float>(g_flyUi.cool) / 1000.f : 0.f);
+    return 8;
 }
 int PushTable(void* L) {
     LONG n = InterlockedIncrement(&g_opens);
