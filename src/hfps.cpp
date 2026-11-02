@@ -53,6 +53,8 @@ void* g_orig_after_step;
 uintptr_t g_after_step_ret;
 void hfps_after_step_thunk();
 void hfps_after_step_pre(uintptr_t self, uintptr_t battle);
+int tz_guard_copy(const void* src, void* dst, size_t n);
+extern char tz_guard_load_q[], tz_guard_load_b[], tz_guard_fail[];
 }
 namespace {
 struct CodePrint {
@@ -736,12 +738,209 @@ void OpenLog() {
         g_log = _wfopen(path, L"a");
     }
 }
+bool g_guardOn = false;
+volatile LONG g_hotTid = 0;
+int g_hotDepth = 0;
+PVOID g_guardVeh = nullptr;
+volatile LONG g_guardTrapped = 0, g_guardPageFix = 0;
+struct GuardStat {
+    uint64_t reads = 0, faults = 0, verified = 0, flagMiss = 0, byteDiff = 0;
+    unsigned missLogs = 0;
+} g_gs;
+LONG CALLBACK GuardVeh(EXCEPTION_POINTERS* ep) {
+    const DWORD code = ep->ExceptionRecord->ExceptionCode;
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_IN_PAGE_ERROR && code != EXCEPTION_GUARD_PAGE) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT* c = ep->ContextRecord;
+    const uintptr_t ip = static_cast<uintptr_t>(c->Rip);
+    if (ip != reinterpret_cast<uintptr_t>(tz_guard_load_q) && ip != reinterpret_cast<uintptr_t>(tz_guard_load_b)) return EXCEPTION_CONTINUE_SEARCH;
+    if (code == EXCEPTION_GUARD_PAGE && ep->ExceptionRecord->NumberParameters >= 2) {
+        const uintptr_t at = static_cast<uintptr_t>(ep->ExceptionRecord->ExceptionInformation[1]);
+        MEMORY_BASIC_INFORMATION mbi;
+        DWORD old = 0;
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(at), &mbi, sizeof mbi) && mbi.State == MEM_COMMIT && !(mbi.Protect & PAGE_GUARD) &&
+            VirtualProtect(reinterpret_cast<LPVOID>(at & ~static_cast<uintptr_t>(0xfff)), 1, mbi.Protect | PAGE_GUARD, &old))
+            InterlockedIncrement(&g_guardPageFix);
+    }
+    c->Rip = reinterpret_cast<DWORD64>(tz_guard_fail);
+    InterlockedIncrement(&g_guardTrapped);
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+bool HotNow() { return g_guardOn && g_hotTid == static_cast<LONG>(GetCurrentThreadId()); }
+struct HotReads {
+    bool mine = false;
+    HotReads() {
+        if (!g_guardOn) return;
+        const LONG t = static_cast<LONG>(GetCurrentThreadId());
+        if (g_hotTid == t) {
+            ++g_hotDepth;
+            mine = true;
+        } else if (InterlockedCompareExchange(&g_hotTid, t, 0) == 0) {
+            g_hotDepth = 1;
+            mine = true;
+        }
+    }
+    ~HotReads() {
+        if (mine && --g_hotDepth == 0) InterlockedExchange(&g_hotTid, 0);
+    }
+    HotReads(const HotReads&) = delete;
+    HotReads& operator=(const HotReads&) = delete;
+};
+bool RpmRead(uintptr_t a, void* out, size_t n) {
+    SIZE_T got = 0;
+    return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(a), out, n, &got) && got == n;
+}
+bool GuardRead(uintptr_t a, void* out, size_t n) {
+    const bool ok = tz_guard_copy(reinterpret_cast<const void*>(a), out, n) != 0;
+    ++g_gs.reads;
+    if (!ok) ++g_gs.faults;
+    if ((g_gs.reads & 1023) == 0 && n <= 64) {
+        unsigned char chk[64];
+        const bool ok2 = RpmRead(a, chk, n);
+        ++g_gs.verified;
+        if (ok != ok2) {
+            ++g_gs.flagMiss;
+            if (g_gs.missLogs++ < 8)
+                Log("guard-read: check at %p (%u bytes): direct read %s but ReadProcessMemory %s", reinterpret_cast<void*>(a), static_cast<unsigned>(n),
+                    ok ? "ok" : "failed", ok2 ? "ok" : "failed");
+        } else if (ok && memcmp(chk, out, n) != 0) {
+            ++g_gs.byteDiff;
+        }
+    }
+    return ok;
+}
+bool ReadMem(uintptr_t a, void* out, size_t n) {
+    if (a < 0x10000) return false;
+    return HotNow() ? GuardRead(a, out, n) : RpmRead(a, out, n);
+}
 template <class T>
 bool Rd(uintptr_t a, T& out) {
-    if (a < 0x10000) return false;
-    SIZE_T got = 0;
-    return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(a), &out, sizeof(T), &got) &&
-           got == sizeof(T);
+    return ReadMem(a, &out, sizeof(T));
+}
+const char* GuardSelfTest() {
+    static const unsigned char ref[27] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27};
+    unsigned char buf[64];
+    const LONG t0 = g_guardTrapped;
+    LONG want = 0;
+    if (!tz_guard_copy(ref, buf, sizeof ref) || memcmp(buf, ref, sizeof ref) != 0) return "valid read";
+    if (tz_guard_copy(reinterpret_cast<const void*>(0x10), buf, 8)) return "address 0x10";
+    ++want;
+    if (tz_guard_copy(reinterpret_cast<const void*>(0x8000000000000000ull), buf, 8)) return "non-canonical address";
+    ++want;
+    unsigned char* p = static_cast<unsigned char*>(VirtualAlloc(nullptr, 0x3000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    if (!p) return "VirtualAlloc";
+    for (int i = 0; i < 0x1000; ++i) p[i] = static_cast<unsigned char>(i * 7 + 3);
+    DWORD old = 0;
+    const char* why = nullptr;
+    if (!VirtualProtect(p + 0x1000, 0x1000, PAGE_NOACCESS, &old) || !VirtualProtect(p + 0x2000, 0x1000, PAGE_READWRITE | PAGE_GUARD, &old)) {
+        why = "VirtualProtect";
+    } else if (!tz_guard_copy(p + 0x100, buf, 16) || memcmp(buf, p + 0x100, 16) != 0) {
+        why = "read inside a good page";
+    } else if (tz_guard_copy(p + 0xff8, buf, 16)) {
+        why = "8-byte read running into a no-access page";
+    } else if (++want, tz_guard_copy(p + 0xffd, buf, 7)) {
+        why = "byte read running into a no-access page";
+    } else if (++want, tz_guard_copy(p + 0x1800, buf, 1)) {
+        why = "no-access page";
+    } else if (++want, tz_guard_copy(p + 0x2000, buf, 8)) {
+        why = "guard page";
+    } else {
+        ++want;
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery(p + 0x2000, &mbi, sizeof mbi) || !(mbi.Protect & PAGE_GUARD)) why = "guard page not put back";
+        else if (++want, tz_guard_copy(p + 0x2000, buf, 8)) why = "guard page (second time)";
+    }
+    VirtualFree(p, 0, MEM_RELEASE);
+    if (why) return why;
+    {
+        const bool rf = tz_guard_copy(p + 0x100, buf, 8) != 0;
+        MEMORY_BASIC_INFORMATION mf;
+        const bool stillFree = VirtualQuery(p, &mf, sizeof mf) && mf.State == MEM_FREE;
+        if (rf && stillFree) return "released memory";
+        if (!rf) ++want;
+    }
+    unsigned char* q = static_cast<unsigned char*>(VirtualAlloc(nullptr, 0x10000, MEM_RESERVE, PAGE_NOACCESS));
+    if (!q) return "VirtualAlloc reserve";
+    const bool rq = tz_guard_copy(q + 0x40, buf, 8) != 0;
+    VirtualFree(q, 0, MEM_RELEASE);
+    if (rq) return "reserved, not committed";
+    ++want;
+    if (g_guardTrapped - t0 != want) return "faults not all caught by our handler";
+    return nullptr;
+}
+void GuardInit() {
+    wchar_t ini[MAX_PATH];
+    wcscpy(ini, g_dir);
+    wcscat(ini, L"\\tenzin_fps.ini");
+    if (!GetPrivateProfileIntW(L"safety", L"fast_read", 1, ini)) {
+        Log("guard-read: off ([safety] fast_read=0) - target lookups keep reading game memory with ReadProcessMemory");
+        return;
+    }
+    g_guardVeh = AddVectoredExceptionHandler(1, GuardVeh);
+    if (!g_guardVeh) {
+        Log("guard-read: AddVectoredExceptionHandler failed (%lu) - target lookups keep ReadProcessMemory", GetLastError());
+        return;
+    }
+    const LONG t0 = g_guardTrapped;
+    if (const char* why = GuardSelfTest()) {
+        RemoveVectoredExceptionHandler(g_guardVeh);
+        g_guardVeh = nullptr;
+        Log("guard-read: self-test failed (%s) - target lookups keep ReadProcessMemory this session", why);
+        return;
+    }
+    static uint64_t probe[64];
+    for (unsigned i = 0; i < 64; ++i) probe[i] = i * 0x9e3779b97f4a7c15ull;
+    uint64_t sink = 0, v = 0;
+    LARGE_INTEGER f, a, b, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&a);
+    for (unsigned i = 0; i < 20000; ++i) {
+        tz_guard_copy(&probe[i & 63], &v, 8);
+        sink += v;
+    }
+    QueryPerformanceCounter(&b);
+    for (unsigned i = 0; i < 20000; ++i) {
+        RpmRead(reinterpret_cast<uintptr_t>(&probe[i & 63]), &v, 8);
+        sink += v;
+    }
+    QueryPerformanceCounter(&c);
+    const double ns = 1e9 / static_cast<double>(f.QuadPart) / 20000.0;
+    g_guardOn = true;
+    Log("guard-read: on - self-test passed (%ld faults caught: low / non-canonical / no-access / guard page put back / reserved / released), "
+        "direct read %.1f ns vs ReadProcessMemory %.1f ns per 8 bytes (check %llu); only inside target lookups ([safety] fast_read=0 turns it off)",
+        static_cast<long>(g_guardTrapped - t0), static_cast<double>(b.QuadPart - a.QuadPart) * ns, static_cast<double>(c.QuadPart - b.QuadPart) * ns,
+        static_cast<unsigned long long>(sink & 0xff));
+}
+void GuardFront() {
+    if (!g_guardOn || !g_guardVeh) return;
+    PVOID h = AddVectoredExceptionHandler(1, GuardVeh);
+    if (!h) return;
+    RemoveVectoredExceptionHandler(g_guardVeh);
+    g_guardVeh = h;
+}
+void GuardStats(double now) {
+    static double at = 0;
+    static GuardStat last;
+    static LONG trapped0 = 0, fix0 = 0;
+    if (!g_guardOn && !g_gs.reads) return;
+    if (at == 0) at = now;
+    if (now - at < 10.0) return;
+    const uint64_t r = g_gs.reads - last.reads, fl = g_gs.faults - last.faults;
+    if (r) {
+        Log("guard-read: %.1f s: direct reads %llu (failed %llu), checked %llu against ReadProcessMemory: ok / failed differs %llu, bytes differ %llu "
+            "(game writing at that moment); handler caught %ld, guard pages put back %ld%s",
+            now - at, static_cast<unsigned long long>(r), static_cast<unsigned long long>(fl),
+            static_cast<unsigned long long>(g_gs.verified - last.verified), static_cast<unsigned long long>(g_gs.flagMiss - last.flagMiss),
+            static_cast<unsigned long long>(g_gs.byteDiff - last.byteDiff), static_cast<long>(g_guardTrapped - trapped0),
+            static_cast<long>(g_guardPageFix - fix0), g_guardOn ? "" : " (off)");
+    }
+    if (g_guardOn && fl > 5000) {
+        g_guardOn = false;
+        Log("guard-read: %llu failed reads in %.1f s - back to ReadProcessMemory for the rest of this session", static_cast<unsigned long long>(fl), now - at);
+    }
+    last = g_gs;
+    trapped0 = g_guardTrapped;
+    fix0 = g_guardPageFix;
+    at = now;
 }
 uintptr_t Ptr(uintptr_t a) {
     uintptr_t v = 0;
@@ -1771,6 +1970,7 @@ void UnitKeyOf(uintptr_t unit, char* out, size_t n) {
     ReleaseSRWLockShared(&g_unitKeyLock);
 }
 void Enter(uintptr_t mgr) {
+    GuardFront();
     uintptr_t battle = Ptr(mgr + oMgrBattle);
     uintptr_t ui = Ptr(g_base + kGlobalUi);
     uintptr_t battle2 = ui ? Ptr(ui + oUiBattle) : 0;
@@ -3292,6 +3492,7 @@ void MeleeEngineStep(uintptr_t world, uintptr_t hero) {
     MeleeEngineRun(world, hero, reqs, nr);
 }
 void MeleeEngineRun(uintptr_t world, uintptr_t hero, const MeleeReq* reqs, int nr) {
+    HotReads hot_;
     uintptr_t outer = Ptr(hero + 0x58);
     if (!outer || Ptr(outer + 0x440) != world) {
         if (g_mq.logs++ < 8) Log("melee-engine: hero %p world mismatch ([+0x58]=%p [+0x440]=%p, hook world %p) - skipped", (void*)hero,
@@ -5258,16 +5459,14 @@ unsigned UnitEntities(uintptr_t u, uintptr_t* ents, unsigned cap) {
         uintptr_t arr = Ptr(u + l[1]);
         if (cnt < 1 || !Plausible(arr)) continue;
         if (cnt > cap) cnt = cap;
-        SIZE_T got = 0;
-        if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(arr), ents, cnt * 8, &got) || got != cnt * 8) continue;
+        if (!ReadMem(arr, ents, cnt * 8)) continue;
         if (Plausible(ents[0]) && Ptr(ents[0] + oEntUnit) == u) return cnt;
     }
     return 0;
 }
 bool EntPos(uintptr_t e, float* q) {
     float t[3];
-    SIZE_T got = 0;
-    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(e + oEntPos), t, sizeof t, &got) || got != sizeof t) return false;
+    if (!ReadMem(e + oEntPos, t, sizeof t)) return false;
     if (!(std::isfinite(t[0]) && std::isfinite(t[1]) && std::isfinite(t[2]) && std::fabs(t[0]) < 1e6f && std::fabs(t[1]) < 1e6f &&
           std::fabs(t[2]) < 1e6f))
         return false;
@@ -5296,6 +5495,7 @@ void LogUnitLists(uintptr_t battle) {
 }
 void VelStep(uintptr_t battle, const float eye[3], const float fwd[3]) {
     if (!cfg.autoLead || !battle) return;
+    HotReads hot_;
     uint32_t step = 0;
     if (!Rd(battle + 0x64720, step) || step == g_velScanStep) return;
     if (battle != g_velBattle) {
@@ -5337,6 +5537,7 @@ void VelStep(uintptr_t battle, const float eye[3], const float fwd[3]) {
 }
 AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispLag, bool groundOnly, LineHits* line, float hitR, float headSlack,
                 bool liveFoes) {
+    HotReads hot_;
     AimHit h;
     h.dist = range;
     uintptr_t battle = 0;
@@ -5474,6 +5675,7 @@ struct CoverState {
 bool FireBurstCover(const float eye[3], const float fwd[3], const float right[3], float range, float fanDeg, float tick, int cap, bool clip,
                     float extraLead, float directIni, float reactEvery, float fxEvery, float margin,
                     float visFanDeg) {
+    HotReads hot_;
     uintptr_t sb = Ptr(g_base + kGlobalScript);
     uintptr_t battle = sb ? Ptr(sb + oScriptBattle) : 0;
     uintptr_t queue = battle ? Ptr(battle + oBattleCmdQueue) : 0;
@@ -8670,6 +8872,7 @@ void Apply(uintptr_t mgr) {
         ProbeFrame(bp, now);
         VelStep(bp, eye, vFwd);
         FastFireStats(false);
+        GuardStats(now);
     }
     bool held = g_cast.lmb;
     if (vmgame::MeleeActive()) {
@@ -9438,6 +9641,7 @@ DWORD WINAPI InitThread(LPVOID) {
     }
     vmgame::Setup(g_base, g_dir, &Log);
     g_coreOk = true;
+    GuardInit();
     FindCtx ctx{GetCurrentProcessId(), nullptr, 0};
     for (int i = 0; i < 6000 && !ctx.best; ++i) {
         Sleep(100);
