@@ -204,37 +204,3 @@ hfps_cam_update_thunk:
     pop rbx
     ret
     .seh_endproc
-    .globl tz_guard_copy
-    .globl tz_guard_load_q
-    .globl tz_guard_load_b
-    .globl tz_guard_fail
-    .def tz_guard_copy; .scl 2; .type 32; .endef
-tz_guard_copy:
-    cmp r8, 8
-    jb 2f
-1:
-tz_guard_load_q:
-    mov rax, qword ptr [rcx]
-    mov qword ptr [rdx], rax
-    add rcx, 8
-    add rdx, 8
-    sub r8, 8
-    cmp r8, 8
-    jae 1b
-2:
-    test r8, r8
-    jz 4f
-3:
-tz_guard_load_b:
-    mov al, byte ptr [rcx]
-    mov byte ptr [rdx], al
-    inc rcx
-    inc rdx
-    dec r8
-    jnz 3b
-4:
-    mov eax, 1
-    ret
-tz_guard_fail:
-    xor eax, eax
-    ret
