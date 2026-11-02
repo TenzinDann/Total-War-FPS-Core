@@ -197,17 +197,17 @@ const Moveset kSpear = {"m_light_stab", kDef, kExit, static_cast<int>(sizeof kEx
 const Def kGsDef[kActs] = {
     {"idle", "idle", 0.2f, 1.f, 0.f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
     {"draw", "draw", 0.1f, 1.f, 0.8f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
-    {"default", "m_gs_charge", 0.3f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.65f, -1, 0, 0},
+    {"default", "m_gs_charge_chop", 0.3f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy3, 0.65f, -1, 0, 0},
     {"default_left", "m_gs_charge_left", 0.2f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.65f, -1, 0, 0},
     {"default_right", "m_gs_charge_right", 0.2f, 1.f, 0.f, 0, 0, -1, 0, kLight2, kHeavy2, 0.65f, -1, 0, 0},
-    {"(unused)", "m_gs_charge_left", 0.2f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.65f, -1, 0, 0},
+    {"default_chop", "m_gs_charge_chop", 0.2f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy3, 0.65f, -1, 0, 0},
     {"(unused)", "m_gs_charge", 0.3f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.65f, -1, 0, 0},
     {"light_attack_left", "m_gs_light_left", 0.15f, 1.215f, 1.8f, 0.85f, 1.3f, kDefaultRight, 0.65f, -1, -1, 0, kStrikeSweep, 0.53f, 0.5f, 0.3f, 0.65f},
     {"light_attack_right", "m_gs_light_right", 0.15f, 1.215f, 1.86f, 0.85f, 1.15f, kDefaultLeft, 0.7f, -1, -1, 0, kStrikeSweep, 0.5f, 0.5f, 0.3f, 0.6333f},
     {"(unused)", "m_gs_light_left", 0.15f, 1.215f, 1.8f, 0.85f, 1.3f, kDefaultRight, 0.65f, -1, -1, 0, kStrikeSweep, 0.53f, 0.5f, 0.3f, 0.65f},
-    {"heavy_attack_left", "m_gs_heavy_left", 0.1f, 1.f, 2.33f, 0.65f, kInf, kDefaultRight, 0.5f, -1, -1, 0, kStrikeHeavySweep, 0.18f, 0.f, 0.f, 0.2167f},
-    {"heavy_attack_right", "m_gs_heavy_right", 0.1f, 1.f, 2.33f, 0.65f, kInf, kDefaultLeft, 0.5f, -1, -1, 0, kStrikeHeavySweep, 0.18f, 0.f, 0.f, 0.2167f},
-    {"(unused)", "m_gs_heavy_left", 0.1f, 1.f, 2.33f, 0.65f, kInf, kDefaultRight, 0.5f, -1, -1, 0, kStrikeHeavySweep, 0.18f, 0.f, 0.f, 0.2167f},
+    {"heavy_attack_left", "m_gs_heavy_left", 0.1f, 1.f, 2.33f, 0.65f, kInf, kDefaultRight, 0.5f, -1, -1, 0, kStrikeHeavySweep, 0.1157f, 0.f, 0.f, 0.1393f},
+    {"heavy_attack_right", "m_gs_heavy_right", 0.1f, 1.f, 2.33f, 0.65f, kInf, kDefaultLeftHeavy, 0.5f, -1, -1, 0, kStrikeHeavySweep, 0.12f, 0.f, 0.f, 0.1445f},
+    {"heavy_attack_chop", "m_gs_heavy_chop", 0.1f, 1.f, 2.33f, 0.65f, kInf, kDefaultLeft, 0.5f, -1, -1, 0, kStrikeHeavySweep, 0.18f, 0.f, 0.f, 0.2333f},
     {"push", "m_gs_push", 0.0f, 1.f, 0.8f, 0.4f, kInf, kDefault, 0.4f, -1, -1, 0, kStrikeBash, 0.05f, 0.0333f},
     {"light_attack_bopp", "m_gs_bopp", 0.2f, 1.215f, 1.86f, 0.85f, kInf, kDefault, 0.75f, -1, -1, 0, kStrikeSweep, 0.32f, 0.2333f, 0.f, 0.35f},
     {"block", "m_gs_parry_pose", 0.1f, 1.f, 0.f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
@@ -217,10 +217,14 @@ const Exit kGsExit[] = {{"draw", "idle", 0.2f},
                         {"m_gs_light_right", "m_gs_swing_finished", 0.2f},
                         {"m_gs_heavy_left", "m_gs_swing_finished", 0.2f},
                         {"m_gs_heavy_right", "m_gs_swing_finished", 0.2f},
+                        {"m_gs_heavy_chop", "m_gs_swing_finished", 0.2f},
                         {"m_gs_bopp", "m_gs_swing_finished", 0.2f},
                         {"m_gs_swing_finished", "idle", 0.2f},
                         {"m_gs_push", "idle", 0.2f},
-                        {"m_gs_parry_end", "idle", 0.2f}};
+                        {"m_gs_parry_end", "idle", 0.2f},
+                        {"m_gs_parry_end_f2", "idle", 0.2f},
+                        {"m_gs_parry_end_f3", "idle", 0.2f},
+                        {"m_gs_parry_end_f4", "idle", 0.2f}};
 const Impact kGsImpact[kActs] = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
                                  {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash},
                                  {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash},
@@ -488,6 +492,69 @@ int PickVariant(int act, int base) {
     if (g_log) g_log("melee: %s variant %d of %d", Ms().def[act].name, k, n);
     return idx[k];
 }
+int g_blockVar = -1;
+int g_blockForms = 0;
+float g_enterOverride = -1.f;
+constexpr float kBlockPushFade = 0.1f;
+int CycleBlock(int base) {
+    int idx[4] = {base};
+    int n = 1;
+    char nm[64];
+    for (int v = 2; v <= 4; ++v) {
+        snprintf(nm, sizeof nm, "%s_f%d", Ms().def[kBlock].clip, v);
+        int c = Wp().rend.FindClip(nm);
+        if (c < 0) break;
+        idx[n++] = c;
+    }
+    g_blockVar = n > 1 ? (g_blockVar + 1) % n : 0;
+    g_blockForms = n;
+    if (g_log) g_log("melee: block form %d of %d", g_blockVar + 1, n);
+    return idx[g_blockVar];
+}
+int BlockEndClip() {
+    if (!Ms().blockEnd) return -1;
+    if (g_blockVar > 0) {
+        char nm[64];
+        snprintf(nm, sizeof nm, "%s_f%d", Ms().blockEnd, g_blockVar + 1);
+        int c = Wp().rend.FindClip(nm);
+        if (c >= 0) return c;
+    }
+    return Wp().rend.FindClip(Ms().blockEnd);
+}
+bool IsBlockEnd(int clip) {
+    if (clip < 0 || !Ms().blockEnd) return false;
+    if (clip == Wp().rend.FindClip(Ms().blockEnd)) return true;
+    char nm[64];
+    for (int v = 2; v <= 4; ++v) {
+        snprintf(nm, sizeof nm, "%s_f%d", Ms().blockEnd, v);
+        if (clip == Wp().rend.FindClip(nm)) return true;
+    }
+    return false;
+}
+const int kMatchBones[3] = {23, 27, 117};
+void BlockMatchStart(int c, double now) {
+    const int prev = g_an.prev;
+    if (c < 0 || !IsBlockEnd(prev) || g_an.curRate <= 0) return;
+    const float tPrev = static_cast<float>((now - g_an.prevStart) * g_an.prevRate);
+    float cur[9], m[12];
+    for (int i = 0; i < 3; ++i) {
+        if (!Wp().rend.BoneAt(prev, tPrev, kMatchBones[i], m)) return;
+        cur[i * 3] = m[3], cur[i * 3 + 1] = m[7], cur[i * 3 + 2] = m[11];
+    }
+    const float dur = Wp().rend.ClipDuration(c);
+    float best = 1e30f, bt = 0.f;
+    for (float t = 0.f; t <= dur + 1e-4f; t += 1.f / 60.f) {
+        float d = 0.f;
+        for (int i = 0; i < 3; ++i) {
+            if (!Wp().rend.BoneAt(c, t, kMatchBones[i], m)) return;
+            const float dx = m[3] - cur[i * 3], dy = m[7] - cur[i * 3 + 1], dz = m[11] - cur[i * 3 + 2];
+            d += dx * dx + dy * dy + dz * dz;
+        }
+        if (d < best) best = d, bt = t;
+    }
+    g_an.curStart = now - bt / g_an.curRate;
+    if (g_log) g_log("melee: block form %d starts at %.3f s (closest to the lowering pose, %.1f cm)", g_blockVar + 1, bt, std::sqrt(best / 3.f) * 100.f);
+}
 void Go(int next, double now, const char* why, const char* clip = nullptr, float fade = -1.f) {
     if (g_log) g_log("melee: %.3f %s -> %s (%s)", now - g.start, Ms().def[g.act].name, Ms().def[next].name, why);
     if (g_traceN < 256) g_trace[g_traceN++] = next;
@@ -499,13 +566,16 @@ void Go(int next, double now, const char* why, const char* clip = nullptr, float
     g.struck = false;
     g.blkFree = false;
     const Def& nd = Ms().def[next];
+    const float enter = g_enterOverride >= 0.f ? g_enterOverride : nd.enter;
+    g_enterOverride = -1.f;
     int c = clip ? Wp().rend.FindClip(clip) : -1;
     if (c >= 0) {
         MPlay(c, now, fade >= 0.f ? fade : nd.enter, nd.scale);
     } else {
         c = Wp().rend.FindClip(nd.clip);
-        if (c >= 0) c = PickVariant(next, c);
-        MPlay(c >= 0 ? c : g_an.idle, now, nd.enter, nd.scale);
+        if (c >= 0) c = next == kBlock ? CycleBlock(c) : PickVariant(next, c);
+        MPlay(c >= 0 ? c : g_an.idle, now, enter, nd.scale);
+        if (next == kBlock) BlockMatchStart(c, now);
     }
     if (IsAttack(next) || next == kPush) {
         Swing* s = &g_sw[0];
@@ -594,11 +664,15 @@ void MeleeStep(vm::Look& l, double now) {
             if (g_traceN < 256) g_trace[g_traceN++] = kIdle;
             g.act = kIdle;
             g.start = now;
-            int be = ms.blockEnd ? Wp().rend.FindClip(ms.blockEnd) : -1;
+            int be = BlockEndClip();
             if (be >= 0) MPlay(be, now, ms.blockEndFade);
             else PlayRest(now, 0.2);
         } else if (press && t >= 0.2) {
             g.pending = false;
+            if (g_blockForms > 1 && Ms().def[kPush].enter < kBlockPushFade) {
+                g_enterOverride = kBlockPushFade;
+                if (g_log) g_log("melee: push from block form %d, fade %.2f s", g_blockVar + 1, kBlockPushFade);
+            }
             Go(kPush, now, "press while blocking");
         }
     } else if (IsAttack(g.act)) {

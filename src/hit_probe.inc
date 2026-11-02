@@ -45,6 +45,7 @@ struct State {
     uintptr_t world = 0, hero = 0;
     double tPrev = 0, tCur = 0;
     unsigned shotId = 0, shotLogs = 0, killLogs = 0, hitLogs = 0, survLogs = 0;
+    unsigned markLogs = 0;
     bool announced = false, recordChecked = false;
     double tStat = 0;
     unsigned sShots = 0, sUnpaired = 0, sHitUpd[4] = {}, sNoHit = 0, sHitNoHp = 0, sDrops = 0, sKills = 0, sOther = 0, sOtherKills = 0;
@@ -81,6 +82,7 @@ void Touch(Bul& b, uintptr_t e, uint32_t hp) {
     }
 }
 void Summary(bool force) {
+    if (!cfg.hitProbe) return;
     if (!g.sShots && !g.sDrops && !g.sOther) return;
     if (!force && g.tCur - g.tStat < 3.0) return;
     Log("hit-probe: %.1f s: shots %u (click->exec avg %.0f max %.0f ms; unpaired %u) | bullets that hit someone: on update 1 (the step it was fired) %u, "
@@ -107,7 +109,7 @@ void Finish(Bul& b, const char* why) {
     else
         ++g.sNoHit;
     if (b.hits > 0 && !b.hpVics) ++g.sHitNoHp;
-    if (g.shotLogs++ < 150) {
+    if (cfg.hitProbe && g.shotLogs++ < 150) {
         char res[96];
         if (b.firstHitUpd)
             snprintf(res, sizeof res, "hit someone on update %d%s, %d enemies lost hp", b.firstHitUpd,
@@ -122,7 +124,7 @@ void Finish(Bul& b, const char* why) {
     }
 }
 void LogSurvivor(const Vic& v) {
-    if (!v.hits || v.dead || g.survLogs++ >= 60) return;
+    if (!cfg.hitProbe || !v.hits || v.dead || g.survLogs++ >= 60) return;
     char dl[64] = "";
     int n = 0;
     for (int i = 0; i < v.nd && n < 56; ++i) n += snprintf(dl + n, sizeof dl - n, "%s%d", i ? " " : "", v.dmg[i]);
@@ -136,7 +138,7 @@ void Flush(const char* why) {
     g.nb = g.nv = g.nq = 0;
 }
 void OnShot(const AimHit& h, double tClick) {
-    if (!cfg.hitProbe) return;
+    if (!cfg.hitProbe && !vmgame::HitMarkOn()) return;
     AcquireSRWLockExclusive(&g.lock);
     if (g.nq < kMaxShots) g.q[g.nq++] = {tClick, h.ent, h.dist, h.what ? h.what[0] : 'r'};
     ReleaseSRWLockExclusive(&g.lock);
@@ -151,7 +153,7 @@ void OnExit(const char* why) {
     ReleaseSRWLockExclusive(&g.lock);
 }
 void Observe(uintptr_t world, uintptr_t hero) {
-    if (!cfg.hitProbe) return;
+    if (!cfg.hitProbe && !vmgame::HitMarkOn()) return;
     AcquireSRWLockExclusive(&g.lock);
     g.tCur = Now();
     if (world != g.world || hero != g.hero) {
@@ -161,7 +163,7 @@ void Observe(uintptr_t world, uintptr_t hero) {
         g.tPrev = 0;
         g.tStat = g.tCur;
         g.recordChecked = false;
-        if (!g.announced) {
+        if (cfg.hitProbe && !g.announced) {
             g.announced = true;
             Log("hit-probe: on (read-only; [fire] hit_probe=0 turns it off): per shot click->exec, which update hits, hp loss, hits per kill");
         }
@@ -211,6 +213,13 @@ void Observe(uintptr_t world, uintptr_t hero) {
                 if (by >= 0) {
                     Bul& b = g.b[by];
                     ++b.hpVics;
+                    if (hp == 0)
+                        vmgame::HitMark(true);
+                    else if (v.e != b.aim)
+                        vmgame::HitMark(false);
+                    if (g.markLogs++ < 40)
+                        Log("hit-mark: our bullet #%u hit enemy %p for %d hp%s%s", b.id, (void*)v.e, d, hp == 0 ? " - dead -> kill marker" : "",
+                            hp != 0 && v.e == b.aim ? " (aimed at it: white already shown at the shot)" : hp != 0 ? " -> hit marker" : "");
                     ++v.hits;
                     if (v.nd < 8) v.dmg[v.nd++] = d;
                     if (v.tFirstHit <= 0) v.tFirstHit = g.tPrev;
@@ -230,7 +239,7 @@ void Observe(uintptr_t world, uintptr_t hero) {
                             g.sKillFirstSum += kf >= 0 ? kf : kc;
                             ++g.sKillN;
                         }
-                        if (g.killLogs++ < 120) {
+                        if (cfg.hitProbe && g.killLogs++ < 120) {
                             char dl[64] = "";
                             int n = 0;
                             for (int k = 0; k < v.nd && n < 56; ++k) n += snprintf(dl + n, sizeof dl - n, "%s%d", k ? " " : "", v.dmg[k]);
@@ -238,7 +247,7 @@ void Observe(uintptr_t world, uintptr_t hero) {
                                 "killing shot #%u click -> death %.0f ms (its update %d), first hit -> death %.0f ms",
                                 (void*)v.e, v.hp0, v.hpMax, v.hits, dl, v.shots, kf, b.id, kc, b.firstHitUpd, Ms(g.tPrev, v.tFirstHit));
                         }
-                    } else if (g.hitLogs++ < 60) {
+                    } else if (cfg.hitProbe && g.hitLogs++ < 60) {
                         Log("hit-probe: hit %p by shot #%u: -%d hp (%u -> %u), update %d, click -> hit %.0f ms", (void*)v.e, b.id, d, v.hpLast, hp,
                             b.firstHitUpd, b.tClick > 0 ? Ms(g.tPrev, b.tClick) : -1.0);
                     }
@@ -284,13 +293,13 @@ float SegNear(const float q[3], const float a[3], const float b[3], float* t) {
     return std::sqrt(dx * dx + dz * dz);
 }
 void Arm(uintptr_t world, uintptr_t hero, const uintptr_t* ours, unsigned k) {
-    if (!cfg.hitProbe || world != g.world) return;
+    if ((!cfg.hitProbe && !vmgame::HitMarkOn()) || world != g.world) return;
     AcquireSRWLockExclusive(&g.lock);
     LARGE_INTEGER q0, q1;
     QueryPerformanceCounter(&q0);
     for (unsigned i = 0; i < k; ++i) {
         uintptr_t p = ours[i];
-        if (!g.recordChecked) {
+        if (cfg.hitProbe && !g.recordChecked) {
             g.recordChecked = true;
             uintptr_t rec = Ptr(p + oBulRecord);
             Log("hit-probe: first bullet %p record %p, first-person gun projectile record %p (%s)", (void*)p, (void*)rec, (void*)S.fpProj,
