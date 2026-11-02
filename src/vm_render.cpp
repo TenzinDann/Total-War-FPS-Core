@@ -1371,6 +1371,12 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     if (!(s.dofPx >= 0.f && s.dofPx <= 64.f)) s.dofPx = 8.f;
     s.dofAds = IniFloat(ini, L"dof_ads", s.dofAds);
     if (!(s.dofAds >= 0.f && s.dofAds <= 1.f)) s.dofAds = 0.f;
+    s.dofAdsFocus = IniFloat(ini, L"dof_ads_focus", s.dofAdsFocus);
+    if (!(s.dofAdsFocus >= 0.f && s.dofAdsFocus <= 5.f)) s.dofAdsFocus = 0.f;
+    s.dofAdsRamp = IniFloat(ini, L"dof_ads_ramp", s.dofAdsRamp);
+    if (!(s.dofAdsRamp >= 0.f && s.dofAdsRamp <= 5.f)) s.dofAdsRamp = 0.f;
+    s.dofAdsPx = IniFloat(ini, L"dof_ads_px", s.dofAdsPx);
+    if (!(s.dofAdsPx >= 0.f && s.dofAdsPx <= 64.f)) s.dofAdsPx = 0.f;
     s.dofDebug = static_cast<int>(IniFloat(ini, L"dof_debug", static_cast<float>(s.dofDebug)));
     s.shellEject = IniFloat(ini, L"shell_eject", s.shellEject ? 1.f : 0.f) != 0.f;
     s.shellEjectAnim = IniFloat(ini, L"shell_eject_anim", s.shellEjectAnim ? 1.f : 0.f) != 0.f;

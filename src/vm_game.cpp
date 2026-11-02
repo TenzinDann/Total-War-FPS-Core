@@ -2894,7 +2894,10 @@ void DofStep(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11Textur
     ID3D11ShaderResourceView* col = Wp().rend.CopyForDistort(ctx, bb, w, h, &dg);
     ID3D11ShaderResourceView* dep = Wp().rend.DistortDepth();
     if (!col || !dep) return;
-    const vm::DofParams p = {s.dofFocus, s.dofRamp, s.dofBlur * s.dofPx * static_cast<float>(h) / 1080.f, g_dofW, debug};
+    const float a = g_mo.adsW;
+    auto adsMix = [a](float hip, float ads) { return ads > 0.f ? hip + (ads - hip) * a : hip; };
+    const vm::DofParams p = {adsMix(s.dofFocus, s.dofAdsFocus), adsMix(s.dofRamp, s.dofAdsRamp),
+                             s.dofBlur * adsMix(s.dofPx, s.dofAdsPx) * static_cast<float>(h) / 1080.f, g_dofW, debug};
     g_dof.Apply(ctx, rtv, col, dg, dep, w, h, hw, p);
 }
 void LayerPrewarm(IDXGISwapChain* sc, ID3D11Device* dev) {
@@ -3090,7 +3093,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                 dev->GetImmediateContext(&ctx);
                 if (ctx) {
                     g_fprof.Mark("rtv");
-                    const int gpuSlot = (part == kPartGun && !g_uiMidGpuTimer) ? -1 : g_gpu.Begin(dev, ctx);
+                    const int gpuSlot = (part == kPartCross || (part == kPartGun && !g_uiMidGpuTimer)) ? -1 : g_gpu.Begin(dev, ctx);
                     if (part != kPartGun) UiLayerOnPresent(ctx, bb, td.Width, td.Height);
                     g_fprof.Mark("ui");
                     float mx = 0, my = 0, ma = 1;

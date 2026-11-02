@@ -195,6 +195,9 @@ struct Settings {
     float dofHold = 0.3f;
     float dofPx = 8.f;
     float dofAds = 0.f;
+    float dofAdsFocus = 0.f;
+    float dofAdsRamp = 0.f;
+    float dofAdsPx = 0.f;
     int dofDebug = 0;
     int shellFollow = 1;
     int shellCaliber = 556;
