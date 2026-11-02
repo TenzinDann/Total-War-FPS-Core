@@ -1338,6 +1338,8 @@ struct State {
     double tFlyKey = 0, tFlyLandCheck = 0, tFlyLandGiveUp = 0;
     double tFlyHold = 0, tFlyLandIssue = 0, tFlyUp = -100, tFlyUi = 0;
     float flyAlt0 = 0.f;
+    float flyAltLow = 0.f;
+    double tFlyAltLow = 0;
     bool flyHalted = false;
     uintptr_t mount = 0, body = 0;
     bool mountUnit = false, mountMoved = false;
@@ -1461,6 +1463,8 @@ struct FlyUi {
 } g_flyUi = {0, 0, 0, 0, -1, 0, 0};
 constexpr double kFlyWaitSecs = 20.0, kFlyLandMaxSecs = 12.0, kFlyUpSecs = 2.5;
 constexpr float kFlyTouchDown = 0.6f;
+constexpr float kFlySettleMax = 3.0f;
+constexpr double kFlySettleSecs = 0.6;
 volatile LONG g_staleFp = 0;
 volatile LONG g_camBeat = 0;
 bool g_fpDetached = false;
@@ -2168,6 +2172,7 @@ void Enter(uintptr_t mgr) {
     S.tFlyEnter = Now();
     S.flyLand = 0, S.flyKeyed = false;
     S.tFlyHold = 0, S.tFlyLandIssue = 0, S.tFlyUp = -100, S.tFlyUi = 0, S.flyAlt0 = 0.f, S.flyHalted = false;
+    S.flyAltLow = 0.f, S.tFlyAltLow = 0;
     S.flyCmdAir = flyNow || flyAlways || cfg.flyTakeoff;
     InterlockedExchange(&g_reqFly, 0);
     if (S.flyer && cfg.flyTakeoff && !flyAlways) {
@@ -4368,7 +4373,8 @@ bool FlyCanLand(uintptr_t unit) {
 }
 float FlyAltitude() {
     float p[3] = {}, h = 0.f;
-    if (!ReadVec(S.entity + oEntPos, p) || !SurfaceNear(p[0], p[2], p[1], &h)) return -1.f;
+    const uintptr_t body = S.flyMount ? S.flyMount : S.entity;
+    if (!ReadVec(body + oEntPos, p) || !SurfaceNear(p[0], p[2], p[1], &h)) return -1.f;
     return std::fmax(0.f, p[1] - h);
 }
 bool FlyMovesHeld(double now) { return S.flyLand == 2 || (S.flyTakeoff == 1 && now < S.tFlyHold); }
@@ -4380,11 +4386,14 @@ void FlyLandStep(double now) {
     const bool air = FlyAirborne(S.unit);
     if (S.flyLand == 2) {
         const float alt = FlyAltitude();
+        if (alt >= 0.f && alt < S.flyAltLow - 0.05f) S.flyAltLow = alt, S.tFlyAltLow = now;
+        const bool settled = alt >= 0.f && alt < kFlySettleMax && now - S.tFlyAltLow > kFlySettleSecs;
         if (air && now - S.tFlyLandIssue > 1.0) {
             Log("fly: landing called off %.1f s after pressing F - the game has the hero flying again (entity y %.2f)", now - S.tFlyKey, p[1]);
             S.flyLand = 0;
-        } else if (!air && (alt >= 0.f ? alt < kFlyTouchDown : now - S.tFlyLandIssue > 3.0)) {
-            Log("fly: touched down %.1f s after pressing F (entity y %.2f, %.2f m above the ground) - moves resume", now - S.tFlyKey, p[1], alt);
+        } else if (!air && (alt >= 0.f ? alt < kFlyTouchDown || settled : now - S.tFlyLandIssue > 3.0)) {
+            Log("fly: touched down %.1f s after pressing F (entity y %.2f, %s %.2f m above the ground%s) - moves resume", now - S.tFlyKey, p[1],
+                S.flyMount ? "mount" : "hero", alt, alt >= kFlyTouchDown ? ", settled" : "");
             S.flyLand = 0;
         } else if (now >= S.tFlyLandGiveUp) {
             Log("fly: still %.2f m above the ground %.1f s after pressing F (entity y %.2f) - moves resume", alt, now - S.tFlyKey, p[1]);
@@ -4407,6 +4416,7 @@ void FlyLandStep(double now) {
             S.flyCmdAir = false;
             S.tFlyLandIssue = now;
             S.flyAlt0 = std::fmax(kFlyTouchDown, FlyAltitude());
+            S.flyAltLow = S.flyAlt0, S.tFlyAltLow = now;
             S.tFlyLandGiveUp = now + kFlyLandMaxSecs;
             S.tFlyLandCheck = now + 0.1;
             S.moving = false;
