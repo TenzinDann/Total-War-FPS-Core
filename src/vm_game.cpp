@@ -3090,7 +3090,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                 dev->GetImmediateContext(&ctx);
                 if (ctx) {
                     g_fprof.Mark("rtv");
-                    const int gpuSlot = (part == kPartCross || (part == kPartGun && !g_uiMidGpuTimer)) ? -1 : g_gpu.Begin(dev, ctx);
+                    const int gpuSlot = (part == kPartGun && !g_uiMidGpuTimer) ? -1 : g_gpu.Begin(dev, ctx);
                     if (part != kPartGun) UiLayerOnPresent(ctx, bb, td.Width, td.Height);
                     g_fprof.Mark("ui");
                     float mx = 0, my = 0, ma = 1;
