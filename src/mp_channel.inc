@@ -634,7 +634,7 @@ bool SendMelee(int kind, int cat, const float eye[3], const float fwd[3]) {
     if (cat < 0 || cat >= vmgame::kMeleeCats) cat = vmgame::kMeleeCatSword;
     float hx = fwd[0], hz = fwd[2], hl = std::sqrt(hx * hx + hz * hz);
     if (kind < 0 || kind >= vmgame::kStrikeKinds || hl < 1e-3f) return false;
-    const MeleeCatCfg cc = MeleeCatNow(cat);
+    const MeleeCatCfg cc = MeleeCatEff(cat);
     const MeleeKindCfg& k = cc.k[kind];
     uint32_t x[kMeleeFields] = {};
     auto put = [&](int i, float v) { memcpy(&x[i], &v, 4); };
@@ -746,7 +746,7 @@ void Frame() {
         if (SendHero(kKeep, S.unit)) g_tKeep = now;
     }
     const int32_t milli = cfg.shieldGame ? static_cast<int32_t>(vmgame::ShieldBlockFraction() * 20.f + 0.5f) * 50 : 0;
-    const float half = ShieldAngleNowOwn(), yaw = S.yaw;
+    const float half = ShieldAngleNow(), yaw = S.yaw;
     float dy = yaw - g_shSent.yaw;
     while (dy > 3.14159265f) dy -= 6.2831853f;
     while (dy < -3.14159265f) dy += 6.2831853f;
