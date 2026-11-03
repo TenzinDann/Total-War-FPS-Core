@@ -129,6 +129,17 @@ volatile LONG g_wantPlayers = 0, g_listAi = 0, g_listWatch = 0, g_listCalls = 0;
 volatile uintptr_t g_listBattle = 0;
 volatile LONG g_mePassive = 0;
 uintptr_t g_passiveLogBattle = 0;
+uintptr_t g_blockedLogBattle = 0;
+double g_tBlocked = -1;
+void GateBytes(uintptr_t battle, unsigned& g1, unsigned& g2, unsigned& rp) {
+    unsigned char a = 255, b = 255, c = 255;
+    if (battle) {
+        Rd(battle + oBattleNoCmd1, a);
+        Rd(battle + oBattleNoCmd2, b);
+        Rd(battle + oBattleIsReplay, c);
+    }
+    g1 = a, g2 = b, rp = c;
+}
 void SetPlayers(int n, int ai, int watch, int mePassive) {
     const uintptr_t b = ScriptBattle();
     const bool changed = b != g_listBattle || n != g_wantPlayers || ai != g_listAi || watch != g_listWatch || (mePassive != 0) != (g_mePassive != 0);
@@ -145,11 +156,12 @@ void SetPlayers(int n, int ai, int watch, int mePassive) {
 }
 bool PassiveCanCommand(uintptr_t battle) {
     if (!g_mePassive || !battle || g_listBattle != battle || !RealMp(battle)) return false;
-    unsigned char replay = 0;
-    if (Rd(battle + oBattleIsReplay, replay) && replay) return false;
     if (g_passiveLogBattle != battle) {
         g_passiveLogBattle = battle;
-        Log("mp: is_spectator is set on this PC but it is a passive participant - commands go out anyway, as the game's own unit orders do");
+        unsigned g1, g2, rp;
+        GateBytes(battle, g1, g2, rp);
+        Log("mp: command gate on this PC: is_spectator %u, second gate %u, replay flag %u - passive participant, so our commands go out anyway, "
+            "as the game's own unit orders do", g1, g2, rp);
     }
     return true;
 }
@@ -735,11 +747,31 @@ void Frame() {
         g_simWorld = 0;
         ReleaseSRWLockExclusive(&g_heroLock);
         g_psWorld = g_psObj = 0;
+        g_tBlocked = -1;
         if (battle && g_ok) Log("mp: new battle %p - multiplayer path %s", (void*)battle, Mode(battle) ? (cfg.mpForce ? "ON (force_mp_mode)" : "ON") : "off");
+        if (battle && g_ok && Mode(battle)) {
+            unsigned g1, g2, rp;
+            GateBytes(battle, g1, g2, rp);
+            Log("mp: command gate at battle start: is_spectator %u, second gate %u, replay flag %u, command queue %p, passive participant %ld", g1, g2, rp,
+                (void*)Ptr(battle + oBattleCmdQueue), g_listBattle == battle ? (long)g_mePassive : -1L);
+        }
     }
-    if (!battle || !g_ok || !Mode(battle) || !CmdQueue(nullptr)) return;
+    if (!battle || !g_ok || !Mode(battle)) return;
     unsigned char replay = 0;
-    if (Rd(battle + oBattleIsReplay, replay) && replay) return;
+    const bool isReplay = Rd(battle + oBattleIsReplay, replay) && replay;
+    if (!CmdQueue(nullptr) || (isReplay && !PassiveCanCommand(battle))) {
+        const double tb = Now();
+        if (g_tBlocked < 0) g_tBlocked = tb;
+        if (tb - g_tBlocked > 3.0 && g_blockedLogBattle != battle) {
+            g_blockedLogBattle = battle;
+            unsigned g1, g2, rp;
+            GateBytes(battle, g1, g2, rp);
+            Log("mp: our messages cannot go out on this PC (is_spectator %u, second gate %u, replay flag %u, command queue %p, passive participant %ld)", g1,
+                g2, rp, (void*)Ptr(battle + oBattleCmdQueue), g_listBattle == battle ? (long)g_mePassive : -1L);
+        }
+        return;
+    }
+    g_tBlocked = -1;
     const double now = Now();
     if (!g_helloBack && (g_tHello < 0 || now - g_tHello > 5.0)) {
         InterlockedExchange(&g_helloAgain, 0);
@@ -791,8 +823,10 @@ bool EnterAllowed() {
         why = buf;
     }
     if (!why) return true;
-    Log("enter refused: multiplayer path - %s (players heard %ld, list %ld playing / %ld AI / %ld watching, list reports %ld)", why, g_peers, listed,
-        g_listAi, g_listWatch, g_listCalls);
+    unsigned g1, g2, rp;
+    GateBytes(battle, g1, g2, rp);
+    Log("enter refused: multiplayer path - %s (players heard %ld, list %ld playing / %ld AI / %ld watching, list reports %ld; gate %u/%u, replay %u, "
+        "passive participant %d)", why, g_peers, listed, g_listAi, g_listWatch, g_listCalls, g1, g2, rp, mePassive ? 1 : 0);
     return false;
 }
 }

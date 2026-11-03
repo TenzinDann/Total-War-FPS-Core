@@ -2738,7 +2738,7 @@ const MeleeKind kMeleeKinds[vmgame::kStrikeKinds] = {
 void ReadCmdGate(uintptr_t battle, unsigned char& no1, unsigned char& no2) {
     Rd(battle + oBattleNoCmd1, no1);
     Rd(battle + oBattleNoCmd2, no2);
-    if (no1 && !no2 && mp::PassiveCanCommand(battle)) no1 = 0;
+    if ((no1 || no2) && mp::PassiveCanCommand(battle)) no1 = no2 = 0;
 }
 bool MeleeStrike(int kind, const float eye[3], const float fwd[3]) {
     if (kind < 0 || kind >= vmgame::kStrikeKinds) return false;
