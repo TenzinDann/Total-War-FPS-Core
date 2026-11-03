@@ -3,18 +3,18 @@ bool PrintsMatch(const PrintSet& s, const char* what);
 unsigned UnitEntities(uintptr_t u, uintptr_t* ents, unsigned cap);
 bool EntPos(uintptr_t e, float* q);
 namespace mp {
-constexpr uintptr_t kTypeProfiler904 = 0x406cc80, kRegProfiler904 = 0x4adca0, kFnProfilerNop904 = 0x2ece760, kFnRdBool904 = 0x1b9fc58,
-                    kFnRdField904 = 0x1bab24c, kFnRdUnit904 = 0x2eaf754;
+constexpr uintptr_t kTypeProfiler904 = 0x4078820, kRegProfiler904 = 0x4aeb00, kFnProfilerNop904 = 0x2ed5914, kFnRdBool904 = 0x1ba64b8,
+                    kFnRdField904 = 0x1bb1a64, kFnRdUnit904 = 0x2eb69e8;
 constexpr uintptr_t oRdError = 0x8, oBattleStep = 0x64720, oUnitNetId = 0x8, oEntHp = 0xb1c;
 constexpr uintptr_t oBattleIsReplay = 0x645e0;
-const CodePrint kPrints904[] = {{0x2ece760, 0x5b, 0x7b0bf0edb8cc1942ull},
-                                {0x1b9fc58, 0x40, 0xb2aed5fc173f7fc7ull},
-                                {0x1bab24c, 0x5f, 0xad321101fda22522ull},
-                                {0x2eaf754, 0x90, 0x2e660c50610378f1ull},
-                                {0x2f041c0, 0x9a, 0x763166299b328116ull},
-                                {0x668ad4, 0x8b, 0x6767db014f05baaaull},
-                                {0x2eeb29c, 0x53, 0x3fe38d7eb43d316eull},
-                                {0x2eeedd8, 0x38, 0x1e40299fca8b7e54ull}};
+const CodePrint kPrints904[] = {{0x2ed5914, 0x5b, 0x8ab5c3da2be6e375ull},
+                                {0x1ba64b8, 0x40, 0xf53e443a36227a5full},
+                                {0x1bb1a64, 0x5f, 0xad321101fda22522ull},
+                                {0x2eb69e8, 0x90, 0x3273342b4f57fdc1ull},
+                                {0x2f0b580, 0x9a, 0x4f0bc01f3d66b8a6ull},
+                                {0x6665a0, 0x8b, 0x6767db014f05baaaull},
+                                {0x2ef23f4, 0x53, 0xe52286ad3efd55e0ull},
+                                {0x2ef5f30, 0x38, 0x5450808d4e4d8c66ull}};
 constexpr uint32_t kMagic = 0x53504648;
 constexpr uint32_t kProto = 5;
 enum : uint32_t { kHello = 1, kFpsOn = 2, kFpsOff = 3, kKeep = 4, kShield = 5, kMelee = 6, kCheck = 7 };
@@ -791,7 +791,7 @@ bool SendMelee(int kind, int cat, const float eye[3], const float fwd[3]) {
     if (cat < 0 || cat >= vmgame::kMeleeCats) cat = vmgame::kMeleeCatSword;
     float hx = fwd[0], hz = fwd[2], hl = std::sqrt(hx * hx + hz * hz);
     if (kind < 0 || kind >= vmgame::kStrikeKinds || hl < 1e-3f) return false;
-    const MeleeCatCfg cc = MeleeCatNow(cat);
+    const MeleeCatCfg cc = MeleeCatEff(cat);
     const MeleeKindCfg& k = cc.k[kind];
     uint32_t x[kMeleeFields] = {};
     auto put = [&](int i, float v) { memcpy(&x[i], &v, 4); };
@@ -923,7 +923,7 @@ void Frame() {
         if (SendHero(kKeep, S.unit)) g_tKeep = now;
     }
     const int32_t milli = cfg.shieldGame ? static_cast<int32_t>(vmgame::ShieldBlockFraction() * 20.f + 0.5f) * 50 : 0;
-    const float half = ShieldAngleNowOwn(), yaw = S.yaw;
+    const float half = ShieldAngleNow(), yaw = S.yaw;
     float dy = yaw - g_shSent.yaw;
     while (dy > 3.14159265f) dy -= 6.2831853f;
     while (dy < -3.14159265f) dy += 6.2831853f;
