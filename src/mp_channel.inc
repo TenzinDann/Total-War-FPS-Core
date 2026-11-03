@@ -16,11 +16,11 @@ const CodePrint kPrints904[] = {{0x2ece760, 0x5b, 0x7b0bf0edb8cc1942ull},
                                 {0x2eeb29c, 0x53, 0x3fe38d7eb43d316eull},
                                 {0x2eeedd8, 0x38, 0x1e40299fca8b7e54ull}};
 constexpr uint32_t kMagic = 0x53504648;
-constexpr uint32_t kProto = 4;
-enum : uint32_t { kHello = 1, kFpsOn = 2, kFpsOff = 3, kKeep = 4, kShield = 5, kMelee = 6 };
+constexpr uint32_t kProto = 5;
+enum : uint32_t { kHello = 1, kFpsOn = 2, kFpsOff = 3, kKeep = 4, kShield = 5, kMelee = 6, kCheck = 7 };
 const char* MsgName(uint32_t k) {
     return k == kHello ? "HELLO" : k == kFpsOn ? "FPS_ON" : k == kFpsOff ? "FPS_OFF" : k == kKeep ? "KEEP" : k == kShield ? "SHIELD"
-           : k == kMelee ? "MELEE" : "?";
+           : k == kMelee ? "MELEE" : k == kCheck ? "CHECK" : "?";
 }
 enum : uint32_t { kMfDamage = 1, kMfAlwaysHit = 2, kMfReact = 4, kMfEffects = 8 };
 constexpr int kMeleeFields = 18;
@@ -48,6 +48,7 @@ struct Peer {
     uint32_t nonce, proto, digest, exe, features;
 } g_peer[16];
 uintptr_t g_simWorld = 0;
+uint32_t g_simStep = 0;
 struct Hero {
     uintptr_t unit;
     uint32_t from;
@@ -69,7 +70,7 @@ struct VtCopy {
     uintptr_t of;
     uint32_t flags;
     uintptr_t* c;
-} g_vtc[8];
+} g_vtc[32];
 int g_nVtc = 0;
 uintptr_t g_psWorld = 0, g_psObj = 0;
 LONG64 g_psFxQpc = 0;
@@ -219,7 +220,7 @@ uintptr_t* CopyFor(uintptr_t vt, uint32_t f, size_t slots) {
     const uint32_t key = f & kFlHooks;
     for (int i = 0; i < g_nVtc; ++i)
         if (g_vtc[i].of == vt && g_vtc[i].flags == key) return g_vtc[i].c;
-    if (g_nVtc == 8) return nullptr;
+    if (g_nVtc == 32) return nullptr;
     size_t n = slots + 64;
     auto* c = static_cast<uintptr_t*>(VirtualAlloc(nullptr, (n + 1) * sizeof(uintptr_t), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     if (!c) return nullptr;
@@ -254,6 +255,13 @@ void Hook(Hero& h, uint32_t want, const char* why) {
     bool rehook = h.ent == e && h.want == want && mine && Ptr(e) != mine;
     if (h.ent && mine && Ptr(h.ent) == mine) Wr(h.ent, h.origVt);
     uintptr_t vt = Ptr(e);
+    bool ownCopy = false;
+    for (int k = 0; k < g_nVtc; ++k)
+        if (vt == reinterpret_cast<uintptr_t>(g_vtc[k].c + 1)) {
+            vt = g_vtc[k].of;
+            ownCopy = true;
+            break;
+        }
     if (h.ent != e) h.hpInit = false, h.bracket = false, h.exempt = 0, h.triedVt = 0;
     h.ent = e;
     if (!rehook && h.want == want && !h.copy && h.triedVt == vt) return;
@@ -266,8 +274,9 @@ void Hook(Hero& h, uint32_t want, const char* why) {
     h.origVt = vt;
     h.copy = ok ? c : nullptr;
     h.flags = ok ? f : 0;
-    Log("mp: hero unit %p entity %p %s%s: vtable +0x%llx -> %s (wanted %x, hooked knock %d shield %d armor %d, refund %d, stagger on partial %d)",
+    Log("mp: hero unit %p entity %p %s%s%s: vtable +0x%llx -> %s (wanted %x, hooked knock %d shield %d armor %d, refund %d, stagger on partial %d)",
         (void*)h.unit, (void*)e, why, rehook ? " (vtable was changed by the game - re-hooked)" : "",
+        ownCopy ? " (entity still carried our copy - hooked again from its original class)" : "",
         (unsigned long long)(vt > g_base ? vt - g_base : vt),
         ok ? "our copy"
         : !(want & kFlHooks) ? "not hooked (no-knockdown / shield / super armor all switched off by the sender)"
@@ -470,6 +479,108 @@ void Digest(const char* what, uint32_t from, uint32_t seq, uintptr_t unit) {
     Log("mp-digest: step %u %s from %08x #%u unit %d ammo %d/%d no-take %d/%d hp %d pos %.3f,%.3f,%.3f heroes %d%s", step, what, from, seq,
         id, a[0], a[1], f[0], f[1], hp, p[0], p[1], p[2], g_nHero, sh);
 }
+struct ChkRec {
+    uint32_t from, seq, step, n, h[4];
+};
+ChkRec g_chk[64];
+uint32_t g_nChk = 0;
+uint32_t g_ownChk[6] = {};
+double g_tCheck = 0;
+LONG g_chkOk = 0, g_chkBad = 0;
+inline uint32_t ChkMix(uint32_t h, uint32_t v) {
+    for (int i = 0; i < 4; ++i) h = (h ^ ((v >> (8 * i)) & 0xffu)) * 16777619u;
+    return h;
+}
+inline uint32_t ChkBits(float f) {
+    uint32_t u;
+    memcpy(&u, &f, 4);
+    return u;
+}
+void StateHash(uint32_t out[4], uint32_t* n) {
+    uint32_t a = 0, b = 0, c = 0, d = 0;
+    for (int i = 0; i < g_nHero; ++i) {
+        const Hero& h = g_hero[i];
+        int32_t id = 0, hp = 0;
+        Rd(h.unit + oUnitNetId, id);
+        if (h.ent) Rd(h.ent + oEntHp, hp);
+        const uint32_t s = ChkMix(2166136261u, static_cast<uint32_t>(id));
+        uint32_t x = ChkMix(s, h.from);
+        x = ChkMix(x, h.want);
+        x = ChkMix(x, h.flags);
+        x = ChkMix(x, h.copy ? 1u : 0u);
+        x = ChkMix(x, h.early ? 1u : 0u);
+        a += x;
+        uint32_t y = ChkMix(s, static_cast<uint32_t>(h.milli));
+        y = ChkMix(y, ChkBits(h.yaw));
+        y = ChkMix(y, ChkBits(h.angle));
+        b += y;
+        uint32_t z = s;
+        for (int k = 0; k < kCnt; ++k) z = ChkMix(z, static_cast<uint32_t>(h.cnt[k]));
+        z = ChkMix(z, h.refundHp);
+        c += z;
+        uint32_t w = ChkMix(s, static_cast<uint32_t>(hp));
+        for (int k = 0; k < 2; ++k) w = ChkMix(ChkMix(w, static_cast<uint32_t>(h.orig[k][0])), static_cast<uint32_t>(h.orig[k][1]));
+        d += w;
+    }
+    out[0] = a, out[1] = b, out[2] = c, out[3] = d;
+    *n = static_cast<uint32_t>(g_nHero);
+}
+void OwnCheck(uint32_t x[6]) {
+    AcquireSRWLockShared(&g_heroLock);
+    memcpy(x, g_ownChk, sizeof g_ownChk);
+    ReleaseSRWLockShared(&g_heroLock);
+}
+void CheckExec(uint32_t from, uint32_t seq, uint32_t step, const uint32_t x[6]) {
+    Hero dump[16];
+    int nd = 0;
+    ChkRec o = {};
+    bool have = false;
+    uint32_t hs[4], n = 0;
+    AcquireSRWLockExclusive(&g_heroLock);
+    StateHash(hs, &n);
+    ChkRec& r = g_chk[g_nChk++ % 64];
+    r = {from, seq, step, n, {hs[0], hs[1], hs[2], hs[3]}};
+    if (from == g_nonce) {
+        g_ownChk[0] = seq;
+        for (int k = 0; k < 4; ++k) g_ownChk[1 + k] = hs[k];
+        g_ownChk[5] = n;
+    }
+    if (x[0]) {
+        const uint32_t m = g_nChk < 64 ? g_nChk : 64;
+        for (uint32_t k = 0; k < m; ++k)
+            if (g_chk[k].from == from && g_chk[k].seq == x[0]) o = g_chk[k], have = true;
+    }
+    const bool same = !have || (o.h[0] == x[1] && o.h[1] == x[2] && o.h[2] == x[3] && o.h[3] == x[4] && o.n == x[5]);
+    if (!same) {
+        nd = g_nHero;
+        memcpy(dump, g_hero, sizeof(Hero) * nd);
+    }
+    ReleaseSRWLockExclusive(&g_heroLock);
+    if (!have) return;
+    if (same) {
+        const LONG k = InterlockedIncrement(&g_chkOk);
+        if (k % 30 == 1)
+            Log("mp: state check ok vs %08x (its CHECK #%u executed at step %u, %u first-person hero(es)) - %ld checks agree so far, %ld differ", from,
+                x[0], o.step, o.n, k, g_chkBad);
+        return;
+    }
+    const LONG bad = InterlockedIncrement(&g_chkBad);
+    if (bad > 10 && bad % 30) return;
+    Log("mp: STATE CHECK MISMATCH vs %08x - its CHECK #%u executed at step %u: ours heroes/hooks %08x shield %08x counters %08x hp/ammo %08x (%u hero(es)) | "
+        "theirs %08x %08x %08x %08x (%u) - the first-person state on the two PCs differs from that step on (%ld mismatches, %ld agree)",
+        from, x[0], o.step, o.h[0], o.h[1], o.h[2], o.h[3], o.n, x[1], x[2], x[3], x[4], x[5], bad, g_chkOk);
+    for (int i = 0; i < nd; ++i) {
+        const Hero& h = dump[i];
+        int32_t id = 0, hp = 0;
+        Rd(h.unit + oUnitNetId, id);
+        if (h.ent) Rd(h.ent + oEntHp, hp);
+        Log("mp:   our hero %d: unit %d from %08x want %x flags %x hooked %d early %d | shield %d yaw %.3f half %.0f | missile %d/%d melee %d/%d side %d "
+            "stagger %d armor %d knock %d refund %d +%u early %d | hp %d ammo %d/%d no-take %d/%d (now: step %u)",
+            i, id, h.from, h.want, h.flags, h.copy ? 1 : 0, h.early ? 1 : 0, h.milli, h.yaw, h.angle, h.cnt[kCntMissileFull], h.cnt[kCntMissilePart],
+            h.cnt[kCntMeleeFull], h.cnt[kCntMeleePart], h.cnt[kCntSide], h.cnt[kCntStagger], h.cnt[kCntArmor], h.cnt[kCntKnock], h.cnt[kCntRefund],
+            h.refundHp, h.cnt[kCntEarly], hp, h.orig[0][0], h.orig[1][0], h.orig[0][1], h.orig[1][1], step);
+    }
+}
 void Handler(uintptr_t rd, uintptr_t world) {
     auto rdBool = reinterpret_cast<FnRdBool>(g_base + kFnRdBool904);
     auto rdField = reinterpret_cast<FnRdField>(g_base + kFnRdField904);
@@ -485,13 +596,22 @@ void Handler(uintptr_t rd, uintptr_t world) {
     rdField(rd, 4, &seq, 4);
     const uint32_t proto = kind >> 16;
     kind &= 0xffff;
-    if (world != g_simWorld) {
+    uint32_t stepNow = 0;
+    {
+        const uintptr_t sbh = ScriptBattle();
+        if (sbh) Rd(sbh + oBattleStep, stepNow);
+    }
+    if (world != g_simWorld || stepNow < g_simStep) {
         AcquireSRWLockExclusive(&g_heroLock);
         g_simWorld = world;
         g_nHero = 0;
         g_nMm = 0;
+        g_nChk = 0;
+        memset(g_ownChk, 0, sizeof g_ownChk);
         ReleaseSRWLockExclusive(&g_heroLock);
+        g_psWorld = g_psObj = 0;
     }
+    g_simStep = stepNow;
     if (from == g_nonce) {
         double t = -1;
         AcquireSRWLockExclusive(&g_sentLock);
@@ -533,6 +653,14 @@ void Handler(uintptr_t rd, uintptr_t world) {
         Log("mp: HELLO from %08x%s: core %08x exe %08x features %x - %s (players heard %ld, round trip %ld ms)", from,
             from == g_nonce ? " (us)" : "", dg, exe, feat, same ? "same as ours" : "DIFFERENT from ours - first person off in this battle",
             g_peers, g_lagMs);
+        return;
+    }
+    if (kind == kCheck) {
+        uint32_t x[6] = {};
+        for (uint32_t& v : x) rdField(rd, 4, &v, 4);
+        Rd(rd + oRdError, err);
+        if (err) return;
+        CheckExec(from, seq, stepNow, x);
         return;
     }
     uintptr_t unit = 0;
@@ -636,6 +764,8 @@ bool Send(uint32_t kind, uintptr_t unit, const uint32_t* extra = nullptr, int nE
             BsWrite(w, 0x04, &g_digest, 4);
             BsWrite(w, 0x04, &g_exeStamp, 4);
             BsWrite(w, 0x04, &g_features, 4);
+        } else if (kind == kCheck) {
+            for (int j = 0; j < nExtra; ++j) BsWrite(w, 0x04, &extra[j], 4);
         } else {
             BsWrite(w, 0x28, &uid, 4);
             for (int j = 0; j < nExtra; ++j) BsWrite(w, 0x04, &extra[j], 4);
@@ -646,7 +776,8 @@ bool Send(uint32_t kind, uintptr_t unit, const uint32_t* extra = nullptr, int nE
         g_sent[g_sentHead++ % 64] = {seq, Now()};
         ReleaseSRWLockExclusive(&g_sentLock);
     }
-    if (kind != kKeep && kind != kShield) Log("mp: sent %s #%u unit %d - %s", MsgName(kind), seq, uid, ok ? "queued" : "NOT queued (paused?) - retrying");
+    if (kind != kKeep && kind != kShield && kind != kCheck)
+        Log("mp: sent %s #%u unit %d - %s", MsgName(kind), seq, uid, ok ? "queued" : "NOT queued (paused?) - retrying");
     return ok;
 }
 bool SendHero(uint32_t kind, uintptr_t unit) {
@@ -741,12 +872,7 @@ void Frame() {
         ReleaseSRWLockExclusive(&g_peerLock);
         InterlockedExchange(&g_lagN, 0);
         InterlockedExchange(&g_lagMaxMs, 0);
-        AcquireSRWLockExclusive(&g_heroLock);
-        g_nHero = 0;
-        g_nMm = 0;
-        g_simWorld = 0;
-        ReleaseSRWLockExclusive(&g_heroLock);
-        g_psWorld = g_psObj = 0;
+        g_tCheck = 0;
         g_tBlocked = -1;
         if (battle && g_ok) Log("mp: new battle %p - multiplayer path %s", (void*)battle, Mode(battle) ? (cfg.mpForce ? "ON (force_mp_mode)" : "ON") : "off");
         if (battle && g_ok && Mode(battle)) {
@@ -786,6 +912,11 @@ void Frame() {
     while (g_nPend && (g_pend[0].kind == kFpsOn ? SendHero(kFpsOn, g_pend[0].unit) : Send(g_pend[0].kind, g_pend[0].unit))) {
         memmove(g_pend, g_pend + 1, sizeof g_pend[0] * (g_nPend - 1));
         --g_nPend;
+    }
+    if (g_helloBack && !g_nPend && g_nHero > 0 && now - g_tCheck >= 2.0) {
+        uint32_t x[6];
+        OwnCheck(x);
+        if (Send(kCheck, 0, x, 6)) g_tCheck = now;
     }
     if (!(S.active && S.mpMode && S.unit && !g_nPend)) return;
     if (now - g_tKeep >= 1.0) {
