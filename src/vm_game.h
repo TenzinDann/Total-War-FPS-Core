@@ -132,7 +132,7 @@ void SetMpBattle(bool mp);
 bool MeleeActive();
 void MeleeInput(bool attack, bool block);
 int TakeMeleeStrike(int* cat = nullptr);
-void MeleeHitFeedback(int hits);
+void MeleeHitFeedback(int hits, int kills = 0);
 enum LauncherKind { kLauncherFrag, kLauncherIce, kLauncherFlame, kLauncherKinds };
 bool LauncherConfigured();
 UINT LauncherFireKey();

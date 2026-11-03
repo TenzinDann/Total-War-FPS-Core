@@ -387,6 +387,7 @@ struct HitRec {
     bool on;
     double at;
     int hits;
+    int kills;
     ImpactRec r;
 };
 HitRec g_hitQ[8];
@@ -457,16 +458,22 @@ void SwingStep(double now) {
     for (HitRec& h : g_hitQ) {
         if (!h.on || now < h.at) continue;
         h.on = false;
-        if (g_fp) PlayHit(h.hits, h.r, now);
+        if (g_fp) {
+            PlayHit(h.hits, h.r, now);
+            HitMark(h.kills > 0);
+        }
     }
 }
-void HitResult(int hits, const ImpactRec& r, double now) {
-    if (hits <= 0 || r.im.main < 0) return;
+void HitResult(int hits, int kills, const ImpactRec& r, double now) {
+    if (hits <= 0) return;
     HitRec* slot = &g_hitQ[0];
     for (HitRec& h : g_hitQ)
         if (!h.on || (slot->on && h.at < slot->at)) slot = &h;
-    if (slot->on && g_fp) PlayHit(slot->hits, slot->r, now);
-    *slot = {true, r.contact > now ? r.contact : now, hits, r};
+    if (slot->on && g_fp) {
+        PlayHit(slot->hits, slot->r, now);
+        HitMark(slot->kills > 0);
+    }
+    *slot = {true, r.contact > now ? r.contact : now, hits, kills, r};
 }
 unsigned g_variantRng = 0x9e3779b9u;
 int g_lastVariant[kActs] = {};
@@ -622,7 +629,7 @@ void MeleeStep(vm::Look& l, double now) {
         MemoryBarrier();
         InterlockedIncrement(&g_meleeHitQHead);
         ImpactRec r;
-        if (PopImpact(now, r)) HitResult(static_cast<int>(hn), r, now);
+        if (PopImpact(now, r)) HitResult(static_cast<int>(hn & 0xffff), static_cast<int>(hn >> 16), r, now);
     }
     LONG in = g_fp && !g_switching ? g_meleeIn : 0;
     bool atk = (in & 1) != 0, blk = (in & 2) != 0;

@@ -3509,7 +3509,7 @@ void MeleeEngineRun(uintptr_t world, uintptr_t hero, const MeleeReq* reqs, int n
         InterlockedIncrement(&g_mq.strikes);
         InterlockedExchangeAdd(&g_mq.hits, hits + sHits);
         InterlockedExchangeAdd(&g_mq.kills, kills + sKills);
-        if (!rq.quiet) vmgame::MeleeHitFeedback(hits + sHits);
+        if (!rq.quiet) vmgame::MeleeHitFeedback(hits + sHits, kills + sKills);
         if (g_mq.logs++ < 200)
             Log("melee-engine: cat %d kind %d %s (reach %.2f m, arc %.0f, splash %.1f m x%d) (%.0f ms after queue) scanned %u (units %u, %u skipped far, %.2f ms), "
                 "in arc %d (candidates: %d mounts, %d big), hit %d, killed %d, damage [%s] | splash hit %d, killed %d [%s] (forced hits so far %ld, fallback damage so far %ld)",

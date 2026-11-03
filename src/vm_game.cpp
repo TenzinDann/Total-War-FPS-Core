@@ -3981,10 +3981,10 @@ void SetMpBattle(bool mp) {
         RefreshFireRate();
     }
 }
-void MeleeHitFeedback(int hits) {
+void MeleeHitFeedback(int hits, int kills) {
     LONG t = g_meleeHitQTail;
     if (t - g_meleeHitQHead >= 32) return;
-    g_meleeHitQ[t & 31] = hits;
+    g_meleeHitQ[t & 31] = (hits < 0 ? 0 : hits > 0xffff ? 0xffff : hits) | ((kills < 0 ? 0 : kills > 0x7fff ? 0x7fff : kills) << 16);
     MemoryBarrier();
     InterlockedExchange(&g_meleeHitQTail, t + 1);
 }
