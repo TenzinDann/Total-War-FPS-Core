@@ -385,6 +385,7 @@ volatile LONG g_infAmmo = 0;
 volatile LONG g_infTac = 0;
 volatile LONG g_showSelMark = 0;
 volatile LONG g_kbAzerty = 0;
+volatile LONG g_friendlyFire = 0;
 volatile LONG g_mouseSensPct = 100;
 LONG ReadMouseSensPct(const wchar_t* armoryPath, char* raw, size_t rawSize) {
     wchar_t path[MAX_PATH * 2];
@@ -2465,6 +2466,7 @@ void RosterStep(ID3D11Device* dev) {
     char wparams[16] = "";
     char selMark[16] = "";
     char kbAzerty[16] = "";
+    char friendlyFire[16] = "";
     if (FILE* f = _wfopen(path, L"r")) {
         static char line[kMaxModels * 64 + 64];
         while (fgets(line, sizeof line, f)) {
@@ -2479,6 +2481,7 @@ void RosterStep(ID3D11Device* dev) {
             if (!strncmp(line, "wparams=", 8)) snprintf(wparams, sizeof wparams, "%s", line + 8);
             if (!strncmp(line, "sel_marker=", 11)) snprintf(selMark, sizeof selMark, "%s", line + 11);
             if (!strncmp(line, "kb_azerty=", 10)) snprintf(kbAzerty, sizeof kbAzerty, "%s", line + 10);
+            if (!strncmp(line, "friendly_fire=", 14)) snprintf(friendlyFire, sizeof friendlyFire, "%s", line + 14);
         }
         fclose(f);
     }
@@ -2518,6 +2521,11 @@ void RosterStep(ID3D11Device* dev) {
         if (InterlockedExchange(&g_kbAzerty, az) != az || az)
             g_log("keys: %s layout (MCT kb_azerty='%s')%s", az ? "AZERTY" : "QWERTY", kbAzerty,
                   az ? " - move Z/Q/S/D, gun shield A, Alt+) / Alt+= cast slots 11 / 12" : "");
+    }
+    {
+        LONG ff = !strcmp(friendlyFire, "1") ? 1 : 0;
+        if (InterlockedExchange(&g_friendlyFire, ff) != ff || ff)
+            g_log("fire: friendly fire %s (MCT friendly_fire='%s')", ff ? "ON - guns use their <projectile>_ff rows (single player only)" : "off", friendlyFire);
     }
     {
         char sensRaw[32];
@@ -3581,6 +3589,7 @@ bool Reloading() {
 bool InfTacStamina() { return g_infTac != 0; }
 bool ShowSelMarkers() { return g_showSelMark != 0; }
 bool KbAzerty() { return g_kbAzerty != 0; }
+bool FriendlyFire() { return g_friendlyFire != 0 && !g_mpBattle; }
 float MouseSensScale() { return static_cast<float>(g_mouseSensPct) * 0.01f; }
 void AmmoInfo(int* ammo, int* size, bool* reloading, int* reserve) {
     LONG s = g_mag.size, a = g_mag.ammo, r = g_mag.reserve;

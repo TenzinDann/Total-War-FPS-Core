@@ -1,9 +1,5 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <algorithm>
-#include <functional>
-#include <unordered_map>
-#include <vector>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
@@ -71,287 +67,281 @@ template <size_t N>
 constexpr PrintSet Prints(const CodePrint (&a)[N]) {
     return {a, N};
 }
-uintptr_t RxAddr(uintptr_t old);
-extern bool g_rxAuto;
-bool RxPrintsMatch(const PrintSet& s, const char* what);
-struct GameAddrs;
-const GameAddrs* RxTryAuto(DWORD stamp, DWORD size);
-void RxShadowStart();
-CodePrint kNetPrints904[] = {
-    {0x2f8fbd8, 0x2bc, 0xdb3588364c85fa39ull},
-    {0x2f795c0, 0x13f, 0x3bf77016869b3696ull},
-    {0x310d064, 0x71d, 0xe696c21e9c1292a5ull},
-    {0x3110ff0, 0x46, 0x3860f3f85297a94dull},
-    {0x3132178, 0x4e, 0x9306c6b89a050292ull}};
-CodePrint kArrowPrints904[] = {
-    {0x2fd07d0, 0x20e, 0x6ec8c833b7e346d3ull},
-    {0x2fd09e0, 0x3d62, 0x54ddff0da7591a60ull},
-    {0x2fa3f64, 0xdee, 0x10284c53e5b108d0ull},
-    {0x2fa3d54, 0x20e, 0xcdc36317d158b862ull},
-    {0x2f98cc2, 0x34, 0x5f1881ec384120feull}};
-uintptr_t oVisRootArrowMgr = 0x1f0, kVtArrowMgr904 = 0x3ad0490, kFnArrowUpdate904 = 0x2fea7d8, kFnArrowDraw904 = 0x2fd07d0,
-                    kVtArrowVisual2_904 = 0x3ad04b8, oArrowMgrCount = 0x5c, oArrowMgrList = 0x60, oArrowVt2 = 0x10, oArrowSoldierVis = 0xe0,
+const CodePrint kNetPrints904[] = {
+    {0x2f97074, 0x2bc, 0xe42761c2236003efull},
+    {0x2f80a00, 0x13f, 0x897452f9eed8a458ull},
+    {0x31145dc, 0x71d, 0xdfe42f1816bd2f49ull},
+    {0x3118568, 0x46, 0x3860f3f85297a94dull},
+    {0x31396f8, 0x4e, 0x4faf8d67b5c67191ull}};
+const CodePrint kArrowPrints904[] = {
+    {0x2fd7c78, 0x20e, 0xebfc620b5307410bull},
+    {0x2fd7e88, 0x3d62, 0x8c4d17c2e1e18e64ull},
+    {0x2fab434, 0xdee, 0x5210f10be954b21dull},
+    {0x2fab224, 0x20e, 0xc535f25c17078b5dull},
+    {0x2fa015e, 0x34, 0x748ac44e176bf0daull}};
+constexpr uintptr_t oVisRootArrowMgr = 0x1f0, kVtArrowMgr904 = 0x3adad70, kFnArrowUpdate904 = 0x2ff1c8c, kFnArrowDraw904 = 0x2fd7c78,
+                    kVtArrowVisual2_904 = 0x3adb270, oArrowMgrCount = 0x5c, oArrowMgrList = 0x60, oArrowVt2 = 0x10, oArrowSoldierVis = 0xe0,
                     oArrowBone = 0x144, oArrowFlags = 0x151;
-CodePrint kCamPrints904[] = {{0x2f1dc80, 0x40, 0x5b87161bbe161bceull},
-                                   {0x181c8ac, 0x3b, 0xf51ecd15ecf21432ull},
-                                   {0x181c91c, 0x3b, 0x4089e72f9a4161e2ull},
-                                   {0x181c990, 0x71, 0x8a49f5d5f33a03a6ull},
-                                   {0x8d65c0, 0x6, 0x6af6c27548783d34ull},
-                                   {0x8d6560, 0x6, 0x6b2ca27548a59644ull},
-                                   {0x8d6530, 0x6, 0x6b3aba7548b1fc68ull}};
-CodePrint kFirePrints904[] = {{0x2e9b9e4, 0x6e, 0x56cf095dd3517c1bull},
-                                    {0x2eecf1c, 0xcb, 0x6d8db3c33ca24565ull},
-                                    {0x2f1aeaa, 0x20, 0x7b6528ba6af5ed25ull}};
-CodePrint kMovePrints904[] = {{0x2ed8a10, 0x16c, 0x7d6baa5fab37caa4ull},
-                                   {0x2ee7a5c, 0x93, 0x6c4375a2273c602aull},
-                                   {0x2edcfac, 0xd5, 0x80ebc11e086bbf53ull},
-                                   {0x2ea9a94, 0x7f, 0x74bbb1c7bdaedd6full}};
-CodePrint kCmdPrints904[] = {{0x1bb1924, 0x59, 0x7710609ca2576686ull},
-                                  {0x1bca278, 0xd6, 0x4f0781454a0ac847ull},
-                                  {0x1bcd5e4, 0x56, 0xe834d2937f8440fcull},
-                                  {0x668ad4, 0x8b, 0x6767db014f05baaaull},
-                                  {0x2eafa2c, 0x83, 0x3107b7a6b4073cc4ull},
-                                  {0x310cfac, 0xb6, 0xc28718f91f83b034ull}};
-CodePrint kOvrPrints904[] = {{0x2ecfb0c, 0xc7, 0x676e2663dc2d068dull},
-                                  {0x2f6496c, 0x63, 0xb58bc000221fc6a1ull}};
-CodePrint kHaltPrints904[] = {{0x2ecf98c, 0x59, 0xb4942d93f7bdd5a6ull}};
-uintptr_t kRegUnitHalt904 = 0x4af1a0, kFnUnitHaltFactory904 = 0x2ed5da4, kTypeUnitHalt904 = 0x406ca38;
-CodePrint kUnitHaltPrints904[] = {{0x2ed5da4, 0x36, 0xf2992bea123bdfd1ull},
-                                       {0x2eaf754, 0x90, 0x2e660c50610378f1ull},
-                                       {0x2eeedd8, 0x38, 0x1e40299fca8b7e54ull}};
-CodePrint kMpFlagPrints904[] = {{0x2eea97c, 0x57, 0xeb6c5089a78dfbc0ull}};
-CodePrint kTpPrints904[] = {{0x2ecfbd4, 0xb3, 0x1987684e822436bdull},
-                                 {0x2f64f54, 0x5a, 0xe98dc842affae2a9ull},
-                                 {0x2f78b30, 0x167, 0xf7ff13396414fd5bull},
-                                 {0x8f5a70, 0x8, 0x39ed053363d24f18ull}};
-CodePrint kGhostPrints904[] = {{0x2e9e1d0, 0x2a, 0x9a3118e3ad43cf9dull},
-                                     {0x2df5e84, 0x6e, 0xaed63465efc6ed6cull},
-                                     {0x2eef630, 0xde, 0xa7c5c19182e3be3full},
-                                     {0x2ed679c, 0x4a, 0x75204a686fbb6fb9ull},
-                                     {0x2f0fdf0, 0x37, 0x15207b5a295a72fbull}};
-CodePrint kRevealPrints904[] = {
-    {0x2e9e178, 0x2a, 0x13ecfaf02c8144b7ull},
-    {0x2e9d5e4, 0x6e, 0x3806c0c92e018d59ull},
-    {0x2eef54c, 0x68, 0x4f74d03fa523bb47ull},
-    {0x2ed65e8, 0x97, 0x921c3388e6112858ull},
-    {0x2ef0660, 0x118, 0xc1878d4db3962358ull},
-    {0x2f0f0b8, 0x6b, 0xb62bedbb98182291ull},
-    {0x2ebe1c8, 0x53, 0xa099cdf5f0f0e2bcull},
-    {0x2ec93d0, 0x47, 0x14963bd760dd339aull},
-    {0x2ef0778, 0x9c, 0x9ebbd6ecde0e562aull},
-    {0x2ec1620, 0x61, 0xf014451f69278bddull},
-    {0x2ec9418, 0x44, 0x9bb70d30ef8d7834ull},
-    {0x2ef0814, 0x96, 0xca19c7d22e7b75f9ull},
-    {0x2f1c22c, 0x56, 0x8eec25387fe73828ull},
-    {0x2ec9528, 0x47, 0x14baa207e1738e5aull},
-    {0x2ef42e0, 0x66, 0x82e6bda8c15c8d73ull}};
-CodePrint kMeleePrints904[] = {
-    {0x2e9d884, 0x6e, 0xb63e0c8b829b0d0dull},
-    {0x2eef710, 0x6c, 0xc1780c5a13d128ebull},
-    {0x2ed6a64, 0xdd, 0x63a3d8a07e1e48f7ull},
-    {0x2f11074, 0xd8, 0xd1ddb24a3eb5e1d2ull},
-    {0x306e89c, 0x104, 0x4cdfdd85fa044ffaull},
-    {0x301d3b4, 0x45, 0x57523644a9437e11ull},
-    {0x146ff40, 0x50, 0x71341f795387a8ffull},
-    {0x163d90, 0x6c2, 0x053387320a55e20dull}};
-CodePrint kSelMarkPrints904[] = {
-    {0x2fda80c, 0x66, 0x6c528d4f91a98bb7ull},
-    {0x2f9ceb7, 0x21, 0x07582d2c7c603e09ull}};
-CodePrint kUiPrints904[] = {
-    {0x22cb2a8, 0x82, 0xa6ed6737bf2e4e83ull},
-    {0x1bdfb70, 0x12e, 0xd1548a1dc462c4b2ull},
-    {0x1bddb90, 0x132, 0x5d683031b86fce92ull},
-    {0x22ad3dc, 0x3a, 0xde727370bf7134e4ull},
-    {0x2299db0, 0x39, 0xf29e9d11d31b4e86ull},
-    {0x22a7dec, 0x173, 0x832ff62389adf7faull},
-    {0x22d4af8, 0x7f, 0x8ca58464071e59d7ull},
-    {0x22cb32c, 0x3a, 0x8d0e6cf551903783ull},
-    {0x1c38035, 0x58, 0x5c82c655cb828a0eull},
-    {0x1c24144, 0x166, 0xa73b9700c872ececull},
-    {0x1424718, 0x2e, 0x02081a65e0726111ull},
-    {0x1442bc0, 0x41, 0x40b5e72861e3473bull},
-    {0x17b5130, 0x2d, 0xdf19a84528fb6a62ull},
-    {0x6653e8, 0x22, 0x84cc2258d57cb844ull},
-    {0x1299686, 0x1c, 0xd25642c88d35193aull},
-    {0x1c13d80, 0x6b, 0x0d48789a2df9f7ccull},
-    {0x2ffc630, 0x65, 0x6144223e17747cdeull},
-    {0x2ffc4b0, 0x9e, 0x508d76fb65cd23f2ull},
-    {0x1c05dec, 0x1dc, 0xee4400770fc1b978ull},
-    {0x1c27fac, 0x27b, 0x6e682eb009f5c1c0ull},
-    {0x22c8a44, 0x90, 0x77ec91d23d95fe48ull},
-    {0x22c8b00, 0x7f, 0x07eeca7c85c04c90ull},
-    {0x22c8ad4, 0x29, 0xaade64b6ef7da547ull},
-    {0x22ba4dc, 0x99, 0x1b34a4da02df276dull}};
-CodePrint kShotPrints904[] = {
-    {0x2ecfd54, 0x2cb, 0x71908907c3d35b29ull},
-    {0x306afbc, 0x84, 0x61b3d45859cc33c2ull},
-    {0x307ad10, 0x6f, 0xbb653ab7126bcb43ull},
-    {0x306b1a8, 0x8e4, 0x735cc3a5886923b0ull},
-    {0x309b960, 0xe2, 0x2078c949a2740202ull},
-    {0x3253204, 0x390, 0x963dcd7a776dc208ull},
-    {0x305947c, 0x40, 0x3723d2b3015e36c0ull},
-    {0x8d3ca0, 0x3, 0x58389c18233078ffull},
-    {0x2f1ad84, 0x172, 0x00629d11bc269ca9ull},
-    {0x15186c4, 0x2d, 0x568d96aaf3eb0794ull},
-    {0x500c6c, 0xc4, 0x1f11cb2d47ce53e1ull},
-    {0x500294, 0x13, 0xa18aa5532e26f9aeull},
-    {0x4d7960, 0x39, 0xdf066808b9520cc0ull},
-    {0x4d8580, 0x59, 0x78aac2ac213eed1cull}};
-CodePrint kProjLookupPrints904[] = {
-    {0x2f1ad84, 0x172, 0x00629d11bc269ca9ull},
-    {0x15186c4, 0x2d, 0x568d96aaf3eb0794ull},
-    {0x500c6c, 0xc4, 0x1f11cb2d47ce53e1ull},
-    {0x500294, 0x13, 0xa18aa5532e26f9aeull},
-    {0x4d7960, 0x39, 0xdf066808b9520cc0ull},
-    {0x4d8580, 0x59, 0x78aac2ac213eed1cull}};
-CodePrint kMeleeHitPrints904[] = {
-    {0x30a9344, 0xdc, 0x464ba6f56a355778ull},
-    {0x30a8f94, 0x3ad, 0xb30056df6fb0a329ull},
-    {0x30a8ddc, 0x1b6, 0x3f368ba650abe582ull},
-    {0x3250ef0, 0x5d, 0x57ffe749a4a8bd11ull},
-    {0x8fc238, 0x63, 0x59342328bccd2923ull},
-    {0x3255c68, 0x146, 0x24bb7edc29c9ecccull},
-    {0x306dbf0, 0x49, 0x12020d3518b4df41ull},
-    {0x3085114, 0x1b4, 0xd8bfa118ace5cd31ull},
-    {0x3253d8c, 0x656, 0xdc53d4d03a3943f8ull},
-    {0x30676cc, 0x2fd, 0x3f85fad2c739bff5ull},
-    {0x307fb18, 0x9a6, 0x11c52f1a3be95d62ull}};
-uintptr_t kFnMeleeHitCalc904 = 0x30a9344, kFnHitInfoCtor904 = 0x3250ef0, kFnHitInfoDtor904 = 0x8fc238,
-                    kFnKillResolve904 = 0x3253204, kFnCanBeHit904 = 0x306dbf0, kFnHitEffects904 = 0x3085114;
-CodePrint kNoKnockPrints904[] = {
-    {0x325369c, 0x1c8, 0x7c8a1f823c6190dbull},
-    {0x3253864, 0x145, 0x5976029983ed5217ull},
-    {0x32539ac, 0x2da, 0x26345717ef031c0cull},
-    {0x325c70c, 0x62, 0xd2c4dec66c65fbebull}};
-CodePrint kShieldGamePrints904[] = {
-    {0x306b1a8, 0x8e4, 0x735cc3a5886923b0ull},
-    {0x305947c, 0x57, 0x43af29536f3defa7ull},
-    {0x3253d8c, 0x656, 0xdc53d4d03a3943f8ull},
-    {0x32654d0, 0x708, 0xe253d33a7cb2f415ull},
-    {0x307517c, 0x68, 0xc7cbd99e65c01a48ull},
-    {0x306ee40, 0x296, 0xa637304bb565fab0ull},
-    {0x3075b20, 0xa8, 0x24bab350ff394161ull},
-    {0x3252ed0, 0xb1, 0x63f194fe2dc7f0a0ull},
-    {0x310157c, 0x1e, 0x891955780f4d6a5eull},
-    {0x8d3ca0, 0x3, 0x58389c18233078ffull}};
-uintptr_t kVtSoldier904 = 0x3912950, kFnProjHit904 = 0x306b1a8, kFnProjCanHit904 = 0x305947c, kFnRet0Of1c8_904 = 0x8d3ca0,
-                    kFnHitReact904 = 0x307517c, kFnStagger904 = 0x306ee40, kMeleeRet1_904 = 0x3253e70, kMeleeRet2_904 = 0x326565e;
-CodePrint kArmorPrints904[] = {
-    {0x306ee40, 0x296, 0xa637304bb565fab0ull},
-    {0x306b1a8, 0x8e4, 0x735cc3a5886923b0ull},
-    {0x307517c, 0x68, 0xc7cbd99e65c01a48ull}};
-CodePrint kMoraleLockPrints904[] = {
-    {0x3033e40, 0x31, 0x9c69c6976f544645ull},
-    {0x304c190, 0x1cd, 0x618f86e8ee295c36ull}};
-CodePrint kVocalPrints904[] = {
-    {0x30352f8, 0x1a, 0x9244fb1be7bc4eedull},
-    {0x2e2af50, 0x1047, 0xd4cff9c6358a904full},
-    {0x2e8c2e8, 0x568, 0x093abc0c1e7f42e9ull}};
+const CodePrint kCamPrints904[] = {{0x2f250a8, 0x40, 0x5b87161bbe161bceull},
+                                   {0x18227dc, 0x3b, 0xf51ecd15ecf21432ull},
+                                   {0x182284c, 0x3b, 0x4089e72f9a4161e2ull},
+                                   {0x18228c0, 0x71, 0x0113305dcc48fd71ull},
+                                   {0x8dade0, 0x6, 0x6af6c27548783d34ull},
+                                   {0x8dad80, 0x6, 0x6b2ca27548a59644ull},
+                                   {0x8dad50, 0x6, 0x6b3aba7548b1fc68ull}};
+const CodePrint kFirePrints904[] = {{0x2ea2c58, 0x6e, 0xb934464dc814f28aull},
+                                    {0x2ef4074, 0xcb, 0x2c2e8e0921e072c0ull},
+                                    {0x2f222d2, 0x20, 0x0d600108f17e8063ull}};
+const CodePrint kMovePrints904[] = {{0x2edfb14, 0x16c, 0x9d31930178c9d1d7ull},
+                                   {0x2eeebb4, 0x93, 0x50736a3bd8c16350ull},
+                                   {0x2ee40b0, 0xd5, 0xe7af9877aa401a76ull},
+                                   {0x2eb0d08, 0x7f, 0xab6203693fa68ebcull}};
+const CodePrint kCmdPrints904[] = {{0x1bb80a0, 0x59, 0x7710609ca2576686ull},
+                                  {0x1bd09b0, 0xd6, 0x4f0781454a0ac847ull},
+                                  {0x1bd3c84, 0x56, 0xe834d2937f8440fcull},
+                                  {0x6665a0, 0x8b, 0x6767db014f05baaaull},
+                                  {0x2eb6d08, 0x83, 0x76274285df6fe87full},
+                                  {0x3114524, 0xb6, 0x10d1dba4a0be8c6dull}};
+const CodePrint kOvrPrints904[] = {{0x2ed6cac, 0xc7, 0x8f413f5f30f5d2f0ull},
+                                  {0x2f6bde0, 0x63, 0xb58bc000221fc6a1ull}};
+const CodePrint kHaltPrints904[] = {{0x2ed6b2c, 0x59, 0x69c33bc79b222777ull}};
+constexpr uintptr_t kRegUnitHalt904 = 0x4b0000, kFnUnitHaltFactory904 = 0x2edcebc, kTypeUnitHalt904 = 0x40785d8;
+const CodePrint kUnitHaltPrints904[] = {{0x2edcebc, 0x36, 0xf9e628533bb1cf90ull},
+                                       {0x2eb69e8, 0x90, 0x3273342b4f57fdc1ull},
+                                       {0x2ef5f30, 0x38, 0x5450808d4e4d8c66ull}};
+const CodePrint kMpFlagPrints904[] = {{0x2ef1ad4, 0x57, 0xce65f48bb0a3b1baull}};
+const CodePrint kTpPrints904[] = {{0x2ed6d74, 0xb3, 0x4d29210a3ce7666eull},
+                                 {0x2f6c3c8, 0x5a, 0x8539438d8b105b61ull},
+                                 {0x2f7ff70, 0x167, 0x658c511128ce6d86ull},
+                                 {0x8fa2c0, 0x8, 0x39ed053363d24f18ull}};
+const CodePrint kGhostPrints904[] = {{0x2ea5444, 0x2a, 0xb6f8f3b23e5e445full},
+                                     {0x2dfceb4, 0x6e, 0x21344a6efeb1ef73ull},
+                                     {0x2ef6788, 0xde, 0x46d8959be1d025b3ull},
+                                     {0x2edd8a0, 0x4a, 0x5f90c2dadf7dd895ull},
+                                     {0x2f17160, 0x37, 0xa7a8cf13a983ef13ull}};
+const CodePrint kRevealPrints904[] = {
+    {0x2ea53ec, 0x2a, 0x13ecfaf02c8144b7ull},
+    {0x2ea4858, 0x6e, 0xcef1e050665307e6ull},
+    {0x2ef66a4, 0x68, 0xabe40cc33bcb803aull},
+    {0x2edd6ec, 0x97, 0x5c7697a1d9f2b164ull},
+    {0x2ef77b8, 0x118, 0x50921a30435cc8dbull},
+    {0x2f16424, 0x6b, 0x5944ada2b01721a1ull},
+    {0x2ec53d0, 0x53, 0xe92aa4414595857bull},
+    {0x2ed05b0, 0x47, 0x7b698c205e4ea0d9ull},
+    {0x2ef78d0, 0x9c, 0xd3ee9e0fed594e78ull},
+    {0x2ec8828, 0x61, 0x938dd0970b3c6dddull},
+    {0x2ed05f8, 0x44, 0x0ead1c23814a9a7eull},
+    {0x2ef796c, 0x96, 0x0cc35d89b8cf8424ull},
+    {0x2f23654, 0x56, 0x06be5bb1d3d80d8bull},
+    {0x2ed0708, 0x47, 0x77fa6ac0f231c46full},
+    {0x2efb448, 0x66, 0xa06b07c20b6e0d2full}};
+const CodePrint kMeleePrints904[] = {
+    {0x2ea4af8, 0x6e, 0x8c9240b1c92f51b3ull},
+    {0x2ef6868, 0x6c, 0x2009872db4c26b0dull},
+    {0x2eddb68, 0xdd, 0x7d48e83c6f448326ull},
+    {0x2f183d8, 0xd8, 0x2c8879acc6bcf97full},
+    {0x3075dd8, 0x104, 0x66af95456e6274abull},
+    {0x30247bc, 0x45, 0x91e89cad6a825f8bull},
+    {0x14755e0, 0x50, 0x71341f795387a8ffull},
+    {0x163d90, 0x6c2, 0xb36e1e671a5bb837ull}};
+const CodePrint kSelMarkPrints904[] = {
+    {0x2fe1cb4, 0x66, 0x6c528d4f91a98bb7ull},
+    {0x2fa435b, 0x21, 0x07582d2c7c603e09ull}};
+const CodePrint kUiPrints904[] = {
+    {0x22cfc4c, 0x82, 0xef5d40db2447fed9ull},
+    {0x1be61b4, 0x132, 0x5848abfe30d2d3c2ull},
+    {0x1be4218, 0x132, 0x15ac04eef8126177ull},
+    {0x22b1df0, 0x3a, 0xffc6183f1a84d478ull},
+    {0x229e8bc, 0x39, 0x0fcbfe6a964af8bcull},
+    {0x22ac920, 0x173, 0x8a4ac0685cda8d0aull},
+    {0x22d9548, 0x7f, 0x26281ebfc6e09b09ull},
+    {0x22cfcd0, 0x3a, 0x2c00c86af18a2146ull},
+    {0x1c3e531, 0x58, 0x6820e7026f41354bull},
+    {0x1c2a5cc, 0x166, 0xb54b5dc88e5ec94bull},
+    {0x1429ba0, 0x2e, 0xecbdc493d607d963ull},
+    {0x14480ac, 0x41, 0xa83c9bc49263992dull},
+    {0x17badcc, 0x2d, 0x9d2483427260c7e2ull},
+    {0x654974, 0x22, 0xd86b79d8d687d932ull},
+    {0x129ad2e, 0x1c, 0xc66f294a67aee4f3ull},
+    {0x1c1a244, 0x6b, 0xefc4741058e9bb32ull},
+    {0x3003a84, 0x65, 0xd8732aeba237d1c6ull},
+    {0x3003904, 0x9e, 0x3035d5af82c112faull},
+    {0x1c0c34c, 0x1dc, 0xbd14f2aa5de98393ull},
+    {0x1c2e42c, 0x27b, 0xeb65ea70c1bf3e5full},
+    {0x22cd3e4, 0x90, 0x77ec91d23d95fe48ull},
+    {0x22cd4a0, 0x7f, 0x07eeca7c85c04c90ull},
+    {0x22cd474, 0x29, 0xaade64b6ef7da547ull},
+    {0x22bee64, 0x99, 0x875ef9ad4d64b6dcull}};
+const CodePrint kShotPrints904[] = {
+    {0x2ed6ef4, 0x2af, 0x0f853365e563e89aull},
+    {0x307250c, 0x84, 0x61b3d45859cc33c2ull},
+    {0x3082260, 0x6f, 0x1c5e3bff8a66b051ull},
+    {0x30726f8, 0x8e4, 0x005965c07ef4a104ull},
+    {0x30a2ebc, 0xe2, 0xcbf4e50810520bf9ull},
+    {0x325a9c4, 0x390, 0x5e0c8393df5c10bbull},
+    {0x30609f8, 0x40, 0x3723d2b3015e36c0ull},
+    {0x8d84c0, 0x3, 0x58389c18233078ffull},
+    {0x2f221ac, 0x172, 0xedaae7807dfc8feaull},
+    {0x151df34, 0x2d, 0x59756cbf0e4d76a6ull},
+    {0x4e62dc, 0xc4, 0x571c40fed9785cfaull},
+    {0x4e6130, 0x13, 0xa18aa5532e26f9aeull},
+    {0x4f73d0, 0x39, 0xdf066808b9520cc0ull},
+    {0x4f7ff0, 0x59, 0xea8f028e8e452154ull}};
+const CodePrint kProjLookupPrints904[] = {
+    {0x2f221ac, 0x172, 0xedaae7807dfc8feaull},
+    {0x151df34, 0x2d, 0x59756cbf0e4d76a6ull},
+    {0x4e62dc, 0xc4, 0x571c40fed9785cfaull},
+    {0x4e6130, 0x13, 0xa18aa5532e26f9aeull},
+    {0x4f73d0, 0x39, 0xdf066808b9520cc0ull},
+    {0x4f7ff0, 0x59, 0xea8f028e8e452154ull}};
+const CodePrint kMeleeHitPrints904[] = {
+    {0x30b0920, 0xdc, 0x6fa061a484b15350ull},
+    {0x30b0570, 0x3ad, 0xe6fd09f276b5142eull},
+    {0x30b03b8, 0x1b6, 0x31478866bac3e971ull},
+    {0x32586b0, 0x5d, 0x57ffe749a4a8bd11ull},
+    {0x900b9c, 0x63, 0xb8616c8172ded9c4ull},
+    {0x325d428, 0x146, 0x5fc9d3456e39f39aull},
+    {0x307512c, 0x49, 0x0426a39a4b4de53dull},
+    {0x308c658, 0x1b4, 0x72fd994759e3de49ull},
+    {0x325b54c, 0x656, 0xd1f66b981d18b17dull},
+    {0x306ec1c, 0x2fd, 0x802cc5dff5b9001cull},
+    {0x3087068, 0x999, 0x9c6b8f49d96f627bull}};
+constexpr uintptr_t kFnMeleeHitCalc904 = 0x30b0920, kFnHitInfoCtor904 = 0x32586b0, kFnHitInfoDtor904 = 0x900b9c,
+                    kFnKillResolve904 = 0x325a9c4, kFnCanBeHit904 = 0x307512c, kFnHitEffects904 = 0x308c658;
+const CodePrint kNoKnockPrints904[] = {
+    {0x325ae5c, 0x1c8, 0xa7320dee8d6e7b2full},
+    {0x325b024, 0x145, 0x0826de7007b50ac4ull},
+    {0x325b16c, 0x2da, 0x5fca34e65bfbddd9ull},
+    {0x3263f60, 0x62, 0x6bb3f675396c2133ull}};
+const CodePrint kShieldGamePrints904[] = {
+    {0x30726f8, 0x8e4, 0x005965c07ef4a104ull},
+    {0x30609f8, 0x57, 0x43af29536f3defa7ull},
+    {0x325b54c, 0x656, 0xd1f66b981d18b17dull},
+    {0x326cd24, 0x708, 0x7bb48827f291c5baull},
+    {0x307c6cc, 0x68, 0xc7cbd99e65c01a48ull},
+    {0x307637c, 0x296, 0xa81691d86fb3a618ull},
+    {0x307d070, 0xa8, 0xc8bb62f70e1ca17aull},
+    {0x325a690, 0xb1, 0x19c25402efdb6e21ull},
+    {0x3108b34, 0x1e, 0x891955780f4d6a5eull},
+    {0x8d84c0, 0x3, 0x58389c18233078ffull}};
+constexpr uintptr_t kVtSoldier904 = 0x391e300, kFnProjHit904 = 0x30726f8, kFnProjCanHit904 = 0x30609f8, kFnRet0Of1c8_904 = 0x8d84c0,
+                    kFnHitReact904 = 0x307c6cc, kFnStagger904 = 0x307637c, kMeleeRet1_904 = 0x325b630, kMeleeRet2_904 = 0x326ceb2;
+const CodePrint kArmorPrints904[] = {
+    {0x307637c, 0x296, 0xa81691d86fb3a618ull},
+    {0x30726f8, 0x8e4, 0x005965c07ef4a104ull},
+    {0x307c6cc, 0x68, 0xc7cbd99e65c01a48ull}};
+const CodePrint kMoraleLockPrints904[] = {
+    {0x303b224, 0x31, 0x41c21f8c50ddb09eull},
+    {0x3053594, 0x1cd, 0xc103e1a3297c251bull}};
+const CodePrint kVocalPrints904[] = {
+    {0x303c710, 0x1a, 0x9244fb1be7bc4eedull},
+    {0x2e31fe4, 0x1047, 0x02ac8c56c7e4cc5full},
+    {0x2e9355c, 0x568, 0x8c01900d146bc4c6ull}};
 constexpr uintptr_t oUnitVoGroup = 0x3ea4;
 constexpr uint32_t kVoGroupSilent = 0xb744cd04;
-CodePrint kAggroPrints904[] = {
-    {0x2ef045c, 0x3a, 0x088f6732f2da7a66ull},
-    {0x2ef0364, 0x47, 0x97ae22b45236fc06ull},
-    {0x2e9e120, 0x2a, 0xb258d47a050392d0ull},
-    {0x2eef220, 0x64, 0xf7cc40673f07f94dull},
-    {0x2ed82a8, 0x161, 0xb9fd6bbfc251b866ull},
-    {0x2ea92f0, 0x68, 0xf4a40fe567f7a719ull},
-    {0x2df5a24, 0x6e, 0xcaebcada910c3c0aull},
-    {0x2eed600, 0xb0, 0x232219452cb3c735ull},
-    {0x3020c84, 0x6c, 0x39d92f464aa456f5ull},
-    {0x2f37be4, 0x30, 0xbf8797fca15661d1ull}};
-uintptr_t kVtUnitControlCmd904 = 0x3907198, kFnUnitControlWrite904 = 0x2eef220, kFnScriptIssueControl904 = 0x2e9e120;
-uintptr_t kVtAttackUnitCmd904 = 0x3aba528, kFnAttackUnitWrite904 = 0x2eed600, kFnAttackUnitCtor904 = 0x2ea92f0,
-                    kFnIssueAttackUnit904 = 0x2df5a24, kFnCurrentTarget904 = 0x3020c84;
+const CodePrint kAggroPrints904[] = {
+    {0x2ef75b4, 0x3a, 0xafcdd21ef608204eull},
+    {0x2ef74bc, 0x47, 0x8118d0bc63226552ull},
+    {0x2ea5394, 0x2a, 0x79106433fb9c2863ull},
+    {0x2ef6378, 0x64, 0x5f5a7255fe18bf6dull},
+    {0x2edf3ac, 0x161, 0x6747cad50fa4a72bull},
+    {0x2eb0564, 0x68, 0x38ddf91526d60f9cull},
+    {0x2dfca54, 0x6e, 0xdf37a463e9763901ull},
+    {0x2ef4758, 0xb0, 0x78b11b4d8a70626full},
+    {0x302808c, 0x6c, 0x6208b4506fae30d6ull},
+    {0x2f3f044, 0x30, 0xbb4f0d26d2e5cadcull}};
+constexpr uintptr_t kVtUnitControlCmd904 = 0x3912b78, kFnUnitControlWrite904 = 0x2ef6378, kFnScriptIssueControl904 = 0x2ea5394;
+constexpr uintptr_t kVtAttackUnitCmd904 = 0x3ac63b0, kFnAttackUnitWrite904 = 0x2ef4758, kFnAttackUnitCtor904 = 0x2eb0564,
+                    kFnIssueAttackUnit904 = 0x2dfca54, kFnCurrentTarget904 = 0x302808c;
 constexpr uintptr_t oUnitArmy = 0x70, oArmyAiOwned = 0x2a8;
 constexpr int32_t kControlScript = 2;
-CodePrint kAbilityPrints904[] = {
-    {0x2f008d0, 0x27b, 0x594cd05ca9272710ull},
-    {0x2ea94e8, 0xa0, 0x744ebda3b94ebcedull},
-    {0x2e9df94, 0x2a, 0xfebdfc7ea7568f1dull},
-    {0x1bc2ff0, 0x6e, 0x5d2cb85accdf2e34ull},
-    {0x2eed7a8, 0x136, 0x3b941bd6a61e91b8ull},
-    {0x1bccb8c, 0x22, 0xb3fc638559b54daeull},
-    {0x1535340, 0x2d, 0xe8700aef872daaeaull},
-    {0x2ed1478, 0x1b0, 0x5ccc3fdb5f7825f2ull},
-    {0x2f35c64, 0x278, 0xcf324f891c88c2a4ull},
-    {0x3037d78, 0x50c, 0x21c1d1989d8dc5e2ull},
-    {0x2d93918, 0x1ab, 0xe6393eae6bb589caull},
-    {0x2d9334c, 0x77, 0x3f34f133ef2c7aa9ull}};
-uintptr_t kFnAbilityTable904 = 0x1535340, kFnAbilityGroundCtor904 = 0x2ea94e8, kFnAbilityIssue904 = 0x1bc2ff0,
-                    kVtAbilityCmd904 = 0x39071f8, kFnAbilityCmdWrite904 = 0x2eed7a8;
-CodePrint kCharPrints904[] = {
-    {0x1e8392c, 0x25, 0x909bd734bb5f100bull},
-    {0x4d3970, 0x2e, 0xb416bbb3274728dcull},
-    {0x8e2880, 0x0c, 0xf55c7e50acf69be9ull},
-    {0x1e86204, 0x11, 0x8aa88ae5c72a99d6ull}};
+const CodePrint kAbilityPrints904[] = {
+    {0x2f07c9c, 0x27b, 0xffc950ebcb4edab2ull},
+    {0x2eb075c, 0xa0, 0x12a59eba7d7d77abull},
+    {0x2ea5208, 0x2a, 0xecb3f99a2bff0358ull},
+    {0x1bc9740, 0x6e, 0x411c89080d13b62cull},
+    {0x2ef4900, 0x136, 0xa9ed1acba009fc0cull},
+    {0x1bd333c, 0x22, 0x8aad2973af631767ull},
+    {0x153ac48, 0x2d, 0x30452f07e2645d53ull},
+    {0x2ed85fc, 0x1b0, 0x155ed22faa161002ull},
+    {0x2f3d3a4, 0x278, 0x18d98cd2154aee32ull},
+    {0x303f1a8, 0x50c, 0x7eaaa08fbca1e06full},
+    {0x2d9aa64, 0x1ab, 0xd9d9e344258731a1ull},
+    {0x2d9a498, 0x77, 0x8f43b1684ab90d7eull}};
+constexpr uintptr_t kFnAbilityTable904 = 0x153ac48, kFnAbilityGroundCtor904 = 0x2eb075c, kFnAbilityIssue904 = 0x1bc9740,
+                    kVtAbilityCmd904 = 0x3912bd0, kFnAbilityCmdWrite904 = 0x2ef4900;
+const CodePrint kCharPrints904[] = {
+    {0x1e88ffc, 0x25, 0xed521a451a974e44ull},
+    {0x4f34b0, 0x2e, 0xb416bbb3274728dcull},
+    {0x8e70a0, 0x0c, 0xf55c7e50acf69be9ull},
+    {0x1e8b8d4, 0x11, 0x8aa88ae5c72a99d6ull}};
 constexpr uintptr_t oUnitCharDetails = 0x158, oCharKeyStr = 0x4e8, oUiUnitIsGeneral = 0x6fa;
-CodePrint kFlyPrints904[] = {
-    {0x8e2420, 0xc, 0x7a3750e9a30ac0d2ull},
-    {0x8e2430, 0xc, 0x62ce00c3f2a8c2afull},
-    {0x8e2440, 0xc, 0xc7052de21b161035ull},
-    {0x8e2860, 0xc, 0x13d482da9323de80ull},
-    {0x2ea9358, 0x38, 0xf662140a1ee931baull},
-    {0x1e3f410, 0x6e, 0x231ab3a1d31f4b75ull},
-    {0x2ed1160, 0x62, 0x4c0cf35d628b1a09ull},
-    {0x2f4ae00, 0xe5, 0x9df247d2bf9b1367ull}};
-CodePrint kRoutPrints904[] = {
-    {0x2eeb33c, 0x52, 0xe308885f1334b146ull},
-    {0x2eeb570, 0x4b, 0x598a680916059c32ull},
-    {0x30348f0, 0x2f, 0x0fe36b149bafd51full},
-    {0x303482c, 0x53, 0x1dd38af0a1bce2e1ull}};
-uintptr_t kFnUnitRouting904 = 0x30348f0, oUnitMorale = 0x3b30, oMoraleState = 0x40;
+const CodePrint kFlyPrints904[] = {
+    {0x8e6c40, 0xc, 0x7a3750e9a30ac0d2ull},
+    {0x8e6c50, 0xc, 0x62ce00c3f2a8c2afull},
+    {0x8e6c60, 0xc, 0xc7052de21b161035ull},
+    {0x8e7080, 0xc, 0x13d482da9323de80ull},
+    {0x2eb05cc, 0x38, 0x60faa32c0a2188b5ull},
+    {0x1e44e44, 0x6e, 0xf99a02b01c7f7a96ull},
+    {0x2ed82e4, 0x62, 0x77203c564886a781ull},
+    {0x2f52260, 0xe5, 0x08aad1f23d2078c8ull}};
+const CodePrint kRoutPrints904[] = {
+    {0x2ef2494, 0x52, 0xfd03249cb2f2585eull},
+    {0x2ef26c8, 0x4b, 0x4d035abc5d004825ull},
+    {0x303bd08, 0x2f, 0x0fe36b149bafd51full},
+    {0x303bc44, 0x53, 0x1dd38af0a1bce2e1ull}};
+constexpr uintptr_t kFnUnitRouting904 = 0x303bd08, oUnitMorale = 0x3b30, oMoraleState = 0x40;
 constexpr uintptr_t oUiCanFly = 0x70f, oUiAlwaysFly = 0x710, oUiCanToggleFly = 0x711, oUiIsFlying = 0x712;
-uintptr_t kFnFlyCmdCtor904 = 0x2ea9358, kFnFlyCmdIssue904 = 0x1e3f410;
+constexpr uintptr_t kFnFlyCmdCtor904 = 0x2eb05cc, kFnFlyCmdIssue904 = 0x1e44e44;
 bool g_flyOk = false;
-CodePrint kFlyStatePrints904[] = {
-    {0x301e0c0, 0xd2, 0xbbfbba4b2daa7719ull},
-    {0x301c86c, 0xa6, 0x59bb7f64bf36fc5full},
-    {0x3039e89, 0x28, 0x44a5c3a11a7eeec0ull}};
+const CodePrint kFlyStatePrints904[] = {
+    {0x30254c8, 0xd2, 0xbb7d458768d4d884ull},
+    {0x3023c74, 0xa6, 0x0679f279b63fc7b5ull},
+    {0x30412b9, 0x28, 0xf0540a9742e42bd8ull}};
 constexpr uintptr_t oUnitFlyComp = 0x3e30, oFlyCompLanded = 0x8;
-uintptr_t kFnFlyCanChange904 = 0x301c86c;
+constexpr uintptr_t kFnFlyCanChange904 = 0x3023c74;
 bool g_flyStateOk = false;
-CodePrint kFlyCoolPrints904[] = {
-    {0x3039eb7, 0x9, 0xe90c4e9ae5a3399cull},
-    {0x8e2f80, 0xd, 0xea9fd59ef1597da2ull}};
+const CodePrint kFlyCoolPrints904[] = {
+    {0x30412e7, 0x9, 0xe90c4e9ae5a3399cull},
+    {0x8e77a0, 0xd, 0xea9fd59ef1597da2ull}};
 constexpr uintptr_t oFlyCompCooldown = 0xc;
 bool g_flyCoolOk = false;
-CodePrint kWallPrints904[] = {
-    {0x2dc67a8, 0x1ab, 0xb8fa363f9006326full},
-    {0x30b3cf8, 0xa3, 0x73b7107b30625308ull},
-    {0x183327c, 0x3a, 0x0210c7b5522ef8adull},
-    {0x2ddb148, 0x91, 0xec20489e15abcf80ull},
-    {0x2ed623c, 0x13b, 0x43539aee1c8b6d43ull}};
-uintptr_t kFnNavEntryValid904 = 0x30b3cf8, kFnBlockContains904 = 0x183327c;
+const CodePrint kWallPrints904[] = {
+    {0x2dcd8c8, 0x1ab, 0x864f363bb4ab686full},
+    {0x30bb290, 0xa3, 0x73b7107b30625308ull},
+    {0x18391ac, 0x3a, 0xec132a2a67b46b89ull},
+    {0x2de2288, 0x91, 0x1230a3115925a97cull},
+    {0x2edd340, 0x13b, 0x96df1e93918c39cfull}};
+constexpr uintptr_t kFnNavEntryValid904 = 0x30bb290, kFnBlockContains904 = 0x18391ac;
 constexpr uintptr_t oWorldNavEntries = 0x108, oWorldNavGrid = 0x138, oBlkPoly = 0x10, oBlkPlane = 0x6c;
 bool g_wallOk = false;
-CodePrint kBuildPrints904[] = {
-    {0x2db3470, 0x1e0, 0x3c8867f0744bc1a9ull},
-    {0x30a6f80, 0x529, 0xd8d80fffc173bed8ull},
-    {0x2f6eb34, 0xb78, 0xd1396ee29531e84full},
-    {0x316d79c, 0x295, 0x1986cd8c729b5bf0ull},
-    {0x1bc048c, 0xd9, 0xa04e459ecba56bccull}};
-uintptr_t kFnSegQuery904 = 0x2db3470, oWorldCollide = 0x150;
+const CodePrint kBuildPrints904[] = {
+    {0x2dba500, 0x1e0, 0xbd581d30c953d790ull},
+    {0x30ae55c, 0x529, 0x9d2acaf7122667dbull},
+    {0x2f75fa8, 0xb78, 0x786b854f54b2bfd2ull},
+    {0x3174d28, 0x295, 0x987201d1738e21ecull},
+    {0x1bc6bdc, 0xd9, 0xcc3b6d3f26fa1a6cull}};
+constexpr uintptr_t kFnSegQuery904 = 0x2dba500, oWorldCollide = 0x150;
 constexpr uint32_t kBuildMask = 0x4800;
 bool g_buildOk = false;
 bool g_netOk = false;
-CodePrint kGameVolPrints904[] = {
-    {0x5af310, 0x161, 0x0caa95b7b9f64779ull},
-    {0x5aecd4, 0x16, 0x3a3f3a78d580c508ull},
-    {0x5aecec, 0x1b, 0xa5e7a245781999a6ull},
-    {0x1b4836c, 0x16, 0x03a64b3be52a277aull},
-    {0x8c8db4, 0x65, 0xdd8e36b575767c89ull}};
-uintptr_t kGlobalAudioMgr904 = 0x3de7f18, kVtAudioMgr904 = 0x34bdd60, kFnAudioSetOn904 = 0x5aecec, kFnAudioSetVol904 = 0x5aecd4,
-                    kFnAudioSetScale904 = 0x1b4836c;
+const CodePrint kGameVolPrints904[] = {
+    {0x5a1bc8, 0x161, 0xcb2484e5fc0cbc34ull},
+    {0x5a158c, 0x16, 0x3a3f3a78d580c508ull},
+    {0x5a15a4, 0x1b, 0xa3d55c6abf67c7f0ull},
+    {0x1b4ee38, 0x16, 0xea9a5fc90287bce7ull},
+    {0x547158, 0x65, 0x48487c131b6592f1ull}};
+constexpr uintptr_t kGlobalAudioMgr904 = 0x3df34b8, kVtAudioMgr904 = 0x33d9bb8, kFnAudioSetOn904 = 0x5a15a4, kFnAudioSetVol904 = 0x5a158c,
+                    kFnAudioSetScale904 = 0x1b4ee38;
 bool g_gameVolOk = false;
 constexpr uintptr_t oUnitAbilityMgr = 0x3d48, oAbMgrEnd = 0x20, oAbMgrFirst = 0x28, oAbNodeNext = 0x8, oAbNodeDef = 0x70, oAbNodeInst = 0x10;
 constexpr uintptr_t oAbDefId = 0x8, oAbDefWindup = 0x30, oAbDefRange = 0x54, oAbRecId = 0x50;
 constexpr uintptr_t oAbWindSteps = 0x120, oAbCooldown = 0x134, oAbUses = 0xb4, oAbFlags = 0x170;
 const unsigned char kPresentHelper904[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x33,
-                                           0xDB, 0x48, 0x8B, 0xF9, 0x38, 0x1D, 0x07, 0x3E, 0xED, 0x03, 0x48,
-                                           0x8B, 0x09, 0x0F, 0x85, 0x98, 0x9E, 0xCC, 0x00, 0x4C, 0x8B, 0x89,
+                                           0xDB, 0x48, 0x8B, 0xF9, 0x38, 0x1D, 0xC7, 0xF9, 0xEE, 0x03, 0x48,
+                                           0x8B, 0x09, 0x0F, 0x85, 0x66, 0x15, 0xCD, 0x00, 0x4C, 0x8B, 0x89,
                                            0x50, 0x13, 0x00, 0x00, 0x49, 0x8B, 0x01, 0x4C, 0x8B, 0x50, 0x40};
-const unsigned char kGlobalWrite904[] = {0x48, 0x89, 0x05, 0xE9, 0xB4, 0x84, 0x03};
+const unsigned char kGlobalWrite904[] = {0x48, 0x89, 0x05, 0x59, 0x39, 0x81, 0x03};
 struct GameAddrs {
     const char* name;
     DWORD stamp, size;
@@ -373,26 +363,26 @@ struct GameAddrs {
     vmgame::RenderAddrs render;
 };
 const GameAddrs kGames[] = {
-    {"9.0.4", 0x6acec6f4, 0xe029000,
-                0x4480d10, 0x3ab68f0, 0x2f1dc80, 0x181c8ac, 0x181c91c, 0x181c990, 0x8d65c0, 0x8d6560, 0x8d6530,
-                0x4480da0, 0x2e9b9e4, 0x3ab9018, 0x2eecf1c,
-                      0x2f2efc8, 0x2f37be4, 0x2da2cd8, 0x1bcd8ac, 0x2f53ff4, 0x310cfac, 0x2ea9a94, 0x1cae60c, 0x1bc31b0, 0x39072c8,
-                      0x406c798, 0x406cea8, 0x406cd30, 0x4ae020, 0x4adfe0, 0x4ae040, 0x2ecfb0c, 0x2ecf98c, 0x2ecfbd4, 0x668a14,
-     0x668ad4, 0x1bca278, 0x1bcd5e4, 0x1bb1924, 0x2eafa2c, 0x390b5e8, 0x2f78b30,
-                      0x3905f40, 0x2eef630, 0x2e9e1d0,
-                      0x3907288, 0x2eef54c, 0x2e9e178,
-                   0x3907220, 0x2eef710, 0x2e9d884,
-                0x22cb2a8, 0x4480d48, 0x1424718, 0x3d0e380, 0x6653e8, 0x3d0e378,
-                      0x8d3ca0,
-                      0x15186c4, 0x500c6c, 0x500294, 0x4d7960, 0x4d8580,
+    {"9.0.5", 0x6ae2a00b, 0xe53a000,
+                0x448f180, 0x3ac2390, 0x2f250a8, 0x18227dc, 0x182284c, 0x18228c0, 0x8dade0, 0x8dad80, 0x8dad50,
+                0x448f208, 0x2ea2c58, 0x3ac4b48, 0x2ef4074,
+                      0x2f36408, 0x2f3f044, 0x2da9e24, 0x1bd3f4c, 0x2f5b468, 0x3114524, 0x2eb0d08, 0x1cb46bc, 0x1bc9900, 0x3912ca0,
+                      0x4078338, 0x4078a48, 0x40788d0, 0x4aee80, 0x4aee40, 0x4aeea0, 0x2ed6cac, 0x2ed6b2c, 0x2ed6d74, 0x6664e0,
+     0x6665a0, 0x1bd09b0, 0x1bd3c84, 0x1bb80a0, 0x2eb6d08, 0x3916f88, 0x2f7ff70,
+                      0x3911758, 0x2ef6788, 0x2ea5444,
+                      0x3912c60, 0x2ef66a4, 0x2ea53ec,
+                   0x3912be8, 0x2ef6868, 0x2ea4af8,
+                0x22cfc4c, 0x448f1b0, 0x1429ba0, 0x3d19370, 0x654974, 0x3d19368,
+                      0x8d84c0,
+                      0x151df34, 0x4e62dc, 0x4e6130, 0x4f73d0, 0x4f7ff0,
      Prints(kCamPrints904), Prints(kFirePrints904), Prints(kMovePrints904), Prints(kCmdPrints904), Prints(kOvrPrints904),
      Prints(kHaltPrints904), Prints(kTpPrints904), Prints(kGhostPrints904), Prints(kRevealPrints904),
      Prints(kMeleePrints904), Prints(kUiPrints904), Prints(kShotPrints904),
-                   {0x3de7a28, 0x33d6a78, 0x120, 0x582ae4, 0x5acedc, 0x5acf21, 0x59c538, 0x59c69b, 0x1350, kPresentHelper904,
+                   {0x3df2fe0, 0x33e1b30, 0x120, 0x58ff88, 0x59f78c, 0x59f7d1, 0x5df680, 0x58f107, 0x1350, kPresentHelper904,
                 sizeof kPresentHelper904, kGlobalWrite904, sizeof kGlobalWrite904,
-                                                      0x208, 0x583710, 0x4128, 0x1988b7c,
-                                                                 0x3de7ed0, 0x1d0, 0x650, 0x3a15298, 0x1a362e0, 0x16b488, 0x19a6ba9, 0x1a402ae, 0x19404cc,
-                                                                          0x3a0e568, 0x3a0cdb8, 0x1a15804, 0x18c3268, 0x1a159cd, 0x19f4bc4}},
+                                                      0x208, 0x4cc280, 0x4128, 0x198ed5c,
+                                                                 0x3df3480, 0x1d0, 0x650, 0x3a20970, 0x1a3c60c, 0x16b488, 0x19acd11, 0x1a4657e, 0x194684c,
+                                                                          0x3a19fc0, 0x3a18710, 0x1a1b838, 0x18c969c, 0x1a1ba01, 0x19fabe0}},
 };
 const GameAddrs* g_game = nullptr;
 uintptr_t kGlobalUi, kVtCamMgr, kFnCamMgrUpdate, kFnCamSetPos, kFnCamSetTarget, kFnCamSetUp, kFnCamSetFov, kFnCamSetNear,
@@ -1289,6 +1279,8 @@ struct State {
     uintptr_t fpProjAds = 0;
     int32_t fpProjAdsId = -1;
     int projFor = -1;
+    bool projFF = false;
+    bool projFFWant = false;
     int32_t meleeProjId[vmgame::kStrikeKinds] = {-1, -1, -1, -1, -1};
     unsigned meleeStrikes = 0, meleeFailed = 0, strikeLogs = 0;
     bool speedApplied = false;
@@ -1660,6 +1652,21 @@ void HookRenderChild();
 void ShotRestoreSpeed(const char* why);
 bool FireOwner() { return cfg.fireShooter && g_shotOk; }
 uintptr_t FindProjectile(const char* key, int32_t* idOut);
+uintptr_t FindGunProjectile(const char* key, int32_t* idOut, bool* ff) {
+    *ff = false;
+    if (vmgame::FriendlyFire() && key && key[0] && strlen(key) < 96) {
+        char k[104];
+        snprintf(k, sizeof k, "%s_ff", key);
+        int32_t id = -1;
+        const uintptr_t rec = FindProjectile(k, &id);
+        if (rec && id >= 0) {
+            *idOut = id;
+            *ff = true;
+            return rec;
+        }
+    }
+    return FindProjectile(key, idOut);
+}
 void ProbeInit();
 float StepPeriod();
 double LastStepTime();
@@ -2137,6 +2144,7 @@ void Enter(uintptr_t mgr) {
     }
     S.fpProj = 0;
     S.fpProjId = -1;
+    S.projFF = false;
     S.projFor = vmgame::CurrentWeapon();
     for (int32_t& id : S.meleeProjId) id = -1;
     S.strikeLogs = 0;
@@ -2147,15 +2155,16 @@ void Enter(uintptr_t mgr) {
     S.tAimStat = Now();
     const char* wantProj = vmgame::WeaponProjectile(S.projFor)[0] ? vmgame::WeaponProjectile(S.projFor) : cfg.fireProjectile;
     if (g_projLookupOk && wantProj[0]) {
-        S.fpProj = FindProjectile(wantProj, &S.fpProjId);
+        S.projFFWant = vmgame::FriendlyFire();
+        S.fpProj = FindGunProjectile(wantProj, &S.fpProjId, &S.projFF);
         if (S.fpProj && S.fpProjId >= 0) {
             float sp = 0;
             int32_t ap = 0, n = 0;
             Rd(S.fpProj + 0x64, sp);
             Rd(S.fpProj + 0x74, ap);
             Rd(S.fpProj + 0x4c, n);
-            Log("fire: first-person gun projectile '%s' id=%d record %p (speed %.0f, ap %d, per shot %d)", wantProj,
-                S.fpProjId, (void*)S.fpProj, sp, ap, n);
+            Log("fire: first-person gun projectile '%s%s' id=%d record %p (speed %.0f, ap %d, per shot %d)", wantProj,
+                S.projFF ? "_ff (MCT friendly fire)" : "", S.fpProjId, (void*)S.fpProj, sp, ap, n);
         } else {
             S.fpProj = 0;
             int32_t vid = -1;
@@ -2277,7 +2286,7 @@ struct LineHits {
 };
 AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispLag, bool groundOnly = false, LineHits* line = nullptr,
                 float hitR = 0.55f, float headSlack = 0.f, bool liveFoes = false);
-uintptr_t kSimTickCall904 = 0x2dd393f;
+constexpr uintptr_t kSimTickCall904 = 0x2dda9e7;
 const unsigned char kSimTickCallBytes[20] = {0x48, 0x8b, 0x87, 0x30, 0x04, 0x00, 0x00, 0x48, 0x8b, 0x48,
                                              0x58, 0x48, 0x8b, 0x01, 0xff, 0x90, 0xb0, 0x01, 0x00, 0x00};
 constexpr uintptr_t kSimTickSlot = 0x1b0;
@@ -2421,8 +2430,8 @@ bool FastFireReady(uintptr_t battle) {
     QueryPerformanceCounter(&q);
     return q.QuadPart - g_ff.lastTickQpc < g_qpf.QuadPart / 2;
 }
-uintptr_t kPostStepCall904 = 0x2dda892, kPostStepRet904 = 0x2dda8b8, kProjMergeCall904 = 0x30ba92c, kProjMerge904 = 0x132c544,
-                    kProjUpdCall904 = 0x2dda9a7, kProjUpd904 = 0x30ba7a8;
+constexpr uintptr_t kPostStepCall904 = 0x2de19b6, kPostStepRet904 = 0x2de19dc, kProjMergeCall904 = 0x30c1ec4, kProjMerge904 = 0x13319dc,
+                    kProjUpdCall904 = 0x2de1acb, kProjUpd904 = 0x30c1d40;
 const unsigned char kPostStepCallBytes[38] = {0x48, 0x8b, 0x43, 0x08, 0x4c, 0x8b, 0x88, 0x40, 0x04, 0x00, 0x00, 0x8b, 0x83,
                                               0x98, 0x00, 0x00, 0x00, 0x49, 0x8b, 0x89, 0xf0, 0x00, 0x00, 0x00, 0x48, 0x83,
                                               0xc1, 0x58, 0x89, 0x44, 0x24, 0x60, 0x48, 0x8b, 0x01, 0xff, 0x50, 0x10};
@@ -2527,7 +2536,7 @@ bool EarlyFlightActive() {
     QueryPerformanceCounter(&q);
     return q.QuadPart - g_ef.lastQpc < g_qpf.QuadPart / 2;
 }
-uintptr_t kVtOrderVo904 = 0x3ab1da0, kFnOrderVoPost904 = 0x2dd19b0, kFnOrderVoFlush904 = 0x2dca320, oHubOrderVo = 0x818;
+constexpr uintptr_t kVtOrderVo904 = 0x3abcea8, kFnOrderVoPost904 = 0x2dd8a58, kFnOrderVoFlush904 = 0x2dd1440, oHubOrderVo = 0x818;
 constexpr uint32_t kVoOrderMove = 0x6be5e35e, kVoOrderHalt = 0x09dab550;
 struct QuietVo {
     int state = 0;
@@ -2615,8 +2624,8 @@ void QuietVoStop(const char* why) {
         "played; still muting for 1 s",
         why, g_qv.moves, g_qv.halts, g_qv.passed, static_cast<unsigned long>(g_qv.lastPassed));
 }
-uintptr_t kAfterStepCall904 = 0x2dd3618, kAfterStepRet904 = 0x2dd3628, kExecCmdBlock904 = 0x2f041c0, kVtCmdReader904 = 0x3904438,
-                    kProjStep904 = 0x30ba364, oBattleAfterObj = 0x64558, oBattleWorld = 0x440, kAfterStepSlot = 0x288;
+constexpr uintptr_t kAfterStepCall904 = 0x2dda6c0, kAfterStepRet904 = 0x2dda6d0, kExecCmdBlock904 = 0x2f0b580, kVtCmdReader904 = 0x38ccd90,
+                    kProjStep904 = 0x30c18fc, oBattleAfterObj = 0x64558, oBattleWorld = 0x440, kAfterStepSlot = 0x288;
 const unsigned char kAfterStepCallBytes[16] = {0x48, 0x8b, 0x8f, 0x58, 0x45, 0x06, 0x00, 0x48, 0x8b, 0x01, 0xff, 0x90, 0x88, 0x02, 0x00, 0x00};
 struct InstantFire {
     int siteState = 0;
@@ -4767,9 +4776,9 @@ bool InsideStructure(float x, float z, float foot, float up = -1.f) {
     int n = SurfacesAt(x, z, s);
     return StructureOver(s, n, foot, up > 0.f ? up : cfg.stepUp, cfg.stepDown);
 }
-uintptr_t oWorldRegionNet = 0x168, oNetCells = 0x0, oNetShift = 0x10, oNetDim = 0x14, oNetOff = 0x18, oNetMax = 0x1c, oNetScale = 0x2c,
+constexpr uintptr_t oWorldRegionNet = 0x168, oNetCells = 0x0, oNetShift = 0x10, oNetDim = 0x14, oNetOff = 0x18, oNetMax = 0x1c, oNetScale = 0x2c,
                     oNetRegions = 0x50, oRegCount = 0x44, oRegArray = 0x48, oRegPoly = 0x10, oRegSub = 0x18, oRegIdx = 0x3c, oRegBlk = 0x48,
-                    oRegOff = 0xb4, oEdgeNext = 0x10, oEdgeXZ = 0x18, oEdgeFlags = 0x50, kVtRegionSub904 = 0x3ad5ec0, kFnRegionOn904 = 0x3110ff0;
+                    oRegOff = 0xb4, oEdgeNext = 0x10, oEdgeXZ = 0x18, oEdgeFlags = 0x50, kVtRegionSub904 = 0x3ae1788, kFnRegionOn904 = 0x3118568;
 constexpr uint8_t kEdgePortal = 0x2;
 bool NetContains(uintptr_t poly, float x, float z);
 struct RegionNet {
@@ -5255,13 +5264,13 @@ int MoveMode() {
 }
 const char* ModeName(int m) { return m == 0 ? "teleport" : m == 2 ? "entity" : "unit"; }
 bool UnitRide() { return S.flyer || (S.mount && S.mountUnit); }
-uintptr_t kFnBehaviourCtor904 = 0x2ea9ea0, kFnBehaviourIssue904 = 0x1bc3530, oUnitBehaviours = 0x3d1c;
+constexpr uintptr_t kFnBehaviourCtor904 = 0x2eb1114, kFnBehaviourIssue904 = 0x1bc9c80, oUnitBehaviours = 0x3d1c;
 constexpr int kBehaviourSkirmish = 8;
-CodePrint kBehaviourPrints904[] = {{0x2ea9ea0, 0x55, 0xa052bdfcbc794e19ull},
-                                         {0x1bc3530, 0x6e, 0x54532345798ac251ull},
-                                         {0x2ed2ce8, 0xb7, 0xa16cb370f0657711ull},
-                                         {0x2f4ac24, 0x1da, 0x1b0318535307b3e6ull},
-                                         {0x2ee99d0, 0xa0, 0x68c8c0827e84d5f9ull}};
+const CodePrint kBehaviourPrints904[] = {{0x2eb1114, 0x55, 0x887c10f5eb160fb0ull},
+                                         {0x1bc9c80, 0x6e, 0x2e21b7fb436098f7ull},
+                                         {0x2ed9e4c, 0xb7, 0x5e5beb1b277732c2ull},
+                                         {0x2f52084, 0x1da, 0xdb75fbadaeef1383ull},
+                                         {0x2ef0b28, 0xa0, 0x8d3ed1bfa5cbf885ull}};
 bool g_behaviourOk = false;
 constexpr int kBehaviourFireAtWill = 7;
 struct SkirmishOff {
@@ -7361,10 +7370,10 @@ void ProbeFrame(uintptr_t battle, double now) {
         g_dp.lastStep = step;
         g_dp.tLastStep = now;
     }
-    if (kFnIssueCmd == RxAddr(0x2e9b9e4)) {
+    if (kFnIssueCmd == 0x2ea2c58) {
         uint32_t m = 0;
         ++g_dp.samples;
-        if (Rd(g_base + RxAddr(0x3f9e158), m) && m) {
+        if (Rd(g_base + 0x3fa8718, m) && m) {
             ++g_dp.simMark;
             g_dp.simMarkVal = m;
         }
@@ -8965,15 +8974,18 @@ void Apply(uintptr_t mgr) {
             bodies[nb][2] = raw[2] + S.entVel[1] * cfg.fireLookahead;
             ++nb;
         }
-        if (vmgame::CurrentWeapon() != S.projFor && g_projLookupOk) {
+        if ((vmgame::CurrentWeapon() != S.projFor || S.projFFWant != vmgame::FriendlyFire()) && g_projLookupOk) {
             S.projFor = vmgame::CurrentWeapon();
             const char* want = vmgame::WeaponProjectile(S.projFor)[0] ? vmgame::WeaponProjectile(S.projFor) : cfg.fireProjectile;
             int32_t id = -1;
-            uintptr_t rec = want[0] ? FindProjectile(want, &id) : 0;
+            S.projFFWant = vmgame::FriendlyFire();
+            S.projFF = false;
+            uintptr_t rec = want[0] ? FindGunProjectile(want, &id, &S.projFF) : 0;
             S.fpProj = rec && id >= 0 ? rec : 0;
             S.fpProjId = S.fpProj ? id : -1;
             herofx::Track(S.fpProj);
-            Log("fire: weapon %d projectile '%s' -> %s (id %d)", S.projFor, want, S.fpProj ? "found" : "NOT FOUND (hero's own)", S.fpProjId);
+            Log("fire: weapon %d projectile '%s%s' -> %s (id %d)", S.projFor, want, S.projFF ? "_ff (MCT friendly fire)" : "",
+                S.fpProj ? "found" : "NOT FOUND (hero's own)", S.fpProjId);
             LookupFocusProjectile();
         }
         float sdirs[16][3], srange = 0.f;
@@ -9454,7 +9466,6 @@ bool ForeignHooksOnly(const CodePrint& cp, const char* what, size_t idx, size_t 
     return k > 0;
 }
 bool PrintsMatch(const PrintSet& s, const char* what) {
-    if (g_rxAuto) return RxPrintsMatch(s, what);
     for (size_t i = 0; i < s.n; ++i)
         if (!CodeMatches(s.p[i]) && !ForeignHooksOnly(s.p[i], what, i + 1, s.n)) {
             Log("%s: code fingerprint %zu/%zu mismatch at +0x%llx (len 0x%llx)", what, i + 1, s.n,
@@ -9473,7 +9484,6 @@ bool VerifyGame() {
     const GameAddrs* game = nullptr;
     for (const GameAddrs& a : kGames)
         if (a.stamp == stamp && a.size == size) game = &a;
-    if (!game) game = RxTryAuto(stamp, size);
     if (!game) {
         Log("Warhammer3.exe version not supported: stamp=0x%08lX size=0x%lX (this build knows %s 0x%08lX/0x%lX); "
             "module inactive - the game was probably updated, addresses need porting",
@@ -9687,7 +9697,6 @@ DWORD WINAPI InitThread(LPVOID) {
 #endif
     QueryPerformanceFrequency(&g_qpf);
     if (!VerifyGame()) return 0;
-    RxShadowStart();
     LoadConfig();
     if (!cfg.enabled) {
         Log("disabled by tenzin_fps.ini");
@@ -10037,7 +10046,7 @@ void MountHideRestore(const char* why) {
     h = HideSelf();
     g_hideMountEnt = 0;
 }
-uintptr_t kFadeTestSite904 = 0x2fd73ff, kFadeCallSite904 = 0x2fd7419, kFnFade904 = 0x3000e94, oVisMgrFlags = 0x75a;
+constexpr uintptr_t kFadeTestSite904 = 0x2fde8a7, kFadeCallSite904 = 0x2fde8c1, kFnFade904 = 0x30082e8, oVisMgrFlags = 0x75a;
 constexpr unsigned char kFadeBit = 0x08;
 struct MountFade {
     int state = 0;
@@ -10218,7 +10227,7 @@ bool ArrowHook(uintptr_t battle, uintptr_t mgr) {
     if (vt != g_base + kVtArrowMgr904 || Ptr(vt + 8) != g_base + kFnArrowDraw904 || !CodeRange(&lo, &hi)) {
         if (!g_arrow.warned) {
             g_arrow.warned = true;
-            Log("arrows: arrow visual manager %p vtable %p / [+8] %p not the 9.0.4 ones - stuck arrows stay visible", (void*)mgr, (void*)vt,
+            Log("arrows: arrow visual manager %p vtable %p / [+8] %p not the 9.0.5 ones - stuck arrows stay visible", (void*)mgr, (void*)vt,
                 (void*)(vt ? Ptr(vt + 8) : 0));
         }
         return false;
@@ -10770,6 +10779,3 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
     return TRUE;
 }
 #endif
-namespace {
-#include "autoadapt_glue.inc"
-}
