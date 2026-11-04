@@ -11,7 +11,7 @@ struct State {
     int keepFx = -1;
     volatile LONG seen = 0, muted = 0, mismatch = 0;
 } g;
-constexpr uintptr_t kVtDispatcher904 = 0x3abbff0, kFnBroadcast904 = 0x2dd8008;
+uintptr_t kVtDispatcher904 = 0x3ab1c08, kFnBroadcast904 = 0x2dd0f60;
 constexpr uintptr_t oEvRecord = 0x00, oEvShooter = 0x08, oEvByEntity = 0x34;
 bool Ours(uintptr_t rec) {
     LONG n = g.nProjs;
@@ -61,7 +61,7 @@ void LogListeners(uintptr_t lis) {
 bool Install(uintptr_t battle, uintptr_t heroEntity, uintptr_t projRecord) {
     if (g.keepFx < 0) {
         wchar_t ini[MAX_PATH];
-        swprintf(ini, MAX_PATH, L"%ls\\%ls", g_dir, MainIniName());
+        swprintf(ini, MAX_PATH, L"%ls\\tenzin_fps.ini", g_dir);
         g.keepFx = GetPrivateProfileIntW(L"fire", L"hero_weapon_fx", 0, ini) != 0;
     }
     if (g.keepFx) {
@@ -78,7 +78,7 @@ bool Install(uintptr_t battle, uintptr_t heroEntity, uintptr_t projRecord) {
     bool ours = g.vtCopy && vt == reinterpret_cast<uintptr_t>(g.vtCopy + 1);
     uintptr_t realVt = ours ? g.vtCopyOf : vt;
     if (realVt != g_base + kVtDispatcher904 || Ptr(realVt + 0x10) != g_base + kFnBroadcast904) {
-        Log("hero-fx: dispatcher vtable +%llx / [+0x10] +%llx not the 9.0.5 ones (+%llx / +%llx) - not hooking",
+        Log("hero-fx: dispatcher vtable +%llx / [+0x10] +%llx not the 9.0.4 ones (+%llx / +%llx) - not hooking",
             (unsigned long long)(realVt - g_base), (unsigned long long)(Ptr(realVt + 0x10) - g_base), (unsigned long long)kVtDispatcher904,
             (unsigned long long)kFnBroadcast904);
         return false;
