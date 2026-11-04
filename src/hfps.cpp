@@ -492,6 +492,13 @@ bool g_ovrOk = false, g_haltOk = false;
 bool g_unitHaltOk = false;
 bool g_mpFlagOk = false;
 constexpr uintptr_t oEntActivity = 0x324;
+namespace kd {
+constexpr uint32_t kStateFirst = 14, kStateLast = 17;
+constexpr float kLyingR = 1.2f;
+constexpr float kLyingLo = -0.3f;
+constexpr float kLyingHi = 1.0f;
+constexpr float kAimUp = 0.4f;
+}
 struct EnableCmd {
     uintptr_t vt;
     uintptr_t unit;
@@ -623,6 +630,7 @@ struct Config {
     float aggroRadius = 60.f, aggroRelease = 80.f, aggroHitHold = 20.f, aggroInterval = 2.f;
     int aggroMax = 4;
     bool noKnock = true;
+    bool knockedDamage = true;
     bool superArmor = true;
     bool heroesOnly = true;
     bool silentHalt = true;
@@ -973,6 +981,7 @@ void LoadConfig() {
     Log("aggro: enabled=%d radius=%.0f release_radius=%.0f max_units=%d hit_hold=%.0f interval=%.1f", cfg.aggro, cfg.aggroRadius,
         cfg.aggroRelease, cfg.aggroMax, cfg.aggroHitHold, cfg.aggroInterval);
     cfg.noKnock = GetPrivateProfileIntW(L"hero", L"no_knockdown", 1, ini) != 0;
+    cfg.knockedDamage = GetPrivateProfileIntW(L"hero", L"knocked_damage", 1, ini) != 0;
     cfg.superArmor = GetPrivateProfileIntW(L"hero", L"super_armor", 1, ini) != 0;
     cfg.heroesOnly = GetPrivateProfileIntW(L"hero", L"heroes_only", 1, ini) != 0;
     cfg.silentHalt = GetPrivateProfileIntW(L"move", L"silent_halt", 1, ini) != 0;
@@ -2273,6 +2282,8 @@ struct AimHit {
     float vel[2] = {0, 0};
     float pos[3] = {0, 0, 0};
     float off = 0;
+    uint32_t kState = 0;
+    bool kLying = false;
     unsigned units = 0, ents = 0;
     unsigned snapCulled = 0;
 };
@@ -2284,6 +2295,148 @@ struct LineHits {
     float vel[kMax][2];
     float pos[kMax][3];
 };
+bool EntPos(uintptr_t e, float* q);
+namespace kd {
+inline bool KnockedState(uint32_t a) { return a >= kStateFirst && a <= kStateLast; }
+inline uint32_t State(uintptr_t e) {
+    uint32_t a = 0;
+    return Rd(e + oEntActivity, a) ? a : 0;
+}
+inline bool Knocked(uintptr_t e) { return KnockedState(State(e)); }
+inline bool LayerOk(uintptr_t e, uint32_t l6c, uint32_t heroL6c, bool mpStrike) {
+    if (l6c & heroL6c & 2) return true;
+    return !mpStrike && cfg.knockedDamage && (heroL6c & 2) && Knocked(e);
+}
+inline float RayCyl(const float eye[3], const float fwd[3], float cx, float cz, float r, float ylo, float yhi, float tmin, float tmax) {
+    float lo = tmin, hi = tmax;
+    const float dx = eye[0] - cx, dz = eye[2] - cz;
+    const float a = fwd[0] * fwd[0] + fwd[2] * fwd[2], b = dx * fwd[0] + dz * fwd[2], c = dx * dx + dz * dz - r * r;
+    if (a < 1e-8f) {
+        if (c > 0.f) return -1.f;
+    } else {
+        const float disc = b * b - a * c;
+        if (disc < 0.f) return -1.f;
+        const float s = std::sqrt(disc), t0 = (-b - s) / a, t1 = (-b + s) / a;
+        if (t0 > lo) lo = t0;
+        if (t1 < hi) hi = t1;
+    }
+    if (std::fabs(fwd[1]) < 1e-8f) {
+        if (eye[1] < ylo || eye[1] > yhi) return -1.f;
+    } else {
+        float t0 = (ylo - eye[1]) / fwd[1], t1 = (yhi - eye[1]) / fwd[1];
+        if (t0 > t1) {
+            const float x = t0;
+            t0 = t1;
+            t1 = x;
+        }
+        if (t0 > lo) lo = t0;
+        if (t1 < hi) hi = t1;
+    }
+    return lo < hi ? lo : -1.f;
+}
+struct Pend {
+    uintptr_t e;
+    uint32_t hp0;
+    double t;
+    unsigned id;
+    bool lying;
+};
+struct Diag {
+    volatile LONG meleeHits = 0, meleeKills = 0, meleeDmg = 0, meleeWas = 0, flameHits = 0, flameKills = 0, flameDmg = 0, flameWas = 0;
+    volatile LONG simLogs = 0;
+    unsigned shots = 0, lying = 0, lost = 0, noLoss = 0, gunLogs = 0, okLogs = 0, failLogs = 0, id = 0;
+    Pend p[16];
+    int np = 0;
+    uintptr_t battle = 0;
+    double tSum = 0;
+    bool announced = false;
+} g;
+constexpr unsigned kGunLogs = 12, kFailLogs = 40;
+constexpr LONG kSimLogs = 24;
+constexpr double kCheckSec = 0.6;
+void OnGunShot(const AimHit& h, const float launch[3], const float aim[3]) {
+    ++g.shots;
+    if (h.kLying) ++g.lying;
+    const unsigned id = ++g.id;
+    uint32_t hp = 0, hpMax = 0, l6c = 0, l70 = 0;
+    float hgt = 0.f, rad = 0.f, o94 = 0.f, o98 = 0.f, q[3] = {0.f, 0.f, 0.f};
+    int16_t yaw = 0;
+    Rd(h.ent + 0xb1c, hp), Rd(h.ent + 0xb18, hpMax), Rd(h.ent + 0x6c, l6c), Rd(h.ent + 0x70, l70);
+    Rd(h.ent + 0x9c, hgt), Rd(h.ent + 0xa0, rad), Rd(h.ent + 0x94, o94), Rd(h.ent + 0x98, o98), Rd(h.ent + 0xb0, yaw);
+    EntPos(h.ent, q);
+    if (g.gunLogs++ < kGunLogs)
+        Log("knocked: shot #%u at %p state %u hp %u/%u l6c 0x%x l70 0x%x | %s at %.1f m (crosshair %.2f m off his axis) | engine cylinder h %.2f r %.2f "
+            "offset %.2f,%.2f yaw %d | feet %.2f,%.2f,%.2f (on screen %.2f,%.2f,%.2f) | launch %.2f,%.2f,%.2f -> aim %.2f,%.2f,%.2f",
+            id, (void*)h.ent, h.kState, hp, hpMax, l6c, l70, h.kLying ? "lying-body hit" : "upright hit", h.dist, h.off, hgt, rad, o94, o98, yaw, q[0],
+            q[1], q[2], h.pos[0], h.pos[1], h.pos[2], launch[0], launch[1], launch[2], aim[0], aim[1], aim[2]);
+    if (g.np == 16) {
+        memmove(g.p, g.p + 1, sizeof(Pend) * 15);
+        --g.np;
+    }
+    g.p[g.np++] = {h.ent, hp, Now(), id, h.kLying};
+}
+void OnMeleeHit(uintptr_t e, uint32_t hp0, int dmg, bool killed, bool flame) {
+    uint32_t hp = 0, l6c = 0;
+    Rd(e + 0xb1c, hp), Rd(e + 0x6c, l6c);
+    const bool was = !(l6c & 2);
+    InterlockedIncrement(flame ? &g.flameHits : &g.meleeHits);
+    if (killed) InterlockedIncrement(flame ? &g.flameKills : &g.meleeKills);
+    if (was) InterlockedIncrement(flame ? &g.flameWas : &g.meleeWas);
+    InterlockedExchangeAdd(flame ? &g.flameDmg : &g.meleeDmg, dmg);
+    if (InterlockedIncrement(&g.simLogs) <= kSimLogs)
+        Log("knocked: %s hit %p state %u l6c 0x%x%s: damage %d, hp %u -> %u%s (no hit reaction)", flame ? "flame" : "melee", (void*)e, State(e), l6c,
+            was ? " (collision layer cleared - skipped before this fix)" : "", dmg, hp0, hp, killed ? ", killed" : "");
+}
+void Step() {
+    if (!g.announced) {
+        g.announced = true;
+        Log("knocked: knocked enemies take damage %s (states %u-%u; guns: lying body r %.1f m, %.1f..%.1f m from the feet -> aim %.2f m up his engine "
+            "cylinder; melee / flame: cleared collision layer ignored, no hit reaction; multiplayer melee unchanged) [hero] knocked_damage",
+            cfg.knockedDamage ? "ON" : "off", kStateFirst, kStateLast, kLyingR, kLyingLo, kLyingHi, kAimUp);
+    }
+    if (S.battle != g.battle) {
+        g.battle = S.battle;
+        g.gunLogs = g.okLogs = g.failLogs = 0;
+        g.np = 0;
+        InterlockedExchange(&g.simLogs, 0);
+    }
+    const double now = Now();
+    int w = 0;
+    for (int i = 0; i < g.np; ++i) {
+        const Pend p = g.p[i];
+        if (now - p.t < kCheckSec) {
+            g.p[w++] = p;
+            continue;
+        }
+        uint32_t hp = p.hp0;
+        Rd(p.e + 0xb1c, hp);
+        const uint32_t st = State(p.e);
+        if (hp < p.hp0) {
+            ++g.lost;
+            if (g.okLogs++ < kGunLogs)
+                Log("knocked: shot #%u at %p: hp %u -> %u after %.1f s (state now %u, %s)", p.id, (void*)p.e, p.hp0, hp, now - p.t, st,
+                    p.lying ? "lying-body hit" : "upright hit");
+        } else {
+            ++g.noLoss;
+            if (g.failLogs++ < kFailLogs)
+                Log("knocked: shot #%u at %p: NO hp loss after %.1f s (hp %u -> %u, state now %u, %s)", p.id, (void*)p.e, now - p.t, p.hp0, hp, st,
+                    p.lying ? "lying-body hit" : "upright hit");
+        }
+    }
+    g.np = w;
+    if (now - g.tSum >= 10.0) {
+        g.tSum = now;
+        const LONG mh = InterlockedExchange(&g.meleeHits, 0), mk = InterlockedExchange(&g.meleeKills, 0), md = InterlockedExchange(&g.meleeDmg, 0),
+                   mw = InterlockedExchange(&g.meleeWas, 0), fh = InterlockedExchange(&g.flameHits, 0), fk = InterlockedExchange(&g.flameKills, 0),
+                   fd = InterlockedExchange(&g.flameDmg, 0), fw = InterlockedExchange(&g.flameWas, 0);
+        if (g.shots || mh || fh)
+            Log("knocked: last 10 s: gun shots at knocked enemies %u (lying-body hits %u; checked: hp lost %u, no loss %u) | melee hits %ld "
+                "(layer cleared %ld, kills %ld, damage %ld) | flame hits %ld (layer cleared %ld, kills %ld, damage %ld)",
+                g.shots, g.lying, g.lost, g.noLoss, mh, mw, mk, md, fh, fw, fk, fd);
+        g.shots = g.lying = g.lost = g.noLoss = 0;
+    }
+}
+}
 AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispLag, bool groundOnly = false, LineHits* line = nullptr,
                 float hitR = 0.55f, float headSlack = 0.f, bool liveFoes = false);
 constexpr uintptr_t kSimTickCall904 = 0x2dda9e7;
@@ -2982,6 +3135,9 @@ int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const Mele
     float hp[3], vp[3];
     if (!EntPos(hero, hp) || !EntPos(victim, vp)) return 0;
     int32_t r[2] = {0, 0};
+    const bool kdVictim = mpFlags < 0 && cfg.knockedDamage && kd::Knocked(victim);
+    uint32_t kdHp0 = 0;
+    if (kdVictim) Rd(victim + 0xb1c, kdHp0);
     if (arc.damage) {
         uintptr_t combat = Ptr(world + 0xf8);
         if (!combat) return 0;
@@ -3028,7 +3184,7 @@ int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const Mele
     }
     bool killed = (res & 0xff) != 0;
     float delta[3] = {vp[0] - hp[0], vp[1] - hp[1], vp[2] - hp[2]};
-    if (!killed && (mpFlags < 0 ? cfg.meleeReact : (mpFlags & 4) != 0)) {
+    if (!killed && !kdVictim && (mpFlags < 0 ? cfg.meleeReact : (mpFlags & 4) != 0)) {
         uintptr_t vt = Ptr(victim), fn = vt ? Ptr(vt + 0x3a8) : 0;
         if (fn >= g_base && fn < g_base + g_imageSize) reinterpret_cast<FnReact>(fn)(victim, hero, delta);
     }
@@ -3046,6 +3202,7 @@ int MeleeEngineHit(uintptr_t world, uintptr_t hero, uintptr_t victim, const Mele
         if (fx) reinterpret_cast<FnFx>(g_base + kFnHitEffects904)(victim, fx, hero, 1, pos, delta, rad, reinterpret_cast<uint8_t*>(&res), 1);
     }
     reinterpret_cast<FnDtor>(g_base + kFnHitInfoDtor904)(hi);
+    if (kdVictim) kd::OnMeleeHit(victim, kdHp0, dmg, killed, false);
     *dmgOut = dmg;
     return killed ? 2 : 1;
 }
@@ -3145,10 +3302,12 @@ void FlameDirectStep(uintptr_t world, uintptr_t hero) {
         uint32_t hp = 0, l6c = 0;
         uint8_t f108 = 0, f68 = 0;
         if (!Rd(e + 0xb1c, hp) || !hp || !Rd(e + 0x108, f108) || !(f108 & 0x10) || !Rd(e + 0x68, f68) || !(f68 & 1) || !Rd(e + 0x6c, l6c) ||
-            Ptr(e + 0x80) == heroSide || !(l6c & heroL6c & 2) || !canHit(e)) {
+            Ptr(e + 0x80) == heroSide || !kd::LayerOk(e, l6c, heroL6c, false) || !canHit(e)) {
             ++skipped;
             continue;
         }
+        const bool kdHit = cfg.knockedDamage && kd::Knocked(e);
+        const uint32_t kdHp0 = hp;
         const uintptr_t u = Ptr(e + oEntUnit);
         if (u != lastUnit) AggroNoteHit(e), lastUnit = u;
         alignas(16) unsigned char hi[0x100];
@@ -3164,7 +3323,7 @@ void FlameDirectStep(uintptr_t world, uintptr_t hero) {
         uint16_t res = 0;
         reinterpret_cast<FnKill>(g_base + kFnKillResolve904)(hi, &res, r.dmg, &atk, 0, 0, 0, "HFPS FLAME");
         const bool dead = (res & 0xff) != 0;
-        const bool doReact = !dead && nReact < kFlameFxPerStep && g_fq.reactGate.Due(e, now, r.react);
+        const bool doReact = !dead && !kdHit && nReact < kFlameFxPerStep && g_fq.reactGate.Due(e, now, r.react);
         const bool doFx = fxMgr && nFx < kFlameFxPerStep && g_fq.fxGate.Due(e, now, r.fx);
         float hp3[3], vp[3];
         if ((doReact || doFx) && EntPos(hero, hp3) && EntPos(e, vp)) {
@@ -3188,6 +3347,7 @@ void FlameDirectStep(uintptr_t world, uintptr_t hero) {
             }
         }
         reinterpret_cast<FnDtor>(g_base + kFnHitInfoDtor904)(hi);
+        if (kdHit) kd::OnMeleeHit(e, kdHp0, static_cast<int>(r.dmg), dead, true);
         ++hit;
         dmgSum += r.dmg;
         if (dead) ++killed;
@@ -3437,7 +3597,7 @@ void MeleeEngineRun(uintptr_t world, uintptr_t hero, const MeleeReq* reqs, int n
             uint32_t hp = 0, l6c = 0;
             uint8_t f108 = 0, f68 = 0;
             if (!Rd(e + 0xb1c, hp) || !hp || !Rd(e + 0x108, f108) || !(f108 & 0x10) || !Rd(e + 0x68, f68) || !(f68 & 1) ||
-                !Rd(e + 0x6c, l6c) || Ptr(e + 0x80) == heroSide || !(l6c & heroL6c & 2) ||
+                !Rd(e + 0x6c, l6c) || Ptr(e + 0x80) == heroSide || !kd::LayerOk(e, l6c, heroL6c, rq.mpFlags >= 0) ||
                 !reinterpret_cast<FnCanHit>(g_base + kFnCanBeHit904)(e)) {
                 if ((mount || extra > 0.f) && inArc && Ptr(e + 0x80) != heroSide && g_meleeBigLogs < 24) {
                     ++g_meleeBigLogs;
@@ -3868,6 +4028,14 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     AimHit hit = TraceAim(eye, fwd, range, dispLag);
     QueryPerformanceCounter(&q1);
     float aim[3] = {eye[0] + fwd[0] * hit.dist, eye[1] + fwd[1] * hit.dist, eye[2] + fwd[2] * hit.dist};
+    const bool kAimed = hit.ent && hit.kState;
+    if (kAimed) {
+        float hgt = 0.f;
+        Rd(hit.ent + 0x9c, hgt);
+        float up = kd::kAimUp;
+        if (hgt > 0.3f && hgt < 20.f && up > hgt * 0.5f) up = hgt * 0.5f;
+        aim[0] = hit.pos[0], aim[1] = hit.pos[1] + up, aim[2] = hit.pos[2];
+    }
     float leadT = 0.f, lead[2] = {0.f, 0.f};
     if (cfg.autoLead && hit.ent && (hit.vel[0] != 0.f || hit.vel[1] != 0.f)) {
         float steps = (fast ? 1.0f : 2.5f) - (EarlyFlightActive() || mp::EarlyFlightOn() ? 1.0f : 0.0f) -
@@ -3884,6 +4052,12 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
         if (dl > 0.5f)
             for (int i = 0; i < 3; ++i) c.target[i] = c.launch[i] + dv[i] / dl * range;
     }
+    if (kAimed) {
+        float dv[3] = {aim[0] - c.launch[0], aim[1] - c.launch[1], aim[2] - c.launch[2]};
+        float dl = std::sqrt(dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]);
+        if (dl > 0.5f)
+            for (int i = 0; i < 3; ++i) c.target[i] = c.launch[i] + dv[i] / dl * range;
+    }
     using FnIssue = unsigned char (*)(uintptr_t queue, FireCmd* cmd);
     unsigned char ok = 0;
     bool viaFast = fast && FastFireQueue(&c);
@@ -3895,6 +4069,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     if (ok) {
         vmgame::Tracer(vis, aim);
         hitprobe::OnShot(hit, now);
+        if (kAimed) kd::OnGunShot(hit, c.launch, aim);
         HitFeedback(hit, eye, fwd);
         float tsp = std::sqrt(hit.vel[0] * hit.vel[0] + hit.vel[1] * hit.vel[1]), lsz = std::sqrt(lead[0] * lead[0] + lead[1] * lead[1]);
         ++S.aimShots;
@@ -5631,7 +5806,10 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
     constexpr float kAimSnapSlack = 2.5f;
     uint32_t curStep = 0;
     const bool snap = hh > 1e-6f && battle == g_velBattle && Rd(battle + 0x64720, curStep) && curStep == g_velScanStep;
-    const float snapT = snap ? kAimSnapSlack / std::sqrt(hh) : 0.f;
+    const uintptr_t kdSide = S.entity ? Ptr(S.entity + 0x80) : 0;
+    const bool kdOn = cfg.knockedDamage && kdSide != 0;
+    const float kdR = kdOn && kd::kLyingR > hitR ? kd::kLyingR : hitR;
+    const float snapT = snap ? (kAimSnapSlack + (kdOn ? kdR : 0.f)) / std::sqrt(hh) : 0.f;
     auto test = [&](uintptr_t e) {
         float q[3];
         if (!Plausible(e)) return;
@@ -5643,7 +5821,7 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
                 float qx = x->p[0] - vel[0] * dispLag, qz = x->p[2] - vel[1] * dispLag;
                 float t = ((qx - eye[0]) * hx + (qz - eye[2]) * hz) / hh;
                 float px = eye[0] + fwd[0] * t - qx, pz = eye[2] + fwd[2] * t - qz;
-                const float out = hitR + kAimSnapSlack;
+                const float out = kdR + kAimSnapSlack;
                 if (px * px + pz * pz > out * out || t < 1.f - snapT || t >= (line ? lineEnd : h.dist) + snapT) {
                     ++h.ents;
                     ++h.snapCulled;
@@ -5662,9 +5840,28 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
         float qx = q[0] - vel[0] * dispLag, qz = q[2] - vel[1] * dispLag;
         float v[3] = {qx - eye[0], q[1] - eye[1], qz - eye[2]};
         float t = hh > 1e-6f ? (v[0] * hx + v[2] * hz) / hh : v[0] * fwd[0] + v[1] * fwd[1] + v[2] * fwd[2];
-        if (t < 1.f || t >= (line ? lineEnd : h.dist)) return;
-        float px = eye[0] + fwd[0] * t - qx, pz = eye[2] + fwd[2] * t - qz, py = eye[1] + fwd[1] * t;
-        if (px * px + pz * pz > hitR * hitR || py < q[1] || py > q[1] + 2.1f + headSlack) return;
+        float px = eye[0] + fwd[0] * t - qx, pz = eye[2] + fwd[2] * t - qz;
+        const float py = eye[1] + fwd[1] * t, lim = line ? lineEnd : h.dist;
+        bool hitHere = !(t < 1.f || t >= lim) &&
+                       !(px * px + pz * pz > hitR * hitR || py < q[1] || py > q[1] + 2.1f + headSlack);
+        uint32_t kst = 0;
+        bool lying = false;
+        if (kdOn) {
+            const uint32_t a = kd::State(e);
+            uint32_t hp = 0;
+            if (kd::KnockedState(a) && Ptr(e + 0x80) != kdSide && Rd(e + 0xb1c, hp) && hp) {
+                kst = a;
+                if (!hitHere) {
+                    const float tl = kd::RayCyl(eye, fwd, qx, qz, kd::kLyingR, q[1] + kd::kLyingLo, q[1] + kd::kLyingHi, 1.f, lim);
+                    if (tl >= 1.f) {
+                        t = tl;
+                        px = eye[0] + fwd[0] * t - qx, pz = eye[2] + fwd[2] * t - qz;
+                        hitHere = lying = true;
+                    }
+                }
+            }
+        }
+        if (!hitHere) return;
         if (line) {
             int slot = line->n;
             if (slot < LineHits::kMax) {
@@ -5689,6 +5886,8 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
         h.dist = t;
         h.what = "soldier";
         h.ent = e;
+        h.kState = kst;
+        h.kLying = lying;
         h.pos[0] = qx;
         h.pos[1] = q[1];
         h.pos[2] = qz;
@@ -10395,6 +10594,7 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     EdgeStep();
     ShotStep();
     KillMarkStep();
+    kd::Step();
     HideSelfStep();
     MountHideStep();
     SkirmishStep();
