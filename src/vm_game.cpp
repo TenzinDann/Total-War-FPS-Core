@@ -1934,17 +1934,13 @@ void LoadWeaponFx(int idx, ID3D11Device* dev) {
     w.shells.Release();
     if (w.set.shellEject) {
         err[0] = 0;
-        wchar_t smesh[MAX_PATH * 2] = L"";
-        if (w.set.shellMesh[0]) swprintf(smesh, MAX_PATH * 2, L"%ls\\%ls", dir, w.set.shellMesh);
-        if (w.set.shellMesh[0]) g_log("viewmodel: [%d] shell mesh %ls", idx, w.set.shellMesh);
-        if (w.shells.Load(dev, err, sizeof err, smesh[0] ? smesh : nullptr))
+        if (w.shells.Load(dev, err, sizeof err))
             g_log("viewmodel: [%d] shell eject on (tag_brass; %d shell%s; scale %.2f, speed %.2f, life %.2f, smoke %.2f, sparks %.2f; "
                   "out %.2f-%.2f fwd %.2f-%.2f up %.2f-%.2f m/s)", idx, w.set.shellCaliber, w.set.shellLink ? " + link" : "", w.set.shellScale,
                   w.set.shellSpeed, w.set.shellLife, w.set.shellSmoke, w.set.shellSparks, w.set.shellOut[0], w.set.shellOut[1], w.set.shellFwd[0],
                   w.set.shellFwd[1], w.set.shellUp[0], w.set.shellUp[1]);
         else
             g_log("viewmodel: [%d] %s", idx, err);
-        if (w.set.shellMesh[0]) g_log("viewmodel: [%d] shell mesh %s", idx, w.shells.MeshLoaded() ? "loaded" : "FAILED -> caliber shell");
     }
     g_log("viewmodel: [%d] sounds + muzzle fx loaded in %.1f ms", idx, (Now() - tFx) * 1000.0);
 }
@@ -2924,7 +2920,7 @@ void LayerPrewarm(IDXGISwapChain* sc, ID3D11Device* dev) {
     const bool cross = g_cross.Prewarm(dev), cm = g_cmR.Prewarm(dev);
     const bool screen = td.Width && Wp().rend.Ready() && Wp().rend.PrewarmScreen(td);
     const bool dof = td.Width && g_dof.Prewarm(dev, td.Width, td.Height);
-    g_log("warm: first-person GPU objects made before first person in %.1f ms: GPU timer %s, crosshair %s, cast marker %s, screen buffers %ux%u %s, alt dof %s",
+    g_log("warm: first-person GPU objects made before first person in %.1f ms: GPU timer %s, crosshair %s, cast marker %s, screen buffers %ux%u %s, dof %s",
           (Now() - t0) * 1000.0, gpu ? "ok" : g_gpuTimer ? "failed" : "off", cross ? "ok" : "failed", cm ? "ok" : "failed", td.Width, td.Height,
           screen ? "ok" : "not made", dof ? "ok" : "not made");
 }
@@ -3105,7 +3101,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                 dev->GetImmediateContext(&ctx);
                 if (ctx) {
                     g_fprof.Mark("rtv");
-                    const int gpuSlot = (part == kPartCross || (part == kPartGun && !g_uiMidGpuTimer)) ? -1 : g_gpu.Begin(dev, ctx);
+                    const int gpuSlot = (part == kPartGun && !g_uiMidGpuTimer) ? -1 : g_gpu.Begin(dev, ctx);
                     if (part != kPartGun) UiLayerOnPresent(ctx, bb, td.Width, td.Height);
                     g_fprof.Mark("ui");
                     float mx = 0, my = 0, ma = 1;

@@ -540,6 +540,7 @@ bool g_meleeHitOk = false;
 bool g_noKnockOk = false;
 bool g_shieldGameOk = false;
 bool g_armorOk = false;
+bool g_ffPassOk = false;
 bool g_abilityOk = false;
 bool g_charOk = false;
 bool g_arrowOk = false;
@@ -631,6 +632,7 @@ struct Config {
     int aggroMax = 4;
     bool noKnock = true;
     bool knockedDamage = true;
+    bool friendPass = true;
     bool superArmor = true;
     bool heroesOnly = true;
     bool silentHalt = true;
@@ -982,6 +984,7 @@ void LoadConfig() {
         cfg.aggroRelease, cfg.aggroMax, cfg.aggroHitHold, cfg.aggroInterval);
     cfg.noKnock = GetPrivateProfileIntW(L"hero", L"no_knockdown", 1, ini) != 0;
     cfg.knockedDamage = GetPrivateProfileIntW(L"hero", L"knocked_damage", 1, ini) != 0;
+    cfg.friendPass = GetPrivateProfileIntW(L"fire", L"friend_pass", 1, ini) != 0;
     cfg.superArmor = GetPrivateProfileIntW(L"hero", L"super_armor", 1, ini) != 0;
     cfg.heroesOnly = GetPrivateProfileIntW(L"hero", L"heroes_only", 1, ini) != 0;
     cfg.silentHalt = GetPrivateProfileIntW(L"move", L"silent_halt", 1, ini) != 0;
@@ -1661,6 +1664,9 @@ void HookRenderChild();
 void ShotRestoreSpeed(const char* why);
 bool FireOwner() { return cfg.fireShooter && g_shotOk; }
 uintptr_t FindProjectile(const char* key, int32_t* idOut);
+namespace ffpass {
+void AddRecord(uintptr_t rec, const char* key, bool ff);
+}
 uintptr_t FindGunProjectile(const char* key, int32_t* idOut, bool* ff) {
     *ff = false;
     if (vmgame::FriendlyFire() && key && key[0] && strlen(key) < 96) {
@@ -2166,6 +2172,7 @@ void Enter(uintptr_t mgr) {
     if (g_projLookupOk && wantProj[0]) {
         S.projFFWant = vmgame::FriendlyFire();
         S.fpProj = FindGunProjectile(wantProj, &S.fpProjId, &S.projFF);
+        if (S.fpProj && S.fpProjId >= 0) ffpass::AddRecord(S.fpProj, wantProj, S.projFF);
         if (S.fpProj && S.fpProjId >= 0) {
             float sp = 0;
             int32_t ap = 0, n = 0;
@@ -2437,8 +2444,126 @@ void Step() {
     }
 }
 }
+namespace ffpass {
+constexpr int kMaxRecs = 32;
+constexpr LONG kPassLogs = 20, kUnknownLogs = 6;
+struct Shared {
+    volatile LONG on = 0;
+    volatile LONG noOwner = 0;
+    volatile uintptr_t hero = 0, side = 0;
+    uintptr_t rec[kMaxRecs] = {};
+    volatile LONG nRec = 0;
+    volatile LONG passes = 0, mountPasses = 0, passTotal = 0, passLogs = 0, unknown = 0, unknownLogs = 0;
+} g_sh;
+inline const char* WhyOff(bool cfgOn, bool printsOk, bool heroOk, bool multiplayer, bool friendlyFire) {
+    if (!cfgOn) return "[fire] friend_pass=0";
+    if (!printsOk) return "projectile-hit code fingerprint mismatch";
+    if (!heroOk) return "not in first person";
+    if (multiplayer) return "multiplayer battle";
+    if (friendlyFire) return "MCT friendly fire is on";
+    return nullptr;
+}
+inline bool OurBullet(uintptr_t rec, uintptr_t shooter, uintptr_t hero, bool noOwner, const uintptr_t* recs, LONG n) {
+    if (!rec || !hero || (shooter ? shooter != hero : !noOwner)) return false;
+    for (LONG i = 0; i < n && i < kMaxRecs; ++i)
+        if (recs[i] == rec) return true;
+    return false;
+}
+inline bool Pass(bool on, bool ours, uintptr_t self, uintptr_t selfSide, uintptr_t hero, uintptr_t heroSide, bool mountCopy) {
+    if (!on || !ours || !self || self == hero || !heroSide) return false;
+    return selfSide == heroSide || (mountCopy && selfSide == 0);
+}
+inline bool Active() { return g_sh.on != 0; }
+void AddRecord(uintptr_t rec, const char* key, bool ff) {
+    if (!rec || ff || !key || !strstr(key, "tenzin_fps")) return;
+    const LONG n = g_sh.nRec;
+    for (LONG i = 0; i < n; ++i)
+        if (g_sh.rec[i] == rec) return;
+    if (n >= kMaxRecs) return;
+    g_sh.rec[n] = rec;
+    InterlockedExchange(&g_sh.nRec, n + 1);
+    Log("ffpass: projectile record %p ('%s') counts as our gun bullet (%ld known)", (void*)rec, key, static_cast<long>(n + 1));
+}
+using FnProjHit = uint64_t (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+inline uint64_t HookCommon(uintptr_t self, uintptr_t proj, uintptr_t list, uintptr_t flag, uintptr_t out, bool mountCopy) {
+    const auto orig = reinterpret_cast<FnProjHit>(g_base + kFnProjHit904);
+    if (!g_sh.on || !proj) return orig(self, proj, list, flag, out);
+    const uintptr_t rec = Ptr(proj + 0x90), shooter = Ptr(proj + 0x20), hero = g_sh.hero, heroSide = g_sh.side;
+    const bool ours = OurBullet(rec, shooter, hero, g_sh.noOwner != 0, g_sh.rec, g_sh.nRec);
+    const uintptr_t side = Ptr(self + 0x80);
+    if (!Pass(true, ours, self, side, hero, heroSide, mountCopy)) {
+        if (!ours && rec && shooter && shooter == hero && Pass(true, true, self, side, hero, heroSide, mountCopy)) {
+            InterlockedIncrement(&g_sh.unknown);
+            if (InterlockedIncrement(&g_sh.unknownLogs) <= kUnknownLogs)
+                Log("ffpass: friendly %p hit by a hero projectile %p with record %p, not one of our %ld gun records - not passed (a spell, or the gun "
+                    "record changed)",
+                    (void*)self, (void*)proj, (void*)rec, static_cast<long>(g_sh.nRec));
+        }
+        return orig(self, proj, list, flag, out);
+    }
+    InterlockedIncrement(&g_sh.passes);
+    InterlockedIncrement(&g_sh.passTotal);
+    if (mountCopy) InterlockedIncrement(&g_sh.mountPasses);
+    if (InterlockedIncrement(&g_sh.passLogs) <= kPassLogs)
+        Log("ffpass: bullet %p (record %p) passed through friendly %p (side %p%s)", (void*)proj, (void*)rec, (void*)self, (void*)side,
+            mountCopy ? ", mount / carrier copy" : "");
+    return 0;
+}
+uint64_t ProjHitFriend(uintptr_t self, uintptr_t proj, uintptr_t list, uintptr_t flag, uintptr_t out) {
+    return HookCommon(self, proj, list, flag, out, false);
+}
+uint64_t ProjHitFriendMount(uintptr_t self, uintptr_t proj, uintptr_t list, uintptr_t flag, uintptr_t out) {
+    return HookCommon(self, proj, list, flag, out, true);
+}
+}
+namespace hitfb {
+constexpr float kDefR = 0.55f, kDefH = 2.1f;
+constexpr float kSnapR = 4.f;
+struct Pick {
+    bool skipFriends = false;
+    uintptr_t heroSide = 0;
+    float tmax = 0.f;
+    uintptr_t ent = 0;
+    float dist = 0.f;
+    bool foe = false;
+    bool kd = false;
+    float r = 0.f, h = 0.f;
+    unsigned friends = 0, dead = 0;
+};
+inline void Dims(bool okR, float r, bool okH, float h, float* ro, float* ho) {
+    *ro = okR && r > 0.05f && r < 20.f ? r : kDefR;
+    *ho = okH && h > 0.3f && h < 60.f ? h : kDefH;
+}
+inline void Offer(Pick& p, uintptr_t e, float t, bool alive, uintptr_t side, float r, float h) {
+    if (t < 1.f || t >= p.tmax || (p.ent && t >= p.dist)) return;
+    if (!alive || !side) {
+        ++p.dead;
+        return;
+    }
+    const bool foe = side != p.heroSide;
+    if (!foe && p.skipFriends) {
+        ++p.friends;
+        return;
+    }
+    p.ent = e, p.dist = t, p.foe = foe, p.r = r, p.h = h;
+}
+inline void Test(Pick& p, uintptr_t e, const float eye[3], const float fwd[3], float qx, float qy, float qz, float lat2) {
+    if (lat2 > kSnapR * kSnapR) return;
+    float r = 0.f, h = 0.f, rr = kDefR, hh = kDefH;
+    const bool okR = Rd(e + 0xa0, r);
+    Dims(okR, r, false, 0.f, &rr, &hh);
+    if (lat2 > rr * rr) return;
+    const bool okH = Rd(e + 0x9c, h);
+    Dims(okR, r, okH, h, &rr, &hh);
+    const float t = kd::RayCyl(eye, fwd, qx, qz, rr, qy, qy + hh, 1.f, p.tmax);
+    if (t < 1.f || (p.ent && t >= p.dist)) return;
+    uint32_t hp = 0;
+    const bool alive = Rd(e + 0xb1c, hp) && hp;
+    Offer(p, e, t, alive, Ptr(e + 0x80), rr, hh);
+}
+}
 AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispLag, bool groundOnly = false, LineHits* line = nullptr,
-                float hitR = 0.55f, float headSlack = 0.f, bool liveFoes = false);
+                float hitR = 0.55f, float headSlack = 0.f, bool liveFoes = false, hitfb::Pick* fb = nullptr);
 constexpr uintptr_t kSimTickCall904 = 0x2dda9e7;
 const unsigned char kSimTickCallBytes[20] = {0x48, 0x8b, 0x87, 0x30, 0x04, 0x00, 0x00, 0x48, 0x8b, 0x48,
                                              0x58, 0x48, 0x8b, 0x01, 0xff, 0x90, 0xb0, 0x01, 0x00, 0x00};
@@ -3754,28 +3879,49 @@ void KillMarkStep() {
 struct HitFxLog {
     unsigned shots = 0, hits = 0, kills = 0, logs = 0;
 } g_hfx;
-void HitFeedback(const AimHit& hit, const float eye[3], const float fwd[3]) {
+struct HitMarkDiag {
+    uintptr_t battle = 0;
+    unsigned shots = 0, logs = 0;
+} g_hmk;
+void HitFeedback(const AimHit& hit, const hitfb::Pick& fb, const float eye[3], const float fwd[3]) {
     ++g_hfx.shots;
+    if (S.battle != g_hmk.battle) g_hmk.battle = S.battle, g_hmk.shots = g_hmk.logs = 0;
+    ++g_hmk.shots;
+    const uintptr_t mySide = S.entity ? Ptr(S.entity + 0x80) : 0;
     uint32_t hp = 0;
-    if (!hit.ent || !Rd(hit.ent + 0xb1c, hp) || !hp) return;
-    uintptr_t side = Ptr(hit.ent + 0x80);
-    if (!side || side == Ptr(S.entity + 0x80)) return;
-    AggroNoteHit(hit.ent);
+    bool oldWhite = false;
+    if (hit.ent && Rd(hit.ent + 0xb1c, hp) && hp) {
+        const uintptr_t side = Ptr(hit.ent + 0x80);
+        if (side && side != mySide) {
+            oldWhite = true;
+            AggroNoteHit(hit.ent);
+        }
+    }
+    hp = 0;
+    const bool newWhite = fb.ent && fb.foe && Rd(fb.ent + 0xb1c, hp) && hp;
+    hitprobe::NoteFb(oldWhite, newWhite, fb.friends, fb.dead, fb.ent && !fb.foe, fb.kd);
+    if ((oldWhite != newWhite || (newWhite && fb.ent != hit.ent)) && g_hmk.logs++ < 20)
+        Log("hitmark: shot %u: white %s -> %s | nearest by the old 0.55 x 2.1 test %p at %.1f m%s | own collision cylinder: %p at %.1f m (r %.2f h %.2f)%s%s | "
+            "passed friends %u, dead or no side %u%s",
+            g_hmk.shots, oldWhite ? "yes" : "no", newWhite ? "yes" : "no", (void*)hit.ent, hit.dist, hit.ent && !oldWhite ? " (not a live enemy)" : "",
+            (void*)fb.ent, fb.dist, fb.r, fb.h, fb.ent && !fb.foe ? " - a live friend blocks" : "", fb.kd ? " - knocked aim" : "", fb.friends, fb.dead,
+            fb.skipFriends ? "" : " (friends block: friendly fire on, multiplayer or pass-through off)");
+    if (!newWhite) return;
     vmgame::HitMark(false);
-    KillWatchAdd(hit.ent);
+    KillWatchAdd(fb.ent);
     int32_t dmg = 0, ap = 0;
     if (S.fpProj) {
         Rd(S.fpProj + 0x70, dmg);
         Rd(S.fpProj + 0x74, ap);
     }
     bool kill = dmg >= 0 && ap >= 0 && static_cast<int64_t>(dmg) + ap >= static_cast<int64_t>(hp);
-    float p[3] = {eye[0] + fwd[0] * hit.dist, eye[1] + fwd[1] * hit.dist, eye[2] + fwd[2] * hit.dist};
+    float p[3] = {eye[0] + fwd[0] * fb.dist, eye[1] + fwd[1] * fb.dist, eye[2] + fwd[2] * fb.dist};
     vmgame::HitFx(p, fwd, kill);
     ++g_hfx.hits;
     if (kill) ++g_hfx.kills;
     if (g_hfx.logs++ < 30)
-        Log("hit-fx: shot on enemy %p at %.1f m, hp %u vs damage %d + ap %d -> %s (so far %u hits / %u kills of %u shots)", (void*)hit.ent,
-            hit.dist, hp, dmg, ap, kill ? "kill (bigger blood)" : "hit", g_hfx.hits, g_hfx.kills, g_hfx.shots);
+        Log("hit-fx: shot on enemy %p at %.1f m, hp %u vs damage %d + ap %d -> %s (so far %u hits / %u kills of %u shots)", (void*)fb.ent,
+            fb.dist, hp, dmg, ap, kill ? "kill (bigger blood)" : "hit", g_hfx.hits, g_hfx.kills, g_hfx.shots);
 }
 struct ShotDmgRec {
     uintptr_t rec;
@@ -4025,7 +4171,10 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     QueryPerformanceCounter(&q0);
     float dispLag = cfg.displayLag - (period - toNext);
     if (dispLag < 0.f) dispLag = 0.f;
-    AimHit hit = TraceAim(eye, fwd, range, dispLag);
+    hitfb::Pick fb;
+    fb.skipFriends = ffpass::Active();
+    fb.heroSide = S.entity ? Ptr(S.entity + 0x80) : 0;
+    AimHit hit = TraceAim(eye, fwd, range, dispLag, false, nullptr, 0.55f, 0.f, false, &fb);
     QueryPerformanceCounter(&q1);
     float aim[3] = {eye[0] + fwd[0] * hit.dist, eye[1] + fwd[1] * hit.dist, eye[2] + fwd[2] * hit.dist};
     const bool kAimed = hit.ent && hit.kState;
@@ -4036,6 +4185,7 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
         if (hgt > 0.3f && hgt < 20.f && up > hgt * 0.5f) up = hgt * 0.5f;
         aim[0] = hit.pos[0], aim[1] = hit.pos[1] + up, aim[2] = hit.pos[2];
     }
+    if (kAimed) fb.ent = hit.ent, fb.dist = hit.dist, fb.foe = true, fb.kd = true;
     float leadT = 0.f, lead[2] = {0.f, 0.f};
     if (cfg.autoLead && hit.ent && (hit.vel[0] != 0.f || hit.vel[1] != 0.f)) {
         float steps = (fast ? 1.0f : 2.5f) - (EarlyFlightActive() || mp::EarlyFlightOn() ? 1.0f : 0.0f) -
@@ -4068,9 +4218,12 @@ bool FireShot(const float eye[3], const float fwd[3], const float right[3], cons
     S.lastShotFast = viaFast;
     if (ok) {
         vmgame::Tracer(vis, aim);
-        hitprobe::OnShot(hit, now);
+        AimHit fh = hit;
+        fh.ent = fb.ent && fb.foe ? fb.ent : 0;
+        if (fh.ent) fh.dist = fb.dist;
+        hitprobe::OnShot(fh, now);
         if (kAimed) kd::OnGunShot(hit, c.launch, aim);
-        HitFeedback(hit, eye, fwd);
+        HitFeedback(hit, fb, eye, fwd);
         float tsp = std::sqrt(hit.vel[0] * hit.vel[0] + hit.vel[1] * hit.vel[1]), lsz = std::sqrt(lead[0] * lead[0] + lead[1] * lead[1]);
         ++S.aimShots;
         S.aimSelfSpeedSum += S.camSpeed;
@@ -5759,7 +5912,7 @@ void VelStep(uintptr_t battle, const float eye[3], const float fwd[3]) {
     }
 }
 AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispLag, bool groundOnly, LineHits* line, float hitR, float headSlack,
-                bool liveFoes) {
+                bool liveFoes, hitfb::Pick* fb) {
     AimHit h;
     h.dist = range;
     uintptr_t battle = 0;
@@ -5798,6 +5951,7 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
     }
     if (groundOnly) return h;
     const float lineEnd = h.dist;
+    if (fb) fb->tmax = lineEnd;
     int heroAl = -1;
     unsigned n = CollectUnits(battle, &heroAl);
     h.units = n;
@@ -5809,7 +5963,8 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
     const uintptr_t kdSide = S.entity ? Ptr(S.entity + 0x80) : 0;
     const bool kdOn = cfg.knockedDamage && kdSide != 0;
     const float kdR = kdOn && kd::kLyingR > hitR ? kd::kLyingR : hitR;
-    const float snapT = snap ? (kAimSnapSlack + (kdOn ? kdR : 0.f)) / std::sqrt(hh) : 0.f;
+    const float snapR = fb && hitfb::kSnapR > kdR ? hitfb::kSnapR : kdR;
+    const float snapT = snap ? (kAimSnapSlack + ((kdOn || fb) ? snapR : 0.f)) / std::sqrt(hh) : 0.f;
     auto test = [&](uintptr_t e) {
         float q[3];
         if (!Plausible(e)) return;
@@ -5821,8 +5976,8 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
                 float qx = x->p[0] - vel[0] * dispLag, qz = x->p[2] - vel[1] * dispLag;
                 float t = ((qx - eye[0]) * hx + (qz - eye[2]) * hz) / hh;
                 float px = eye[0] + fwd[0] * t - qx, pz = eye[2] + fwd[2] * t - qz;
-                const float out = kdR + kAimSnapSlack;
-                if (px * px + pz * pz > out * out || t < 1.f - snapT || t >= (line ? lineEnd : h.dist) + snapT) {
+                const float out = snapR + kAimSnapSlack;
+                if (px * px + pz * pz > out * out || t < 1.f - snapT || t >= ((line || fb) ? lineEnd : h.dist) + snapT) {
                     ++h.ents;
                     ++h.snapCulled;
                     return;
@@ -5844,6 +5999,7 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
         const float py = eye[1] + fwd[1] * t, lim = line ? lineEnd : h.dist;
         bool hitHere = !(t < 1.f || t >= lim) &&
                        !(px * px + pz * pz > hitR * hitR || py < q[1] || py > q[1] + 2.1f + headSlack);
+        if (fb) hitfb::Test(*fb, e, eye, fwd, qx, q[1], qz, px * px + pz * pz);
         uint32_t kst = 0;
         bool lying = false;
         if (kdOn) {
@@ -5906,7 +6062,7 @@ AimHit TraceAim(const float eye[3], const float fwd[3], float range, float dispL
             float v[3] = {q[0] - eye[0], q[1] - eye[1], q[2] - eye[2]};
             float t = v[0] * fwd[0] + v[1] * fwd[1] + v[2] * fwd[2];
             float c[3] = {v[0] - fwd[0] * t, v[1] - fwd[1] * t, v[2] - fwd[2] * t};
-            if (t < -40.f || t > (line ? lineEnd : h.dist) + 40.f || c[0] * c[0] + c[1] * c[1] + c[2] * c[2] > 1600.f) continue;
+            if (t < -40.f || t > ((line || fb) ? lineEnd : h.dist) + 40.f || c[0] * c[0] + c[1] * c[1] + c[2] * c[2] > 1600.f) continue;
         }
         for (unsigned k = 0; k < ne; ++k) test(ents[k]);
     }
@@ -7023,6 +7179,227 @@ void NoKnockStep() {
             g_sb.missileFull, g_sb.missilePart, g_sb.meleeFull, g_sb.meleePart, g_sb.meleeMiss, g_sb.side, g_sb.stagger, g_sb.refunds, g_sb.refundHp,
             g_sb.hookTid, g_sb.stepTid);
     }
+}
+namespace ffpass {
+constexpr int kMaxCopies = 96, kMaxEnts = 16384;
+constexpr unsigned kScanPerFrame = 192, kStateLogs = 24, kMountLogs = 6, kMaxUnits = 1024;
+constexpr double kListSec = 2.0, kSumSec = 10.0;
+struct Copy {
+    uintptr_t orig;
+    uintptr_t* c;
+    bool mount;
+};
+struct Inst {
+    Copy copies[kMaxCopies];
+    int nCopies = 0;
+    uintptr_t ents[kMaxEnts];
+    int nEnts = 0;
+    uintptr_t units[kMaxUnits];
+    unsigned nUnits = 0, cu = 0, ce = 0;
+    bool sweep = false, on = false, announced = false;
+    uintptr_t battle = 0;
+    double tList = -1e9, tSum = 0;
+    const char* why = "";
+    unsigned fresh = 0, mountSame = 0, mountNoSide = 0, mountOther = 0, otherSide = 0, otherSlot = 0, full = 0, sweeps = 0;
+    unsigned stateLogs = 0, mountLogs = 0, listLogs = 0;
+} g_in;
+int CopyIndex(uintptr_t vt) {
+    for (int i = 0; i < g_in.nCopies; ++i)
+        if (reinterpret_cast<uintptr_t>(g_in.copies[i].c + 1) == vt) return i;
+    return -1;
+}
+bool Hookable(uintptr_t vt) { return vt && InExe(vt) && Ptr(vt + 0x310) == g_base + kFnProjHit904; }
+int CopyFor(uintptr_t vt, bool mount) {
+    for (int i = 0; i < g_in.nCopies; ++i)
+        if (g_in.copies[i].orig == vt && g_in.copies[i].mount == mount) return i;
+    uintptr_t lo = 0, hi = 0;
+    if (g_in.nCopies >= kMaxCopies || !CodeRange(&lo, &hi)) return -1;
+    size_t slots = 0;
+    while (slots < 4096) {
+        const uintptr_t f = Ptr(vt + 8 * slots);
+        if (f < lo || f >= hi) break;
+        ++slots;
+    }
+    if (slots <= 0x310 / 8) {
+        Log("ffpass: vtable +0x%llx has only %zu slots - not copied", (unsigned long long)(vt - g_base), slots);
+        return -1;
+    }
+    const size_t n = slots + 64;
+    auto* c = static_cast<uintptr_t*>(VirtualAlloc(nullptr, (n + 1) * sizeof(uintptr_t), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (!c) return -1;
+    c[0] = Ptr(vt - 8);
+    for (size_t i = 0; i < n; ++i) c[1 + i] = Ptr(vt + 8 * i);
+    c[1 + 0x310 / 8] = reinterpret_cast<uintptr_t>(mount ? &ProjHitFriendMount : &ProjHitFriend);
+    g_in.copies[g_in.nCopies] = {vt, c, mount};
+    Log("ffpass: vtable +0x%llx copied for %s (%zu slots) -> %p, slot +0x310 replaced", (unsigned long long)(vt - g_base),
+        mount ? "mounts / carriers without a side" : "friendly entities", slots, (void*)(c + 1));
+    return g_in.nCopies++;
+}
+void Hook(uintptr_t e, uintptr_t vt, bool mount) {
+    const int ci = CopyFor(vt, mount);
+    if (ci < 0 || !Wr(e, reinterpret_cast<uintptr_t>(g_in.copies[ci].c + 1))) return;
+    ++g_in.fresh;
+    if (g_in.nEnts >= kMaxEnts) {
+        int w = 0;
+        for (int i = 0; i < g_in.nEnts; ++i)
+            if (CopyIndex(Ptr(g_in.ents[i])) >= 0) g_in.ents[w++] = g_in.ents[i];
+        g_in.nEnts = w;
+    }
+    if (g_in.nEnts < kMaxEnts)
+        g_in.ents[g_in.nEnts++] = e;
+    else if (!g_in.full++)
+        Log("ffpass: hooked-entity record full (%d) - still hooking, only the unload write-back misses the rest", kMaxEnts);
+}
+unsigned Unhook(uintptr_t e) {
+    if (!Plausible(e)) return 0;
+    const int ci = CopyIndex(Ptr(e));
+    return ci >= 0 && Wr(e, g_in.copies[ci].orig) ? 1u : 0u;
+}
+bool Mine(uintptr_t e) { return e == S.entity || (S.body && e == S.body); }
+void Consider(uintptr_t e) {
+    if (!Plausible(e) || Mine(e)) return;
+    const uintptr_t vt = Ptr(e);
+    if (CopyIndex(vt) < 0) {
+        if (!Hookable(vt))
+            ++g_in.otherSlot;
+        else if (Ptr(e + 0x80) != g_sh.side)
+            ++g_in.otherSide;
+        else
+            Hook(e, vt, false);
+    }
+    const uintptr_t m = Ptr(e + 0x2e0);
+    if (!Plausible(m) || m == e || Mine(m)) return;
+    const uintptr_t mvt = Ptr(m);
+    if (CopyIndex(mvt) >= 0 || !Hookable(mvt)) return;
+    const uintptr_t ms = Ptr(m + 0x80);
+    if (ms == g_sh.side) {
+        ++g_in.mountSame;
+        Hook(m, mvt, false);
+    } else if (!ms) {
+        ++g_in.mountNoSide;
+        Hook(m, mvt, true);
+    } else {
+        ++g_in.mountOther;
+        if (g_in.mountLogs++ < kMountLogs)
+            Log("ffpass: mount / carrier %p of friendly %p has side %p (hero side %p) - left alone", (void*)m, (void*)e, (void*)ms, (void*)g_sh.side);
+    }
+}
+void Restore(const char* why) {
+    InterlockedExchange(&g_sh.on, 0);
+    g_in.on = g_in.sweep = false;
+    unsigned back = 0;
+    if (g_in.battle && g_in.nEnts) {
+        int heroAl = -1;
+        const unsigned n = CollectUnits(g_in.battle, &heroAl);
+        static uintptr_t ents[1024];
+        for (unsigned i = 0; i < n; ++i) {
+            if (heroAl >= 0 && g_units[i].alliance != heroAl) continue;
+            const unsigned ne = UnitEntities(g_units[i].unit, ents, 1024);
+            for (unsigned k = 0; k < ne; ++k) {
+                back += Unhook(ents[k]);
+                if (Plausible(ents[k])) back += Unhook(Ptr(ents[k] + 0x2e0));
+            }
+        }
+    }
+    Log("ffpass: off (%s) - %u of %d hooked entities given their own vtable back (the rest are no longer in a battle unit and keep the copy, which "
+        "forwards everything); bullets passed through friendlies so far %ld",
+        why, back, g_in.nEnts, static_cast<long>(g_sh.passTotal));
+    g_in.nEnts = 0;
+}
+void Scan(uintptr_t battle) {
+    const double now = Now();
+    if (now - g_in.tList >= kListSec) {
+        g_in.tList = now;
+        int heroAl = -1;
+        const unsigned n = CollectUnits(battle, &heroAl);
+        g_in.nUnits = 0;
+        for (unsigned i = 0; i < n && heroAl >= 0; ++i)
+            if (g_units[i].alliance == heroAl && g_in.nUnits < kMaxUnits) g_in.units[g_in.nUnits++] = g_units[i].unit;
+        g_in.cu = g_in.ce = 0;
+        g_in.sweep = true;
+        if (g_in.listLogs++ < 2 || (heroAl < 0 && g_in.listLogs < 6))
+            Log("ffpass: unit list: %u units in the battle, hero alliance #%d -> %u friendly units to hook%s", n, heroAl, g_in.nUnits,
+                heroAl < 0 ? " (hero's unit not found - nothing hooked)" : "");
+    }
+    if (!g_in.sweep) return;
+    static uintptr_t ents[1024];
+    unsigned budget = kScanPerFrame;
+    while (budget && g_in.cu < g_in.nUnits) {
+        const unsigned ne = UnitEntities(g_in.units[g_in.cu], ents, 1024);
+        unsigned k = g_in.ce;
+        for (; k < ne && budget; ++k, --budget) Consider(ents[k]);
+        if (k >= ne)
+            ++g_in.cu, g_in.ce = 0;
+        else
+            g_in.ce = k;
+    }
+    if (g_in.cu >= g_in.nUnits) g_in.sweep = false, ++g_in.sweeps;
+}
+void Summary() {
+    const double now = Now();
+    if (now - g_in.tSum < kSumSec) return;
+    g_in.tSum = now;
+    const LONG p = InterlockedExchange(&g_sh.passes, 0), pm = InterlockedExchange(&g_sh.mountPasses, 0), un = InterlockedExchange(&g_sh.unknown, 0);
+    if (p || un || g_in.fresh)
+        Log("ffpass: last %.0f s: bullets passed through friendlies %ld (via mount / carrier copies %ld), friendlies hit by hero projectiles with other "
+            "records %ld | hooked %d (+%u new, %d vtable copies, %u sweeps); mounts / carriers hooked: same side %u, no side %u; other side seen %u; "
+            "unit members skipped: other side %u, slot +0x310 not the soldier one %u",
+            kSumSec, static_cast<long>(p), static_cast<long>(pm), static_cast<long>(un), g_in.nEnts, g_in.fresh, g_in.nCopies, g_in.sweeps,
+            g_in.mountSame, g_in.mountNoSide, g_in.mountOther, g_in.otherSide, g_in.otherSlot);
+    g_in.fresh = g_in.mountSame = g_in.mountNoSide = g_in.mountOther = g_in.otherSide = g_in.otherSlot = g_in.sweeps = 0;
+}
+void Step() {
+    const uintptr_t sb = Ptr(g_base + kGlobalScript), battle = sb ? Ptr(sb + oScriptBattle) : 0;
+    if (battle != g_in.battle) {
+        if (g_in.nEnts)
+            Log("ffpass: battle changed - %d hooked entities of the old battle forgotten (not written back: that battle is gone)", g_in.nEnts);
+        InterlockedExchange(&g_sh.on, 0);
+        InterlockedExchange(&g_sh.passLogs, 0);
+        InterlockedExchange(&g_sh.unknownLogs, 0);
+        g_in.on = g_in.sweep = g_in.announced = false;
+        g_in.nEnts = 0;
+        g_in.nUnits = g_in.cu = g_in.ce = 0;
+        g_in.tList = -1e9;
+        g_in.stateLogs = g_in.mountLogs = g_in.listLogs = 0;
+        g_in.why = "";
+        g_in.battle = battle;
+    }
+    if (!battle) return;
+    if (S.entity && Unhook(S.entity)) Log("ffpass: hero entity %p had our vtable copy (hero changed) - given its own back", (void*)S.entity);
+    if (S.body && S.body != S.entity && Unhook(S.body)) Log("ffpass: hero's mount %p had our vtable copy - given its own back", (void*)S.body);
+    uint64_t isMp = 1;
+    if (!(g_mpFlagOk && Rd(battle + oBattleIsMp, isMp))) isMp = 1;
+    const uintptr_t side = S.entity ? Ptr(S.entity + 0x80) : 0;
+    const char* why = WhyOff(cfg.friendPass, g_ffPassOk, S.active && S.entity && side, isMp != 0 || S.mpMode, vmgame::FriendlyFire());
+    const char* state = why ? why : "single player, MCT friendly fire off";
+    if (!g_in.announced) {
+        g_in.announced = true;
+        Log("ffpass: battle %p: our gun bullets pass through friendly units %s (%s); projectile-hit code fingerprint %s, [fire] friend_pass=%d",
+            (void*)battle, why ? "OFF" : "ON", state, g_ffPassOk ? "ok" : "MISMATCH - never on", cfg.friendPass ? 1 : 0);
+    } else if (strcmp(state, g_in.why) != 0 && g_in.stateLogs++ < kStateLogs) {
+        Log("ffpass: now %s (%s)", why ? "off" : "ON", state);
+    }
+    g_in.why = state;
+    if (why) {
+        if (g_in.on) Restore(why);
+        return;
+    }
+    g_sh.hero = S.entity;
+    g_sh.side = side;
+    InterlockedExchange(&g_sh.noOwner, FireOwner() ? 0 : 1);
+    if (!g_in.on) {
+        g_in.on = true;
+        g_in.tList = -1e9;
+        g_in.tSum = Now();
+    }
+    InterlockedExchange(&g_sh.on, 1);
+    Scan(battle);
+    Summary();
+}
+void DetachRestore() {
+    InterlockedExchange(&g_sh.on, 0);
+    for (int i = 0; i < g_in.nEnts; ++i) Unhook(g_in.ents[i]);
+}
 }
 bool UicName(uintptr_t uic, char* out, size_t n) {
     out[0] = 0;
@@ -9182,6 +9559,7 @@ void Apply(uintptr_t mgr) {
             uintptr_t rec = want[0] ? FindGunProjectile(want, &id, &S.projFF) : 0;
             S.fpProj = rec && id >= 0 ? rec : 0;
             S.fpProjId = S.fpProj ? id : -1;
+            ffpass::AddRecord(S.fpProj, want, S.projFF);
             herofx::Track(S.fpProj);
             Log("fire: weapon %d projectile '%s%s' -> %s (id %d)", S.projFor, want, S.projFF ? "_ff (MCT friendly fire)" : "",
                 S.fpProj ? "found" : "NOT FOUND (hero's own)", S.fpProjId);
@@ -9755,6 +10133,8 @@ bool VerifyGame() {
                          Ptr(g_base + kVtSoldier904 + 0x3a8) == g_base + kFnHitReact904 && Ptr(g_base + kVtSoldier904 + 0x558) == g_base + kFnStagger904;
         if (g_shieldGameOk) g_hero_1c8_ret1 = g_base + kMeleeRet1_904, g_hero_1c8_ret2 = g_base + kMeleeRet2_904;
         Log("shield-game: shield blocks real hits (missile +0x310 / melee +0x1c8 / stagger +0x558 / hp refund) %s", g_shieldGameOk ? "ok" : "OFF");
+        g_ffPassOk = PrintsMatch(PrintSet{kShieldGamePrints904, 1}, "friendly pass-through (projectile hit)") &&
+                     Ptr(g_base + kVtSoldier904 + 0x310) == g_base + kFnProjHit904;
         g_armorOk = PrintsMatch(Prints(kArmorPrints904), "super armor (hit reaction state 18)") && Ptr(g_base + kVtSoldier904 + 0x558) == g_base + kFnStagger904;
         Log("hero: super armor (no hit-reaction stagger in first person) %s", g_armorOk ? "ok" : "OFF - hits still stagger the hero");
         g_abilityOk = m && PrintsMatch(Prints(kAbilityPrints904), "launcher ability cast") &&
@@ -10091,6 +10471,7 @@ extern "C" void hfps_after_step_pre(uintptr_t self, uintptr_t battle) {
         *reinterpret_cast<uint32_t*>(g_ifBuf + 0x5008) = 0;
         uintptr_t ours[64];
         unsigned k = PromoteHeroBullets(world, ours, g_ef.hero);
+        hitprobe::Observe(world, g_ef.hero, true);
         hitprobe::Arm(world, g_ef.hero, ours, k);
         using FnStep = void (*)(uintptr_t bullet);
         for (unsigned i = 0; i < k; ++i) reinterpret_cast<FnStep>(g_base + kProjStep904)(ours[i]);
@@ -10586,6 +10967,7 @@ extern "C" void hfps_after_cam_update(uintptr_t mgr) {
     MoraleStep();
     VocalStep();
     AggroStep();
+    ffpass::Step();
     NoKnockStep();
     UiStep();
     CursorStep();
@@ -10960,6 +11342,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
         wchar_t* slash = wcsrchr(g_dir, L'\\');
         if (slash) *slash = 0;
     } else if (reason == DLL_PROCESS_DETACH && !reserved && g_log) {
+        ffpass::DetachRestore();
         fprintf(g_log, "loader: DLL unloaded by FreeLibrary (pinned=%d) - hooks would dangle\n", g_pinned ? 1 : 0);
         fflush(g_log);
     }

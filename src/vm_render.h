@@ -201,7 +201,6 @@ struct Settings {
     int dofDebug = 0;
     int shellFollow = 1;
     int shellCaliber = 556;
-    wchar_t shellMesh[128] = L"";
     float shellOut[2] = {3.0f, 4.0f};
     float shellFwd[2] = {0.4f, 1.2f};
     float shellUp[2] = {0.5f, 1.4f};
@@ -508,8 +507,7 @@ private:
 };
 class ShellEject {
 public:
-    bool Load(ID3D11Device* dev, char* err, size_t errLen, const wchar_t* meshPath = nullptr);
-    bool MeshLoaded() const { return meshOk_; }
+    bool Load(ID3D11Device* dev, char* err, size_t errLen);
     void Trigger(float ads = 0.f) { if (vs_ && pending_ < 4) ++pending_, ads_ = ads; }
     bool Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* depth, UINT w, UINT h, bool rtvEncodesSrgb,
               double now, const MuzzleFrame* f, const WorldCam* cam, const Settings& s, float flashLight,
@@ -550,10 +548,7 @@ private:
     int nLand_ = 0;
     unsigned rng_ = 0x2545f491u;
     UINT indexCount_ = 0;
-    UINT kindIdx_[5] = {}, kindFirst_[5] = {}, kindCount_[5] = {};
-    ID3D11ShaderResourceView* meshSrv_ = nullptr;
-    float meshMat_[2] = {};
-    bool meshOk_ = false;
+    UINT kindIdx_[4] = {}, kindFirst_[4] = {}, kindCount_[4] = {};
     ID3D11VertexShader* vs_ = nullptr;
     ID3D11PixelShader* ps_ = nullptr;
     ID3D11InputLayout* layout_ = nullptr;

@@ -1161,7 +1161,6 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     {
         wchar_t buf[128];
         GetPrivateProfileStringW(L"viewmodel", L"ads_timing", L"", buf, 128, ini);
-        if (!buf[0]) GetPrivateProfileStringW(L"viewmodel", L"ads_curve_time", L"", buf, 128, ini);
         float t[4];
         if (buf[0]) {
             bool ok = swscanf(buf, L"%f , %f , %f , %f", &t[0], &t[1], &t[2], &t[3]) == 4;
@@ -1250,7 +1249,6 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     IniVec3(ini, L"muzzle_up", s.muzzleUp);
     GetPrivateProfileStringW(L"viewmodel", L"flash_fx", s.flashFx, s.flashFx, 128, ini);
     GetPrivateProfileStringW(L"viewmodel", L"effect_fx", s.effectFx, s.effectFx, 128, ini);
-    GetPrivateProfileStringW(L"viewmodel", L"shell_mesh", s.shellMesh, s.shellMesh, 128, ini);
     s.flashScale = IniFloat(ini, L"flash_scale", s.flashScale);
     s.flashIntensity = IniFloat(ini, L"flash_intensity", s.flashIntensity);
     s.flashLight = IniFloat(ini, L"flash_light", s.flashLight);
@@ -5063,14 +5061,12 @@ const char kShellShader[] = R"HLSL(cbuffer CShellFrame : register(b0) {
     float4 uFlashCol;
     float4 uBrass;
     float4 uHull;
-    float4 uTex;
 };
-Texture2D tShellTex : register(t4);
 cbuffer CShellObj : register(b1) { float4 uRows[192]; };
 Texture2D tScene : register(t3);
 SamplerState sLinear : register(s0);
-struct VSIn { float3 pos : POSITION; float3 nrm : NORMAL; float shade : TEXCOORD0; float2 uv : TEXCOORD1; };
-struct PSIn { float4 pos : SV_Position; float3 vpos : TEXCOORD1; float3 n : TEXCOORD2; float shade : TEXCOORD0; float2 uv : TEXCOORD3; };
+struct VSIn { float3 pos : POSITION; float3 nrm : NORMAL; float shade : TEXCOORD0; };
+struct PSIn { float4 pos : SV_Position; float3 vpos : TEXCOORD1; float3 n : TEXCOORD2; float shade : TEXCOORD0; };
 PSIn VS(VSIn i, uint id : SV_InstanceID) {
     float3x4 m = float3x4(uRows[id * 3], uRows[id * 3 + 1], uRows[id * 3 + 2]);
     PSIn o;
@@ -5078,7 +5074,6 @@ PSIn VS(VSIn i, uint id : SV_InstanceID) {
     o.pos = mul(uProj, float4(o.vpos, 1));
     o.n = mul((float3x3)m, i.nrm);
     o.shade = i.shade;
-    o.uv = i.uv;
     return o;
 }
 float3 SrgbEncode(float3 c) {
@@ -5097,7 +5092,6 @@ float4 PS(PSIn i) : SV_Target {
     float3 alb = plastic ? uHull.rgb * -i.shade : uBrass.rgb * i.shade;
     float metal = plastic ? 0 : 1;
     float rough = clamp(plastic ? uHull.w : uBrass.w, 0.04, 1);
-    if (uTex.x > 0.5) { alb = tShellTex.Sample(sLinear, i.uv).rgb * i.shade; metal = uTex.y; rough = clamp(uTex.z, 0.04, 1); }
     float3 N = normalize(i.n);
     float3 V = normalize(-i.vpos);
     if (dot(N, V) < 0) N = -N;
@@ -5149,12 +5143,11 @@ float4 PS(PSIn i) : SV_Target {
 struct ShellCbFrame {
     float proj[16];
     float lightDir[4], lightColor[4], ambSky[4], ambGround[4];
-    float params[4], scene[4], flashPos[4], flashCol[4], brass[4], hull[4], tex[4];
+    float params[4], scene[4], flashPos[4], flashCol[4], brass[4], hull[4];
 };
-static_assert(sizeof(ShellCbFrame) == 240, "shell cb");
+static_assert(sizeof(ShellCbFrame) == 224, "shell cb");
 struct ShellVtx {
     float p[3], n[3], shade;
-    float uv[2];
 };
 constexpr int kShellSeg = 16;
 struct ShellProfile {
@@ -5192,7 +5185,7 @@ const ShellProfile kProfile12[] = {
     {70.00f, 9.55f, 70.00f, 9.00f, -0.80f},
     {70.00f, 9.00f, 18.00f, 9.20f, -0.22f},
 };
-constexpr int kMeshVertCap = 4096, kMeshIdxCap = 16384;
+constexpr int kMeshVertCap = 1600, kMeshIdxCap = 6400;
 struct MeshOut {
     ShellVtx* v;
     uint32_t* ix;
@@ -5303,7 +5296,7 @@ float ShellEject::Rand(float a, float b) {
     rng_ = rng_ * 1664525u + 1013904223u;
     return a + (b - a) * static_cast<float>((rng_ >> 8) & 0xffffff) / 16777216.f;
 }
-bool ShellEject::Load(ID3D11Device* dev, char* err, size_t errLen, const wchar_t* meshPath) {
+bool ShellEject::Load(ID3D11Device* dev, char* err, size_t errLen) {
     Release();
     auto fail = [&](const char* m) {
         if (err && errLen) snprintf(err, errLen, "shell eject: %s", m);
@@ -5326,9 +5319,8 @@ bool ShellEject::Load(ID3D11Device* dev, char* err, size_t errLen, const wchar_t
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 0, DXGI_FORMAT_R32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0},
-        {"TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, 28, D3D11_INPUT_PER_VERTEX_DATA, 0},
     };
-    ok = ok && SUCCEEDED(dev->CreateInputLayout(il, 4, vsb->GetBufferPointer(), vsb->GetBufferSize(), &layout_));
+    ok = ok && SUCCEEDED(dev->CreateInputLayout(il, 3, vsb->GetBufferPointer(), vsb->GetBufferSize(), &layout_));
     SafeRelease(vsb);
     SafeRelease(psb);
     if (!ok) return fail("shader / layout");
@@ -5343,44 +5335,6 @@ bool ShellEject::Load(ID3D11Device* dev, char* err, size_t errLen, const wchar_t
         else if (k == 3) LatheCasing(mo, kProfile12, sizeof kProfile12 / sizeof *kProfile12, 70.0f, 18.0f, 9.20f, -0.12f);
         else BuildLink(mo);
         kindCount_[k] = static_cast<UINT>(mo.ni) - kindFirst_[k];
-    }
-    kindIdx_[4] = kindFirst_[4] = kindCount_[4] = 0;
-    meshOk_ = false;
-    if (meshPath && meshPath[0]) {
-        struct {
-            char magic[4];
-            uint32_t nv, ni;
-            float metal, rough, r0, r1;
-            char tex[64];
-        } hd = {};
-        static_assert(sizeof(ShellVtx) == 36, "shell vtx");
-        FILE* fp = _wfopen(meshPath, L"rb");
-        bool good = fp && fread(&hd, sizeof hd, 1, fp) == 1 && !memcmp(hd.magic, "HSH1", 4) && hd.nv > 0 && hd.ni >= 3 && hd.ni % 3 == 0 &&
-                    mo.nv + static_cast<int>(hd.nv) <= kMeshVertCap && mo.ni + static_cast<int>(hd.ni) <= kMeshIdxCap;
-        good = good && fread(verts + mo.nv, sizeof(ShellVtx), hd.nv, fp) == hd.nv && fread(idx + mo.ni, sizeof(uint32_t), hd.ni, fp) == hd.ni;
-        if (fp) fclose(fp);
-        for (uint32_t i = 0; good && i < hd.ni; ++i) good = idx[mo.ni + i] < hd.nv;
-        if (good) {
-            hd.tex[63] = 0;
-            wchar_t full[MAX_PATH * 2], wt[64];
-            wcsncpy(full, meshPath, MAX_PATH * 2 - 1);
-            full[MAX_PATH * 2 - 1] = 0;
-            wchar_t* sl = wcsrchr(full, L'\\');
-            if (wchar_t* s2 = wcsrchr(full, L'/')) sl = (!sl || s2 > sl) ? s2 : sl;
-            MultiByteToWideChar(CP_UTF8, 0, hd.tex, -1, wt, 64);
-            if (sl) swprintf(sl + 1, MAX_PATH * 2 - (sl + 1 - full), L"%ls", wt);
-            char e2[160] = {};
-            good = LoadDds(dev, full, true, &meshSrv_, e2, sizeof e2);
-        }
-        if (good) {
-            kindIdx_[4] = static_cast<UINT>(mo.nv);
-            kindFirst_[4] = static_cast<UINT>(mo.ni);
-            kindCount_[4] = hd.ni;
-            mo.nv += static_cast<int>(hd.nv);
-            mo.ni += static_cast<int>(hd.ni);
-            meshMat_[0] = hd.metal, meshMat_[1] = hd.rough;
-            meshOk_ = true;
-        }
     }
     D3D11_BUFFER_DESC bd = {};
     bd.Usage = D3D11_USAGE_IMMUTABLE;
@@ -5537,7 +5491,7 @@ bool ShellEject::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3
         e.landed = false;
     };
     for (; pending_ > 0; --pending_) {
-        spawnOne(meshOk_ ? 4 : s.shellCaliber == 762 ? 1 : s.shellCaliber == 12 ? 3 : 0);
+        spawnOne(s.shellCaliber == 762 ? 1 : s.shellCaliber == 12 ? 3 : 0);
         if (s.shellLink) spawnOne(2);
     }
     int keep = 0;
@@ -5573,8 +5527,8 @@ bool ShellEject::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3
     n_ = keep;
     lastMinX_ = 1e9f;
     if (!n_ || !f) return false;
-    static float rowsK[5][kMax * 12];
-    int ndK[5] = {}, nd = 0;
+    static float rowsK[4][kMax * 12];
+    int ndK[4] = {}, nd = 0;
     for (int i = 0; i < n_; ++i) {
         const Shell& e = sh_[i];
         float lf = e.age / e.life;
@@ -5597,7 +5551,7 @@ bool ShellEject::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3
         }
         if (pv[2] < f->zn + 0.005f || pv[2] > f->zf) continue;
         if (pv[0] < lastMinX_) lastMinX_ = pv[0];
-        const int k = e.kind < 5 ? e.kind : 0;
+        const int k = e.kind < 4 ? e.kind : 0;
         float* o = rowsK[k] + ndK[k] * 12;
         for (int r = 0; r < 3; ++r)
             o[r * 4] = mv[r * 3] * sc, o[r * 4 + 1] = mv[r * 3 + 1] * sc, o[r * 4 + 2] = mv[r * 3 + 2] * sc, o[r * 4 + 3] = pv[r];
@@ -5640,7 +5594,7 @@ bool ShellEject::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3
         for (int k = 0; k < 3; ++k) cf.flashCol[k] = c[k] * 2.5f * s.flashLight * flashLight;
         cf.flashCol[3] = 1.f;
     }
-    const float mat[5][4] = {{0.95f, 0.70f, 0.32f, 0.30f}, {0.95f, 0.70f, 0.32f, 0.30f}, {0.42f, 0.42f, 0.44f, 0.45f}, {0.95f, 0.70f, 0.32f, 0.30f}, {1.f, 1.f, 1.f, 0.30f}};
+    const float mat[4][4] = {{0.95f, 0.70f, 0.32f, 0.30f}, {0.95f, 0.70f, 0.32f, 0.30f}, {0.42f, 0.42f, 0.44f, 0.45f}, {0.95f, 0.70f, 0.32f, 0.30f}};
     const float hull[4] = {0.21f, 0.004f, 0.004f, 0.45f};
     memcpy(cf.hull, hull, sizeof cf.hull);
     D3D11_MAPPED_SUBRESOURCE mp;
@@ -5669,11 +5623,9 @@ bool ShellEject::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3
     ctx->GSSetShader(nullptr, nullptr, 0);
     ctx->HSSetShader(nullptr, nullptr, 0);
     ctx->DSSetShader(nullptr, nullptr, 0);
-    ctx->PSSetShaderResources(4, 1, &meshSrv_);
-    for (int k = 0; k < 5; ++k) {
+    for (int k = 0; k < 4; ++k) {
         if (!ndK[k] || !kindCount_[k]) continue;
         memcpy(cf.brass, mat[k], sizeof cf.brass);
-        cf.tex[0] = (k == 4 && meshSrv_) ? 1.f : 0.f, cf.tex[1] = meshMat_[0], cf.tex[2] = meshMat_[1], cf.tex[3] = 0.f;
         if (FAILED(ctx->Map(cbFrame_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mp))) break;
         memcpy(mp.pData, &cf, sizeof cf);
         ctx->Unmap(cbFrame_, 0);
@@ -5698,8 +5650,6 @@ void ShellEject::Release() {
     SafeRelease(dssNoDepth_);
     SafeRelease(bs_);
     SafeRelease(samp_);
-    SafeRelease(meshSrv_);
-    meshOk_ = false;
     indexCount_ = 0;
     n_ = pending_ = 0;
     nLand_ = 0;
