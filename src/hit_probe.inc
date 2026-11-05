@@ -4,8 +4,7 @@ constexpr uintptr_t oBulRecord = 0x90, oBulState = 0xc0, oBulPos = 0xf4, oBulVel
 constexpr uintptr_t oEntHp = 0xb1c, oEntHpMax = 0xb18, oEntSide = 0x80;
 constexpr float kSimStep = 0.1f;
 constexpr float kNearH = 1.2f;
-constexpr int kMaxShots = 64, kMaxBul = 48, kMaxCand = 64, kMaxVic = 1024, kMaxUpd = 12;
-constexpr float kTopDef = 4.f, kTopSlack = 0.5f;
+constexpr int kMaxShots = 64, kMaxBul = 48, kMaxCand = 24, kMaxVic = 256, kMaxUpd = 12;
 struct Shot {
     double tClick;
     uintptr_t aim;
@@ -25,7 +24,6 @@ struct Bul {
     int hpVics;
     bool done;
     uintptr_t cand[kMaxCand];
-    float cd[kMaxCand];
     int nc;
 };
 struct Vic {
@@ -54,8 +52,6 @@ struct State {
     unsigned sHitsPerKill[5] = {}, sDmgN = 0, sScanN = 0, sExecN = 0, sKillN = 0;
     double sExecSum = 0, sExecMax = 0, sKillClickSum = 0, sKillClickMax = 0, sKillFirstSum = 0, sDmgSum = 0, sScanSum = 0;
     int sDmgMin = 0, sDmgMax = 0;
-    unsigned bShots = 0, bHits = 0, bLate = 0, bWhite = 0, bRed = 0, bCandEvict = 0, bCandDrop = 0, bVicDrop = 0, bVicEvict = 0, bBulDrop = 0, bShotDrop = 0;
-    unsigned fShots = 0, fNew = 0, fOld = 0, fOnlyNew = 0, fOnlyOld = 0, fFriends = 0, fDead = 0, fBlocked = 0, fKd = 0;
 } g;
 double Ms(double a, double b) { return (a - b) * 1000.0; }
 int FindVic(uintptr_t e) {
@@ -63,42 +59,15 @@ int FindVic(uintptr_t e) {
         if (g.v[i].e == e) return i;
     return -1;
 }
-void Touch(Bul& b, uintptr_t e, uint32_t hp, float score) {
-    int ci = -1;
-    for (int i = 0; i < b.nc && ci < 0; ++i)
-        if (b.cand[i] == e) ci = i;
-    const bool known = ci >= 0;
-    if (known) {
-        if (score < b.cd[ci]) b.cd[ci] = score;
-    } else if (b.nc < kMaxCand) {
-        b.cand[b.nc] = e;
-        b.cd[b.nc] = score;
-        ++b.nc;
-    } else {
-        int w = 0;
-        for (int i = 1; i < b.nc; ++i)
-            if (b.cd[i] > b.cd[w]) w = i;
-        if (score < b.cd[w]) {
-            b.cand[w] = e;
-            b.cd[w] = score;
-            ++g.bCandEvict;
-        } else {
-            ++g.bCandDrop;
-        }
-    }
+void Touch(Bul& b, uintptr_t e, uint32_t hp) {
+    bool known = false;
+    for (int i = 0; i < b.nc; ++i)
+        if (b.cand[i] == e) known = true;
+    if (!known && b.nc < kMaxCand) b.cand[b.nc++] = e;
     int vi = FindVic(e);
     if (vi < 0) {
-        if (g.nv >= kMaxVic) {
-            for (int i = 0; i < g.nv; ++i)
-                if ((g.v[i].dead || (!g.v[i].hits && g.tCur - g.v[i].tTouch > 0.5)) && (vi < 0 || g.v[i].tTouch < g.v[vi].tTouch)) vi = i;
-            if (vi < 0) {
-                ++g.bVicDrop;
-                return;
-            }
-            ++g.bVicEvict;
-        } else {
-            vi = g.nv++;
-        }
+        if (g.nv >= kMaxVic) return;
+        vi = g.nv++;
         Vic& v = g.v[vi];
         memset(&v, 0, sizeof v);
         v.e = e;
@@ -162,43 +131,16 @@ void LogSurvivor(const Vic& v) {
     Log("hit-probe: %p took %d hits [%s] from our bullets, hp %u -> %u (max %u), %d of our bullets passed it, still alive", (void*)v.e, v.hits, dl,
         v.hp0, v.hpLast, v.hpMax, v.shots);
 }
-void BattleSummary(const char* why) {
-    if (!g.bShots && !g.bHits && !g.fShots) return;
-    Log("hitmark: summary (%s): bullets %u, probe hits %u (seen by the after-step check %u - lost before this fix), probe white %u red %u; "
-        "dropped by limits: candidates evicted %u / not taken %u, victims evicted %u / not taken %u, bullets %u, shots %u | shot-frame feedback: shots %u, "
-        "white %u (old rule %u; only new %u, only old %u, knocked aim %u), passed friends %u, passed dead or no side %u, blocked by a live friend %u",
-        why, g.bShots, g.bHits, g.bLate, g.bWhite, g.bRed, g.bCandEvict, g.bCandDrop, g.bVicEvict, g.bVicDrop, g.bBulDrop, g.bShotDrop, g.fShots, g.fNew,
-        g.fOld, g.fOnlyNew, g.fOnlyOld, g.fKd, g.fFriends, g.fDead, g.fBlocked);
-    g.bShots = g.bHits = g.bLate = g.bWhite = g.bRed = g.bCandEvict = g.bCandDrop = g.bVicDrop = g.bVicEvict = g.bBulDrop = g.bShotDrop = 0;
-    g.fShots = g.fNew = g.fOld = g.fOnlyNew = g.fOnlyOld = g.fFriends = g.fDead = g.fBlocked = g.fKd = 0;
-}
 void Flush(const char* why) {
     for (int i = 0; i < g.nb; ++i) Finish(g.b[i], why);
     for (int i = 0; i < g.nv; ++i) LogSurvivor(g.v[i]);
     Summary(true);
-    BattleSummary(why);
     g.nb = g.nv = g.nq = 0;
 }
 void OnShot(const AimHit& h, double tClick) {
     if (!cfg.hitProbe && !vmgame::HitMarkOn()) return;
     AcquireSRWLockExclusive(&g.lock);
-    if (g.nq < kMaxShots)
-        g.q[g.nq++] = {tClick, h.ent, h.dist, h.what ? h.what[0] : 'r'};
-    else
-        ++g.bShotDrop;
-    ReleaseSRWLockExclusive(&g.lock);
-}
-void NoteFb(bool oldWhite, bool newWhite, unsigned friends, unsigned dead, bool blocked, bool kdAim) {
-    AcquireSRWLockExclusive(&g.lock);
-    ++g.fShots;
-    if (newWhite) ++g.fNew;
-    if (oldWhite) ++g.fOld;
-    if (newWhite && !oldWhite) ++g.fOnlyNew;
-    if (oldWhite && !newWhite) ++g.fOnlyOld;
-    g.fFriends += friends;
-    g.fDead += dead;
-    if (blocked) ++g.fBlocked;
-    if (kdAim) ++g.fKd;
+    if (g.nq < kMaxShots) g.q[g.nq++] = {tClick, h.ent, h.dist, h.what ? h.what[0] : 'r'};
     ReleaseSRWLockExclusive(&g.lock);
 }
 void OnExit(const char* why) {
@@ -210,7 +152,7 @@ void OnExit(const char* why) {
     g.world = g.hero = 0;
     ReleaseSRWLockExclusive(&g.lock);
 }
-void Observe(uintptr_t world, uintptr_t hero, bool late = false) {
+void Observe(uintptr_t world, uintptr_t hero) {
     if (!cfg.hitProbe && !vmgame::HitMarkOn()) return;
     AcquireSRWLockExclusive(&g.lock);
     g.tCur = Now();
@@ -271,12 +213,10 @@ void Observe(uintptr_t world, uintptr_t hero, bool late = false) {
                 if (by >= 0) {
                     Bul& b = g.b[by];
                     ++b.hpVics;
-                    ++g.bHits;
-                    if (late) ++g.bLate;
                     if (hp == 0)
-                        vmgame::HitMark(true), ++g.bRed;
+                        vmgame::HitMark(true);
                     else if (v.e != b.aim)
-                        vmgame::HitMark(false), ++g.bWhite;
+                        vmgame::HitMark(false);
                     if (g.markLogs++ < 40)
                         Log("hit-mark: our bullet #%u hit enemy %p for %d hp%s%s", b.id, (void*)v.e, d, hp == 0 ? " - dead -> kill marker" : "",
                             hp != 0 && v.e == b.aim ? " (aimed at it: white already shown at the shot)" : hp != 0 ? " -> hit marker" : "");
@@ -378,7 +318,6 @@ void Arm(uintptr_t world, uintptr_t hero, const uintptr_t* ours, unsigned k) {
         }
         if (g.nb >= kMaxBul) {
             Finish(g.b[0], "probe table full");
-            ++g.bBulDrop;
             memmove(g.b, g.b + 1, sizeof(Bul) * --g.nb);
         }
         Bul& b = g.b[g.nb++];
@@ -394,7 +333,6 @@ void Arm(uintptr_t world, uintptr_t hero, const uintptr_t* ours, unsigned k) {
         Rd(p + oBulHits, h0);
         b.hits = h0;
         ++g.sShots;
-        ++g.bShots;
         if (s.tClick > 0) {
             double e = Ms(g.tCur, s.tClick);
             g.sExecSum += e;
@@ -421,7 +359,7 @@ void Arm(uintptr_t world, uintptr_t hero, const uintptr_t* ours, unsigned k) {
         s.bi = i;
         if (b.aim && !b.upd) {
             uint32_t hp = 0;
-            if (Rd(b.aim + oEntHp, hp) && hp) Touch(b, b.aim, hp, -1.f);
+            if (Rd(b.aim + oEntHp, hp) && hp) Touch(b, b.aim, hp);
         }
     }
     if (ns) {
@@ -460,12 +398,10 @@ void Arm(uintptr_t world, uintptr_t hero, const uintptr_t* ours, unsigned k) {
                                 float r = 0.f;
                                 if (dh > kNearH && (!Rd(e + 0xa0, r) || !(r > 0.f && r < 10.f) || dh > r + 0.5f)) continue;
                                 float y = seg[s].a[1] + (seg[s].b[1] - seg[s].a[1]) * t;
-                                float top = kTopDef, eh = 0.f;
-                                if (y > q[1] + top && Rd(e + 0x9c, eh) && eh > 0.3f && eh < 60.f && eh + kTopSlack > top) top = eh + kTopSlack;
-                                if (y < q[1] - 1.f || y > q[1] + top) continue;
+                                if (y < q[1] - 1.f || y > q[1] + 4.f) continue;
                                 uint32_t hp = 0;
                                 if (!Rd(e + oEntHp, hp) || !hp || Ptr(e + oEntSide) == heroSide) break;
-                                Touch(g.b[seg[s].bi], e, hp, r > 0.f ? (dh > r ? dh - r : 0.f) : dh);
+                                Touch(g.b[seg[s].bi], e, hp);
                             }
                         }
                     }
