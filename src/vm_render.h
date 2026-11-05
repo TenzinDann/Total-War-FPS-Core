@@ -285,6 +285,9 @@ struct Settings {
     float meleeSfxMaster = 1.f;
     bool meleeSfxSwingCut = false;
     float meleeSfxSwingPre = -1.f;
+    float meleeLightTrim = 0.f, meleeLightEnter = -1.f;
+    float meleeLightScale = 0.f;
+    float meleeLight1Times[8] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f}, meleeLight2Times[8] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
 };
 struct WorldCam {
     float eye[3], right[3], up[3], fwd[3];

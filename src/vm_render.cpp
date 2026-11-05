@@ -1057,6 +1057,16 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     s.meleeSfxSwingCut = IniFloat(ini, L"melee_sfx_swing_cut", s.meleeSfxSwingCut ? 1.f : 0.f) != 0.f;
     s.meleeSfxSwingPre = IniFloat(ini, L"melee_sfx_swing_pre", s.meleeSfxSwingPre);
     if (!(s.meleeSfxSwingPre <= 1.f)) s.meleeSfxSwingPre = -1.f;
+    s.meleeLightTrim = IniFloat(ini, L"melee_light_trim", s.meleeLightTrim);
+    s.meleeLightEnter = IniFloat(ini, L"melee_light_enter", s.meleeLightEnter);
+    s.meleeLightScale = IniFloat(ini, L"melee_light_scale", s.meleeLightScale);
+    for (int li = 0; li < 2; ++li) {
+        wchar_t tb[256];
+        GetPrivateProfileStringW(L"viewmodel", li ? L"melee_light2_times" : L"melee_light1_times", L"", tb, 256, ini);
+        float tv[8];
+        if (tb[0] && swscanf(tb, L"%f,%f,%f,%f,%f,%f,%f,%f", tv, tv + 1, tv + 2, tv + 3, tv + 4, tv + 5, tv + 6, tv + 7) == 8)
+            for (int i = 0; i < 8; ++i) (li ? s.meleeLight2Times : s.meleeLight1Times)[i] = tv[i];
+    }
     s.fireRpm = IniFloat(ini, L"fire_rpm", s.fireRpm);
     s.magSize = static_cast<int>(IniFloat(ini, L"mag_size", static_cast<float>(s.magSize)));
     s.magDisposable = IniFloat(ini, L"mag_disposable", s.magDisposable ? 1.f : 0.f) != 0.f;
@@ -1161,6 +1171,7 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     {
         wchar_t buf[128];
         GetPrivateProfileStringW(L"viewmodel", L"ads_timing", L"", buf, 128, ini);
+        if (!buf[0]) GetPrivateProfileStringW(L"viewmodel", L"ads_curve_time", L"", buf, 128, ini);
         float t[4];
         if (buf[0]) {
             bool ok = swscanf(buf, L"%f , %f , %f , %f", &t[0], &t[1], &t[2], &t[3]) == 4;
