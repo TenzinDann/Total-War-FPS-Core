@@ -1161,7 +1161,6 @@ bool LoadSettings(const wchar_t* ini, Settings& s) {
     {
         wchar_t buf[128];
         GetPrivateProfileStringW(L"viewmodel", L"ads_timing", L"", buf, 128, ini);
-        if (!buf[0]) GetPrivateProfileStringW(L"viewmodel", L"ads_curve_time", L"", buf, 128, ini);
         float t[4];
         if (buf[0]) {
             bool ok = swscanf(buf, L"%f , %f , %f , %f", &t[0], &t[1], &t[2], &t[3]) == 4;

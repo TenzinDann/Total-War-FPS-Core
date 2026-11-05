@@ -2920,7 +2920,7 @@ void LayerPrewarm(IDXGISwapChain* sc, ID3D11Device* dev) {
     const bool cross = g_cross.Prewarm(dev), cm = g_cmR.Prewarm(dev);
     const bool screen = td.Width && Wp().rend.Ready() && Wp().rend.PrewarmScreen(td);
     const bool dof = td.Width && g_dof.Prewarm(dev, td.Width, td.Height);
-    g_log("warm: first-person GPU objects made before first person in %.1f ms: GPU timer %s, crosshair %s, cast marker %s, screen buffers %ux%u %s, alt dof %s",
+    g_log("warm: first-person GPU objects made before first person in %.1f ms: GPU timer %s, crosshair %s, cast marker %s, screen buffers %ux%u %s, dof %s",
           (Now() - t0) * 1000.0, gpu ? "ok" : g_gpuTimer ? "failed" : "off", cross ? "ok" : "failed", cm ? "ok" : "failed", td.Width, td.Height,
           screen ? "ok" : "not made", dof ? "ok" : "not made");
 }
@@ -3101,7 +3101,7 @@ void DrawLayer(IDXGISwapChain* sc, int part) {
                 dev->GetImmediateContext(&ctx);
                 if (ctx) {
                     g_fprof.Mark("rtv");
-                    const int gpuSlot = (part == kPartGun && !g_uiMidGpuTimer) ? -1 : g_gpu.Begin(dev, ctx);
+                    const int gpuSlot = (part == kPartCross || (part == kPartGun && !g_uiMidGpuTimer)) ? -1 : g_gpu.Begin(dev, ctx);
                     if (part != kPartGun) UiLayerOnPresent(ctx, bb, td.Width, td.Height);
                     g_fprof.Mark("ui");
                     float mx = 0, my = 0, ma = 1;
