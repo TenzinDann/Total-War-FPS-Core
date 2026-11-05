@@ -9,13 +9,6 @@
 #include <cstring>
 #include <cwchar>
 #include <initializer_list>
-#include <algorithm>
-#include <array>
-#include <map>
-#include <mutex>
-#include <string>
-#include <unordered_map>
-#include "zstd_decode.h"
 #include <vector>
 namespace vm {
 namespace {
@@ -1553,7 +1546,6 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
     unsigned char* data = nullptr;
     size_t len = 0;
     if (!TakePrefetched(path, true, &data, &len) && !ReadHvmV1(path, &data, &len, err, errLen)) return false;
-    grip::BeginLoad(this, path);
     {
         char note[300];
         if (ApplyArmsOverride(&data, &len, note, sizeof note) || note[0]) ArmsLogAppend(path, note);
@@ -1664,7 +1656,6 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
                 if (!strncmp(hb.name, kShieldFinger[k], sizeof hb.name)) fingerBone_[k] = static_cast<int>(b);
             if (!strncmp(hb.name, "2598db76b21b58e3", sizeof hb.name)) handTag_[0] = static_cast<int>(b);
             if (!strncmp(hb.name, "25c8bb76b2444645", sizeof hb.name)) handTag_[1] = static_cast<int>(b);
-            grip::NoteBone(this, static_cast<int>(b), hb.name, sizeof hb.name, bones_[b].parent, hb.invBind);
             {
                 char nm[sizeof hb.name + 1];
                 memcpy(nm, hb.name, sizeof hb.name);
@@ -1675,7 +1666,6 @@ bool Renderer::LoadHvm(const wchar_t* path, char* err, size_t errLen) {
         }
         cameraBone_ = (h.cameraBone >= 0 && h.cameraBone < static_cast<int>(h.boneCount)) ? h.cameraBone : -1;
         TwistSetup();
-        grip::EndLoad(this);
         unsigned char* verts = data + off;
         for (uint32_t v = 0; v < h.vertexCount; ++v) {
             unsigned char* bi = verts + static_cast<size_t>(v) * kVertexStride + 48;
@@ -2571,7 +2561,6 @@ void Renderer::TwistBones() {
         }
     }
 }
-#include "grip_curl.inc"
 void Renderer::FinishBones(float* palette, int muzzleBone, const float* muzzleLocal, float* muzzleModel, const float* axisLocal,
                            const float* upLocal, float* axisModel, float* upModel) {
     TwistBones();
@@ -2775,7 +2764,6 @@ bool Renderer::Draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D1
             Pos(wv, leftWristView_);
         }
     }
-    grip::Curl(this, armBone_, handTag_, boneCount_);
     FinishBones(palette, s.muzzleBone, s.muzzleLocal, muzzleModel, s.muzzleAxis, s.muzzleUp, axisModel, upModel);
     if (poseDumpPath_[0]) {
         FILE* f = _wfopen(poseDumpPath_, L"wb");

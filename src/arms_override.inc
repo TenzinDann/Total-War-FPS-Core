@@ -1,5 +1,3 @@
-#include "arms_lowpoly.inc"
-#include "grip_data.inc"
 namespace {
 int TwistBoneSide(const char* name, int* n) {
     const char* p = strstr(name, "_flow_");
@@ -97,19 +95,8 @@ void SetArmsOverride(const wchar_t* list) {
             ArmsLogAppend(k.path, err);
             continue;
         }
-        size_t plen = wcslen(k.path);
-        if (plen > 7 && !wcscmp(k.path + plen - 7, L".lp.hvm")) {
-            std::vector<uint8_t> lp(data, data + len);
-            delete[] data;
-            if (!lowpoly::Expand(k.path, lp, err, sizeof err)) {
-                ArmsLogAppend(k.path, err);
-                continue;
-            }
-            k.data.assign(lp.begin(), lp.end());
-        } else {
-            k.data.assign(data, data + len);
-            delete[] data;
-        }
+        k.data.assign(data, data + len);
+        delete[] data;
         if (!ParseKit(k, err, sizeof err)) {
             ArmsLogAppend(k.path, err);
             continue;
@@ -185,7 +172,6 @@ bool ApplyArmsOverride(unsigned char** pdata, size_t* plen, char* note, size_t n
         if (miss < bestMiss || (miss == bestMiss && dist < bestDist)) best = static_cast<int>(ki), bestMiss = miss, bestDist = dist;
     }
     const ArmsKit& k = g_armsKits[best];
-    grip::SetKit(k.path);
     std::vector<int> map(k.bones.size(), -1);
     std::vector<float> xf(k.bones.size() * 12);
     std::vector<HvmBone> addBones;
