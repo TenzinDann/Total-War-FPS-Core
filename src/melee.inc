@@ -1,7 +1,8 @@
 volatile LONG g_meleeIn = 0;
 bool MeleeWeapon() {
     return Wp().rend.Clips() && (Wp().rend.FindClip("m_light_stab") >= 0 || Wp().rend.FindClip("m_gs_light_left") >= 0 ||
-                                 Wp().rend.FindClip("m_gh_light_left") >= 0 || Wp().rend.FindClip("m_hb_light_left") >= 0);
+                                 Wp().rend.FindClip("m_gh_light_left") >= 0 || Wp().rend.FindClip("m_hb_light_left") >= 0 ||
+                                 Wp().rend.FindClip("m_es_strike_1") >= 0);
 }
 volatile LONG g_meleeOn = 0, g_meleeStrike = 0;
 volatile LONG g_meleeCat = 0;
@@ -235,14 +236,14 @@ const Def kGhDef[kActs] = {
     {"idle", "idle", 0.2f, 1.f, 0.f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
     {"draw", "draw", 0.1f, 1.f, 0.8f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
     {"default", "m_gh_charge", 0.3f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.5f, -1, 0, 0},
-    {"default_left", "m_gh_charge", 0.2f, 1.f, 0.f, 0, 0, -1, 0, kLight2, kHeavy1, 0.5f, -1, 0, 0},
+    {"default_left", "m_gh_charge_left", 0.2f, 1.f, 0.f, 0, 0, -1, 0, kLight2, kHeavy2, 0.5f, -1, 0, 0},
     {"default_right", "m_gh_charge_right", 0.2f, 1.f, 0.f, 0, 0, -1, 0, kLight3, kHeavy1, 0.5f, -1, 0, 0},
     {"(unused)", "m_gh_charge_left", 0.2f, 1.f, 0.f, 0, 0, -1, 0, kLight2, kHeavy2, 0.5f, -1, 0, 0},
     {"(unused)", "m_gh_charge", 0.3f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.5f, -1, 0, 0},
-    {"light_attack_left", "m_gh_light_left", 0.2f, 0.6f, 2.5f, 0.4167f, 1.8f, kDefaultLeft, 0.4167f, -1, -1, 0, kStrikeStab, 0.1f, 0.0833f, 0.3f, 0.1667f},
-    {"light_attack_right", "m_gh_light_right", 0.2f, 0.6f, 2.5f, 0.5333f, 1.8f, kDefault, 0.5333f, -1, -1, 0, kStrikeStab, 0.1833f, 0.1667f, 0.3f, 0.25f},
+    {"light_attack_left", "m_gh_light_left", 0.2f, 0.9f, 2.5f, 0.7f, 1.8f, kDefaultLeft, 0.7f, -1, -1, 0, kStrikeStab, 0.3f, 0.2333f, 0.3f, 0.4f},
+    {"light_attack_right", "m_gh_light_right", 0.2f, 0.9f, 2.5f, 0.7f, 1.8f, kDefaultRight, 0.7f, -1, -1, 0, kStrikeStab, 0.35f, 0.3333f, 0.3f, 0.45f},
     {"light_attack_left_up", "m_gh_light_left_up", 0.15f, 0.9f, 2.5f, 0.75f, 1.8f, kDefault, 0.7f, -1, -1, 0, kStrikeStab, 0.3f, 0.1667f, 0.3f, 0.35f},
-    {"heavy_attack_left", "m_gh_heavy_left", 0.2f, 1.f, 2.25f, 0.65f, kInf, kDefaultLeft, 0.7f, -1, -1, 0, kStrikeHeavySweep, 0.1633f, 0.0667f, 0.3f, 0.2167f},
+    {"heavy_attack_left", "m_gh_heavy_left", 0.2f, 1.f, 2.25f, 0.65f, kInf, kDefaultLeft, 0.7f, -1, -1, 0, kStrikeHeavySweep, 0.3f, 0.2f, 0.3f, 0.35f},
     {"heavy_attack_right", "m_gh_heavy_right", 0.2f, 1.f, 2.25f, 0.65f, kInf, kDefault, 0.7f, -1, -1, 0, kStrikeHeavySweep, 0.35f, 0.2333f, 0.3f, 0.4167f},
     {"(unused)", "m_gh_heavy_left", 0.2f, 1.f, 2.25f, 0.65f, kInf, kDefaultLeft, 0.7f, -1, -1, 0, kStrikeHeavySweep, 0.3f, 0.2f, 0.3f, 0.35f},
     {"push", "m_gh_push", 0.0f, 1.f, 0.8f, 0.3f, kInf, kDefault, 0.45f, -1, -1, 0, kStrikeBash, 0.05f, 0.0333f},
@@ -275,8 +276,8 @@ const Def kHbDef[kActs] = {
     {"default_right", "m_hb_charge_r", 0.5f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy2, 0.5f, -1, 0, 0},
     {"default_light_3", "m_hb_charge_l", 0.5f, 1.f, 0.f, 0, 0, -1, 0, kLight3, kHeavy1, 0.5f, -1, 0, 0},
     {"(unused)", "m_hb_charge", 0.5f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy3, 0.5f, -1, 0, 0},
-    {"light_swing_left", "m_hb_light_left", 0.2f, 1.f, 1.35f, 0.55f, 1.125f, kDefaultLeft, 0.5f, -1, -1, 0, kStrikeStab, 0.15f, 0.06f, 0.15f, 0.22f},
-    {"light_swing_right", "m_hb_light_mid", 0.2f, 1.f, 1.35f, 0.55f, kInf, kDefault, 0.5f, -1, -1, 0, kStrikeStab, 0.15f, 0.06f, 0.15f, 0.22f},
+    {"light_stab_left", "m_hb_light_left", 0.2f, 0.68f, 1.22f, 0.425f, 1.125f, kDefaultLeft, 0.425f, -1, -1, 0, kStrikeStab, 0.3f, 0.19f, 0.2f, 0.3f},
+    {"light_stab_mid", "m_hb_light_mid", 0.2f, 0.8f, 1.17f, 0.45f, kInf, kDefaultLeftHeavy, 0.f, -1, -1, 0, kStrikeStab, 0.18f, 0.0432f, 0.f, 0.1667f},
     {"light_stab_long", "m_hb_light_long", 0.2f, 0.84f, 1.5f, 0.55f, kInf, kDefault, 0.5f, -1, -1, 0, kStrikeStab, 0.26f, 0.12f, 0.15f, 0.2333f},
     {"heavy_swing_left", "m_hb_heavy_l", 0.2f, 1.f, 2.0f, 0.55f, kInf, kDefaultRight, 0.5f, -1, -1, 0, kStrikeHeavySweep, 0.15f, 0.06f, 0.15f, 0.22f},
     {"heavy_swing_right", "m_hb_heavy_r", 0.2f, 1.f, 2.0f, 0.55f, kInf, kDefault, 0.5f, -1, -1, 0, kStrikeHeavySweep, 0.15f, 0.06f, 0.15f, 0.22f},
@@ -294,13 +295,7 @@ const Impact kHbImpact[kActs] = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1
                                  {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash},
                                  {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash}, {kSfxHitSlash, kSfxTailSlash},
                                  {kSfxHitBash, -1}, {kSfxHitSlash, kSfxTailSlash}, {-1, -1}};
-struct HbLive {
-    Def d[kActs];
-    HbLive() {
-        for (int i = 0; i < kActs; ++i) d[i] = kHbDef[i];
-    }
-} g_hbLive;
-const Moveset kHalberd = {"m_hb_light_left", g_hbLive.d, kHbExit, static_cast<int>(sizeof kHbExit / sizeof *kHbExit), kHbImpact,
+const Moveset kHalberd = {"m_hb_light_left", kHbDef, kHbExit, static_cast<int>(sizeof kHbExit / sizeof *kHbExit), kHbImpact,
                           0.25f, 0.8f, 1.5f, nullptr, 0.2f};
 const Def kSp2Def[kActs] = {
     {"idle", "idle", 0.2f, 1.f, 0.f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
@@ -331,38 +326,36 @@ const Impact kSp2Impact[kActs] = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -
                                   {kSfxHitBash, -1}, {kSfxHitSlash, kSfxTailSlash}, {-1, -1}};
 const Moveset kSpear2 = {"m_sp_thrust", kSp2Def, kSp2Exit, static_cast<int>(sizeof kSp2Exit / sizeof *kSp2Exit), kSp2Impact,
                          0.2f, 0.8f, 1.0f, nullptr, 0.2f, 0.3f, nullptr, 0.2f, 1, 0.30f};
-void HbLiveRefresh() {
-    static const void* last = nullptr;
-    static float lt = -9.f, le = -9.f, ls = -9.f, lw = -9.f;
-    const auto& st = Wp().set;
-    float wsum = 0.f;
-    for (int i = 0; i < 8; ++i) wsum += st.meleeLight1Times[i] * (i + 1) + st.meleeLight2Times[i] * (i + 11);
-    if (last == &Wp() && lt == st.meleeLightTrim && le == st.meleeLightEnter && ls == st.meleeLightScale && lw == wsum) return;
-    last = &Wp(), lt = st.meleeLightTrim, le = st.meleeLightEnter, ls = st.meleeLightScale, lw = wsum;
-    for (int i = 0; i < kActs; ++i) g_hbLive.d[i] = kHbDef[i];
-    for (int a : {static_cast<int>(kLight1), static_cast<int>(kLight2)}) {
-        Def& d = g_hbLive.d[a];
-        const float k = st.meleeLightTrim;
-        const float* tt = a == kLight1 ? st.meleeLight1Times : st.meleeLight2Times;
-        if (tt[0] >= 0.f) {
-            d.hitAt = tt[0], d.swingAt = tt[1], d.swingPeak = tt[2], d.chainStart = tt[3], d.blockFrom = tt[5], d.blockEarly = tt[6], d.total = tt[7];
-            if (tt[4] >= 0.f) d.chainEnd = tt[4];
-        } else if (k > 0.f) {
-            auto sh = [k](float& v, float lo) {
-                if (v < kInf) v = std::max(lo, v - k);
-            };
-            sh(d.total, 0.05f), sh(d.chainStart, 0.f), sh(d.chainEnd, 0.f), sh(d.blockFrom, 0.f), sh(d.hitAt, 0.f), sh(d.swingAt, 0.f);
-            if (d.blockEarly > 0.f) d.blockEarly = std::max(0.f, d.blockEarly - k);
-            if (d.swingPeak > 0.f) d.swingPeak = std::max(0.001f, d.swingPeak - k);
-        }
-        if (st.meleeLightEnter >= 0.f) d.enter = st.meleeLightEnter;
-        if (st.meleeLightScale > 0.f) d.scale = st.meleeLightScale;
-    }
-    if (g_log) g_log("melee: halberd lights trim %.3f s, enter %.3f s, scale %.3f", static_cast<double>(st.meleeLightTrim > 0.f ? st.meleeLightTrim : 0.f), static_cast<double>(g_hbLive.d[kLight1].enter), static_cast<double>(g_hbLive.d[kLight1].scale));
-}
+const Def kEsDef[kActs] = {
+    {"idle", "idle", 0.2f, 1.f, 0.f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
+    {"ready", "draw", 0.1f, 1.f, 0.5f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
+    {"default", "idle", 0.1f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.45f, -1, 0, 0},
+    {"default_left", "idle", 0.1f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.45f, -1, 0, 0},
+    {"default_right", "idle", 0.1f, 1.f, 0.f, 0, 0, -1, 0, kLight2, kHeavy1, 0.45f, -1, 0, 0},
+    {"(unused)", "idle", 0.1f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.45f, -1, 0, 0},
+    {"(unused)", "idle", 0.1f, 1.f, 0.f, 0, 0, -1, 0, kLight1, kHeavy1, 0.45f, -1, 0, 0},
+    {"melee_strike_1", "m_es_strike_1", 0.05f, 1.f, 1.133f, 0.833f, 1.133f, kDefaultRight, 0.833f, -1, -1, 0, kStrikeSweep, 0.167f, 0.f},
+    {"melee_strike_2", "m_es_strike_2", 0.05f, 1.f, 1.133f, 0.833f, 1.133f, kDefaultLeft, 0.833f, -1, -1, 0, kStrikeSweep, 0.167f, 0.f},
+    {"(unused)", "m_es_strike_1", 0.05f, 1.f, 1.133f, 0.833f, 1.133f, kDefaultRight, 0.833f, -1, -1, 0, kStrikeSweep, 0.167f, 0.f},
+    {"melee_lunge_unaimed", "m_es_lunge", 0.05f, 1.f, 1.267f, 0.833f, 1.267f, kDefault, 0.833f, -1, -1, 0, kStrikeHeavy, 0.167f, 0.f},
+    {"(unused)", "m_es_lunge", 0.05f, 1.f, 1.267f, 0.833f, 1.267f, kDefault, 0.833f, -1, -1, 0, kStrikeHeavy, 0.167f, 0.f},
+    {"(unused)", "m_es_lunge", 0.05f, 1.f, 1.267f, 0.833f, 1.267f, kDefault, 0.833f, -1, -1, 0, kStrikeHeavy, 0.167f, 0.f},
+    {"melee_clang", "m_es_clang", 0.05f, 1.f, 1.233f, 1.1f, kInf, kDefault, 1.1f, -1, -1, 0, kStrikeBash, 0.1f, 0.f},
+    {"(unused)", "m_es_strike_1", 0.05f, 1.f, 1.133f, 0.833f, 1.133f, kDefaultRight, 0.833f, -1, -1, 0, kStrikeSweep, 0.167f, 0.f},
+    {"block", "m_es_parry_pose", 0.05f, 1.f, 0.f, 0, 0, -1, 0, -1, -1, 0, -1, 0, 0},
+};
+const Exit kEsExit[] = {{"draw", "idle", 0.2f}, {"m_es_strike_1", "idle", 0.2f}, {"m_es_strike_2", "idle", 0.2f}, {"m_es_lunge", "idle", 0.2f},
+                        {"m_es_clang", "idle", 0.2f}, {"m_es_parry_end", "idle", 0.1f}};
+const Impact kEsImpact[kActs] = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
+                                 {kSfxHitSlash, -1}, {kSfxHitSlash, -1}, {kSfxHitSlash, -1},
+                                 {kSfxHitStab, -1}, {kSfxHitStab, -1}, {kSfxHitStab, -1},
+                                 {kSfxHitBash, -1}, {kSfxHitSlash, -1}, {-1, -1}};
+const Moveset kEnergySword = {"m_es_strike_1", kEsDef, kEsExit, static_cast<int>(sizeof kEsExit / sizeof *kEsExit), kEsImpact,
+                              0.4f, 0.8f, 0.6f, "m_es_parry_end", 0.05f};
 const Moveset& Ms() {
     if (Wp().rend.FindClip(kSpear2.detect) >= 0) return kSpear2;
-    if (Wp().rend.FindClip(kHalberd.detect) >= 0) return HbLiveRefresh(), kHalberd;
+    if (Wp().rend.FindClip(kEnergySword.detect) >= 0) return kEnergySword;
+    if (Wp().rend.FindClip(kHalberd.detect) >= 0) return kHalberd;
     if (Wp().rend.FindClip(kGreathammer.detect) >= 0) return kGreathammer;
     return Wp().rend.FindClip(kGreatsword.detect) >= 0 ? kGreatsword : kSpear;
 }
@@ -649,6 +642,11 @@ void MeleeStep(vm::Look& l, double now) {
         g.start = now;
         g.pending = false;
         ClearSwings();
+        if (&Ms() == &kEnergySword && Wp().spinLoop.Loaded()) {
+            Wp().spinLoop.FadeAll();
+            Wp().spinLoop.Play(Wp().set.spinVolume, true);
+            if (g_log) g_log("melee: energy sword hum loop on (volume %.2f)", Wp().set.spinVolume);
+        }
         for (HitRec& h : g_hitQ) h.on = false;
     }
     if (InterlockedExchange(&g_reqDraw, 0)) {
