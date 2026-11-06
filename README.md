@@ -9,8 +9,8 @@ DLL core source of the Total War: WARHAMMER III first-person mod **Tenzin's Warh
 ## 版权 / Copyright
 
 © 2026 TenzinDann. **保留所有权利 / All rights reserved.**
-本仓库只供查看，没有授予任何许可：未经作者书面许可，不得复制、修改、编译、再发布本代码或其衍生品
-This repository is published for viewing only. No license is granted: you may not copy, modify, build, redistribute.
+未经许可，不得复制、修改、编译、再发布本代码或其衍生品
+If no license is granted, you may not copy, modify, build, redistribute.
 
 ## 内容 / Contents
 
